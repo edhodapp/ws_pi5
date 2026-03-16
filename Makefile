@@ -11,7 +11,7 @@ BUILD   = build
 KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o
 
 # Test kernel objects
-TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o
+TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o
 
 .PHONY: all test clean
 
@@ -74,6 +74,9 @@ $(BUILD)/usb_enum.o: lib/usb_enum.S include/dwc2.inc include/usb.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_usb_enum.o: tests/test_usb_enum.S include/dwc2.inc include/usb.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_usb_fail.o: tests/test_usb_fail.S include/dwc2.inc include/usb.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD):

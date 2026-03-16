@@ -16,6 +16,7 @@
 
 .global test_dwc2
 .global test_dwc2_timeout
+.global test_dwc2_mbox_fail
 
 .section .text
 
@@ -80,6 +81,54 @@ test_dwc2_timeout:
     ldp     x29, x30, [sp], #16
     ret
 
+/*
+ * test_dwc2_mbox_fail - Verify dwc2_init fails when mbox_call fails
+ *
+ * Overrides dwc2_mbox_call_fn with a fake that returns 1.
+ * Calls dwc2_init(x0=0). Verifies it returns 1.
+ * Restores the original pointer afterward.
+ */
+test_dwc2_mbox_fail:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    /* Save original function pointer */
+    ldr     x19, =dwc2_mbox_call_fn
+    ldr     x20, [x19]
+
+    /* Install fake */
+    ldr     x0, =fake_mbox_fail
+    str     x0, [x19]
+
+    /* Call dwc2_init with base=0 (never reaches MMIO) */
+    mov     x0, #0
+    bl      dwc2_init
+
+    /* Restore original pointer */
+    str     x20, [x19]
+
+    /* Expect w0 == 1 */
+    cmp     w0, #1
+    b.ne    .Lfail_mbox
+
+    ldr     x0, =name_dwc2_mbox_fail
+    bl      test_pass
+    b       .Ldone_mbox
+
+.Lfail_mbox:
+    ldr     x0, =name_dwc2_mbox_fail_bad
+    bl      test_fail
+
+.Ldone_mbox:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+fake_mbox_fail:
+    mov     w0, #1
+    ret
+
 /* Fake DWC2 register block — zeroed by BSS init, large enough for HPRT at 0x440 */
 .section .bss
 .balign 8
@@ -92,3 +141,5 @@ name_dwc2_init_fail:     .asciz "dwc2_init_returned_error"
 name_dwc2_no_connect:    .asciz "dwc2_hprt_no_connect"
 name_dwc2_timeout:       .asciz "dwc2_port_init_timeout"
 name_dwc2_timeout_fail:  .asciz "dwc2_port_init_timeout_expected_failure"
+name_dwc2_mbox_fail:     .asciz "dwc2_mbox_call_fail"
+name_dwc2_mbox_fail_bad: .asciz "dwc2_mbox_fail_expected_error"

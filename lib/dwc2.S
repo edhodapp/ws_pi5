@@ -55,7 +55,9 @@ dwc2_init:
 
     mov     w1, #MBOX_CH_PROP
     ldr     x2, =MBOX_BASE
-    bl      mbox_call
+    ldr     x5, =dwc2_mbox_call_fn
+    ldr     x5, [x5]
+    blr     x5
     cbnz    w0, .Linit_fail
 
     /* --- Step 2: Core soft reset --- */
@@ -279,8 +281,13 @@ dwc2_channel_xfer:
     mov     w0, w4
     ret
 
-/* 16-byte aligned mailbox buffer for USB power-on */
+/* Function pointer for mbox_call — overridable for testing */
 .section .data
+.balign 8
+.global dwc2_mbox_call_fn
+dwc2_mbox_call_fn: .quad mbox_call
+
+/* 16-byte aligned mailbox buffer for USB power-on */
 .balign 16
 dwc2_mbox_buf:
     .space 32

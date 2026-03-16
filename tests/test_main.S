@@ -37,6 +37,12 @@ _start:
     bl      test_dwc2
     bl      test_dwc2_timeout
     bl      test_usb_enum
+    bl      test_dwc2_mbox_fail
+    bl      test_usb_xfer_setup_fail
+    bl      test_usb_xfer_data_fail
+    bl      test_usb_xfer_status_fail
+    bl      test_usb_enum_set_addr_fail
+    bl      test_usb_enum_get_full_fail
 
     /* === Print summary === */
     ldr     x0, =fail_count

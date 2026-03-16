@@ -55,7 +55,9 @@ usb_control_xfer:
 
     mov     x0, x20
     mov     x3, x23                 /* DMA addr = setup packet */
-    bl      dwc2_channel_xfer
+    ldr     x5, =usb_channel_xfer_fn
+    ldr     x5, [x5]
+    blr     x5
 
     tst     w0, #HCINT_XFERCOMP
     b.eq    .Lctl_fail
@@ -81,7 +83,9 @@ usb_control_xfer:
 
     mov     x0, x20
     mov     x3, x24                 /* DMA addr = data buffer */
-    bl      dwc2_channel_xfer
+    ldr     x5, =usb_channel_xfer_fn
+    ldr     x5, [x5]
+    blr     x5
 
     tst     w0, #HCINT_XFERCOMP
     b.eq    .Lctl_fail
@@ -112,7 +116,9 @@ usb_control_xfer:
 
     mov     x0, x20
     ldr     x3, =usb_status_buf    /* DMA needs a valid address */
-    bl      dwc2_channel_xfer
+    ldr     x5, =usb_channel_xfer_fn
+    ldr     x5, [x5]
+    blr     x5
 
     tst     w0, #HCINT_XFERCOMP
     b.eq    .Lctl_fail
@@ -222,8 +228,13 @@ setup_get_dev18:
     /* GET_DESCRIPTOR, device, 18 bytes */
     .byte   0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00
 
-/* Writable buffer for STATUS phase DMA (zero-length transfers) */
+/* Function pointer for dwc2_channel_xfer — overridable for testing */
 .section .data
+.balign 8
+.global usb_channel_xfer_fn
+usb_channel_xfer_fn: .quad dwc2_channel_xfer
+
+/* Writable buffer for STATUS phase DMA (zero-length transfers) */
 .balign 4
 usb_status_buf:
     .space 8
