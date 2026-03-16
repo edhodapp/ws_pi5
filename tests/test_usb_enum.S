@@ -19,6 +19,7 @@ test_usb_enum:
     mov     x29, sp
 
     /* Initialize DWC2 (already tested, but needed for USB state) */
+    ldr     x0, =DWC2_BASE
     bl      dwc2_init
     cbnz    w0, .Lfail_init
 

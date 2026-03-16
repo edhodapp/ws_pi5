@@ -9,6 +9,7 @@
  *
  * x0: physical address of 16-byte-aligned tag buffer
  * w1: channel number (typically MBOX_CH_PROP = 8)
+ * x2: mailbox base address (MBOX_BASE)
  *
  * Returns:
  *   w0: 0 on success (buffer code has response-ok bit set)
@@ -20,11 +21,11 @@
  * Clobbers: x0-x5
  */
 mbox_call:
+    mov     x3, x2                  /* x3 = mbox base */
+
     /* Combine buffer address with channel in low 4 bits */
     and     w2, w1, #0xF
     orr     x2, x0, x2             /* x2 = buffer | channel */
-
-    ldr     x3, =MBOX_BASE
 
     /* Poll until mailbox is not full */
 .Lmbox_write_wait:

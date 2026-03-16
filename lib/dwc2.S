@@ -2,12 +2,15 @@
 .include "dwc2.inc"
 
 .global dwc2_init
+.global dwc2_port_init
 .global dwc2_channel_xfer
 
 .section .text
 
 /*
  * dwc2_init - Initialize the DWC2 USB host controller
+ *
+ * x0: DWC2 base address
  *
  * Sequence:
  *   1. Power on USB via VideoCore mailbox
@@ -30,7 +33,7 @@ dwc2_init:
     stp     x19, x20, [sp, #16]
     mov     x29, sp
 
-    ldr     x19, =DWC2_BASE
+    mov     x19, x0                 /* x19 = DWC2 base address */
 
     /* --- Step 1: Power on USB via mailbox --- */
     ldr     x0, =dwc2_mbox_buf
@@ -51,6 +54,7 @@ dwc2_init:
     str     wzr, [x0, #28]          /* end tag */
 
     mov     w1, #MBOX_CH_PROP
+    ldr     x2, =MBOX_BASE
     bl      mbox_call
     cbnz    w0, .Linit_fail
 
@@ -135,6 +139,31 @@ dwc2_init:
     ldr     w0, [x19, #DWC2_GRSTCTL]
     tbnz    w0, #4, .Lwait_rxflush
 
+    /* Fall through to port init */
+    b       .Lport_init_entry
+
+/*
+ * dwc2_port_init - Port power, connect wait, and reset (steps 6-8)
+ *
+ * x0: DWC2 base address
+ *
+ * Callable independently for testing with fake register blocks.
+ * Expects caller to set up x29/x30/x19/x20 frame if called directly,
+ * or use the standalone entry point below.
+ *
+ * Returns:
+ *   w0: 0 on success (port connected after reset)
+ *   w0: 1 on failure (connect timeout)
+ *
+ * Clobbers: x0-x1, x19-x20 saved/restored
+ */
+dwc2_port_init:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+    mov     x19, x0
+
+.Lport_init_entry:
     /* --- Step 6: Power the root port --- */
     ldr     w0, [x19, #DWC2_HPRT]
     mov     w1, #HPRT_W1C_MASK

@@ -39,6 +39,7 @@ test_mailbox:
 
     /* Call mailbox on property channel */
     mov     w1, #MBOX_CH_PROP
+    ldr     x2, =MBOX_BASE
     bl      mbox_call
 
     /* Test 1: mbox_call returned success (w0 == 0) */
