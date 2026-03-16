@@ -1,3 +1,31 @@
+# Ways of Working
+
+## Assembly Philosophy
+- Don't write "C in assembly" — a strong optimizing compiler will always win at that.
+- Map ISA abstractions directly to the problem using techniques that can't be easily expressed in HLLs.
+- Think in the ISA's primitives, not in translated C.
+
+## Testability
+- When writing functions with failure paths, discuss whether those paths are reachable under test.
+- If not reachable, discuss the cost of making them testable (e.g., parameterizing MMIO base addresses instead of hardcoded constants, so tests can point at fake register blocks in RAM).
+- Failure handling code that is never tested is a liability — it can generate new errors when it finally runs.
+- Prefer passing base addresses as parameters over hardcoded constants — enables dependency injection at the ISA level.
+
+## Git Workflow
+- Trunk-based development: commit directly to `main`, push after each group of changes.
+- Commit after every group of code changes. Don't wait to be asked.
+
+## GNU as Gotchas (AArch64)
+- Use `.include "file"` NOT `#include "file"` — GNU as doesn't run the C preprocessor.
+- `.equ` symbols can't use `|` (bitwise OR) with other `.equ` symbols — pre-compute combined values as hex literals.
+- Linker warning about RWX LOAD segment is expected for simple bare-metal projects.
+
+## QEMU Gotchas
+- Don't use `timeout` to kill QEMU — it won't flush `-serial file:` output. Instead, run QEMU in background and poll the output file, then `kill` cleanly.
+- `-serial mon:stdio` doesn't work reliably when stdout is redirected. Use `-serial file:<path>` instead.
+
+---
+
 # Project: Bare-Metal AArch64 Raspberry Pi 3
 
 ## Overview
