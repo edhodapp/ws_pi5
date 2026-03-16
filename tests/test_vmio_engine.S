@@ -15,6 +15,7 @@ test_vmio_engine:
     bl      test_engine_init
     bl      test_engine_step_idle
     bl      test_engine_step_no_trans
+    bl      test_engine_step_oob
     bl      test_engine_step_one
     bl      test_engine_multi_step
 
@@ -221,6 +222,44 @@ test_engine_step_no_trans:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ---- test_engine_step_oob ---- */
+test_engine_step_oob:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      teng_setup
+
+    /* Init engine: n_events=2 */
+    ldr     x0, =teng_engine
+    mov     w1, #0
+    mov     w2, #3
+    mov     w3, #2
+    ldr     x4, =teng_table
+    ldr     x5, =teng_hi_queue
+    ldr     x6, =teng_lo_queue
+    ldr     x7, =teng_flag
+    bl      vmio_engine_init
+
+    /* Enqueue event with code=2 (out of bounds for n_events=2) */
+    mov     w0, #2
+    bl      teng_enqueue_lo
+
+    /* Step — should return STEP_NO_TRANS via b.hs */
+    ldr     x0, =teng_engine
+    bl      vmio_engine_step
+    cmn     w0, #1
+    b.ne    .Lfail_esoob
+
+    ldr     x0, =name_esoob
+    bl      test_pass
+    b       .Ldone_esoob
+.Lfail_esoob:
+    ldr     x0, =name_esoob
+    bl      test_fail
+.Ldone_esoob:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* ---- test_engine_step_one ---- */
 test_engine_step_one:
     stp     x29, x30, [sp, #-16]!
@@ -368,5 +407,6 @@ teng_flag:      .skip 4
 name_einit:     .asciz "engine_init"
 name_esidle:    .asciz "engine_step_idle"
 name_esnt:      .asciz "engine_step_no_trans"
+name_esoob:     .asciz "engine_step_oob"
 name_es1:       .asciz "engine_step_one"
 name_esm:       .asciz "engine_multi_step"

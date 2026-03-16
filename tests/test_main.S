@@ -34,6 +34,7 @@ _start:
     bl      test_vmio_queue
     bl      test_vmio_engine
     bl      test_mailbox
+    bl      test_mbox_response_fail
     bl      test_dwc2
     bl      test_dwc2_timeout
     bl      test_usb_enum

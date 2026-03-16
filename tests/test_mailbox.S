@@ -10,6 +10,7 @@
 .include "mailbox.inc"
 
 .global test_mailbox
+.global test_mbox_response_fail
 
 .section .text
 
@@ -67,13 +68,78 @@ test_mailbox:
     ldp     x29, x30, [sp], #16
     ret
 
+/*
+ * test_mbox_response_fail - Verify mbox_call returns 1 when response lacks bit 31
+ *
+ * Uses a fake mailbox register block in RAM:
+ *   - STATUS (offset 0x18) = 0 (not full, not empty)
+ *   - READ (offset 0x00) = buf_addr | channel
+ * The tag buffer's response code at [buf+4] is left as 0 (no success bit).
+ * Expects mbox_call to return 1 (failure).
+ */
+test_mbox_response_fail:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    /* Zero the fake mbox register block (0x24 bytes covers READ..WRITE) */
+    ldr     x0, =fake_mbox_regs
+    stp     xzr, xzr, [x0]
+    stp     xzr, xzr, [x0, #16]
+    str     xzr, [x0, #32]
+
+    /* Set up tag buffer: leave [buf+4] = 0 (no response bit) */
+    ldr     x3, =mbox_fail_buf
+    mov     w1, #32
+    str     w1, [x3]                /* buffer size */
+    str     wzr, [x3, #4]          /* response code = 0 (no bit 31) */
+
+    /* Pre-store READ value: buf_addr | channel */
+    mov     w1, #MBOX_CH_PROP
+    orr     x1, x3, x1
+    ldr     x0, =fake_mbox_regs
+    str     w1, [x0, #MBOX_READ]
+
+    /* Call mbox_call(buf, channel, fake_mbox_base) */
+    mov     x0, x3
+    mov     w1, #MBOX_CH_PROP
+    ldr     x2, =fake_mbox_regs
+    bl      mbox_call
+
+    /* Expect w0 == 1 (failure) */
+    cmp     w0, #1
+    b.ne    .Lfail_resp
+
+    ldr     x0, =name_mbox_resp_fail_test
+    bl      test_pass
+    b       .Ldone_resp
+
+.Lfail_resp:
+    ldr     x0, =name_mbox_resp_fail_bad
+    bl      test_fail
+
+.Ldone_resp:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* 16-byte aligned mailbox buffer in .data */
 .section .data
 .balign 16
 mbox_buf:
     .space 32
 
+.balign 16
+mbox_fail_buf:
+    .space 32
+
+/* Fake mailbox register block — needs 0x24 bytes (READ at 0x00, STATUS at 0x18, WRITE at 0x20) */
+.section .bss
+.balign 8
+fake_mbox_regs:
+    .space 0x28
+
 .section .rodata
-name_mbox_call:       .asciz "mbox_get_board_rev"
-name_mbox_call_fail:  .asciz "mbox_call_returned_error"
-name_mbox_resp_fail:  .asciz "mbox_tag_response_bit_not_set"
+name_mbox_call:            .asciz "mbox_get_board_rev"
+name_mbox_call_fail:       .asciz "mbox_call_returned_error"
+name_mbox_resp_fail:       .asciz "mbox_tag_response_bit_not_set"
+name_mbox_resp_fail_test:  .asciz "mbox_response_fail"
+name_mbox_resp_fail_bad:   .asciz "mbox_response_fail_expected_error"
