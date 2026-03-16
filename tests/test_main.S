@@ -33,6 +33,7 @@ _start:
     bl      test_example
     bl      test_vmio_queue
     bl      test_vmio_engine
+    bl      test_mailbox
 
     /* === Print summary === */
     ldr     x0, =fail_count
