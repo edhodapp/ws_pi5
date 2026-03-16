@@ -48,6 +48,10 @@ _start:
     bl      test_parse_no_bulk
     bl      test_parse_zero_blength
     bl      test_get_config_desc
+    bl      test_parse_overrun
+    bl      test_gcd_pass1_fail
+    bl      test_gcd_pass2_fail
+    bl      test_gcd_clamp
 
     /* === Print summary === */
     ldr     x0, =fail_count

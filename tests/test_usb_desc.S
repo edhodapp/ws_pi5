@@ -6,6 +6,10 @@
  *   2. test_parse_no_bulk — descriptor chain with only interrupt endpoints → returns 1
  *   3. test_parse_zero_blength — bLength=0 terminates without hanging → returns 1
  *   4. test_get_config_desc — two-pass GET_DESCRIPTOR via counter-based fake xfer
+ *   5. test_parse_overrun — last descriptor's bLength extends past total_len → returns 1
+ *   6. test_gcd_pass1_fail — first usb_control_xfer fails → returns 1
+ *   7. test_gcd_pass2_fail — second usb_control_xfer fails → returns 1
+ *   8. test_gcd_clamp — wTotalLength > buf_len → clamped, still succeeds
  */
 
 .include "dwc2.inc"
@@ -16,6 +20,10 @@
 .global test_parse_no_bulk
 .global test_parse_zero_blength
 .global test_get_config_desc
+.global test_parse_overrun
+.global test_gcd_pass1_fail
+.global test_gcd_pass2_fail
+.global test_gcd_clamp
 
 .section .text
 
@@ -200,6 +208,233 @@ test_get_config_desc:
     ret
 
 /* ========================================================================
+ * test_parse_overrun — last descriptor's bLength extends past total_len
+ * ======================================================================== */
+test_parse_overrun:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    /* Use fake_cfg_desc (32 bytes) but pass total_len=30, so the last
+       endpoint descriptor (offset 25, bLength=7, 25+7=32 > 30) overruns */
+    ldr     x0, =fake_cfg_desc
+    mov     w1, #30
+    ldr     x2, =bulk_result
+    bl      usb_parse_bulk_eps
+
+    /* Should return 1 — only found the OUT endpoint before overrun stopped parsing */
+    cmp     w0, #1
+    b.ne    .Lfail_overrun
+
+    ldr     x0, =name_overrun
+    bl      test_pass
+    b       .Ldone_overrun
+
+.Lfail_overrun:
+    ldr     x0, =name_overrun
+    bl      test_fail
+
+.Ldone_overrun:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_gcd_pass1_fail — first usb_control_xfer fails → returns 1
+ * ======================================================================== */
+test_gcd_pass1_fail:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    ldr     x19, =usb_channel_xfer_fn
+    ldr     x20, [x19]
+
+    /* Reset counter, set fail at call 1 (SETUP phase of pass 1) */
+    ldr     x0, =gcd_fail_call_count
+    str     wzr, [x0]
+    ldr     x0, =gcd_fail_at
+    mov     w1, #1
+    str     w1, [x0]
+
+    ldr     x0, =fake_gcd_fail_xfer
+    str     x0, [x19]
+
+    mov     x0, #0
+    mov     w1, #1
+    mov     w2, #64
+    ldr     x3, =gcd_recv_buf
+    mov     w4, #64
+    bl      usb_get_config_desc
+
+    str     x20, [x19]
+
+    cmp     w0, #1
+    b.ne    .Lfail_p1
+
+    ldr     x0, =name_p1_fail
+    bl      test_pass
+    b       .Ldone_p1
+
+.Lfail_p1:
+    ldr     x0, =name_p1_fail
+    bl      test_fail
+
+.Ldone_p1:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_gcd_pass2_fail — second usb_control_xfer fails → returns 1
+ * ======================================================================== */
+test_gcd_pass2_fail:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    ldr     x19, =usb_channel_xfer_fn
+    ldr     x20, [x19]
+
+    /* Reset counter, set fail at call 4 (SETUP phase of pass 2) */
+    ldr     x0, =gcd_fail_call_count
+    str     wzr, [x0]
+    ldr     x0, =gcd_fail_at
+    mov     w1, #4
+    str     w1, [x0]
+
+    ldr     x0, =fake_gcd_fail_xfer
+    str     x0, [x19]
+
+    mov     x0, #0
+    mov     w1, #1
+    mov     w2, #64
+    ldr     x3, =gcd_recv_buf
+    mov     w4, #64
+    bl      usb_get_config_desc
+
+    str     x20, [x19]
+
+    cmp     w0, #1
+    b.ne    .Lfail_p2
+
+    ldr     x0, =name_p2_fail
+    bl      test_pass
+    b       .Ldone_p2
+
+.Lfail_p2:
+    ldr     x0, =name_p2_fail
+    bl      test_fail
+
+.Ldone_p2:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_gcd_clamp — wTotalLength (32) > buf_len (16) → clamped read succeeds
+ * ======================================================================== */
+test_gcd_clamp:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    ldr     x19, =usb_channel_xfer_fn
+    ldr     x20, [x19]
+
+    ldr     x0, =gcd_xfer_call_count
+    str     wzr, [x0]
+
+    ldr     x0, =fake_gcd_xfer
+    str     x0, [x19]
+
+    /* Clear receive buffer */
+    ldr     x0, =gcd_recv_buf
+    mov     w1, #64
+1:  strb    wzr, [x0], #1
+    subs    w1, w1, #1
+    b.ne    1b
+
+    /* buf_len=16, but wTotalLength in descriptor is 32 → should clamp to 16 */
+    mov     x0, #0
+    mov     w1, #1
+    mov     w2, #64
+    ldr     x3, =gcd_recv_buf
+    mov     w4, #16
+    bl      usb_get_config_desc
+
+    str     x20, [x19]
+
+    /* Should succeed */
+    cbnz    w0, .Lfail_clamp
+
+    /* usb_cfg_total_len should still report the real wTotalLength=32 */
+    ldr     x0, =usb_cfg_total_len
+    ldrh    w1, [x0]
+    cmp     w1, #32
+    b.ne    .Lfail_clamp
+
+    ldr     x0, =name_clamp
+    bl      test_pass
+    b       .Ldone_clamp
+
+.Lfail_clamp:
+    ldr     x0, =name_clamp
+    bl      test_fail
+
+.Ldone_clamp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * fake_gcd_fail_xfer - Counter-based fake that fails at a configurable call
+ *
+ * Like fake_gcd_xfer but also writes the 9-byte config header on call 2
+ * (needed so pass 1 can succeed when we want to fail pass 2).
+ * ======================================================================== */
+fake_gcd_fail_xfer:
+    ldr     x9, =gcd_fail_call_count
+    ldr     w10, [x9]
+    add     w10, w10, #1
+    str     w10, [x9]
+
+    ldr     x9, =gcd_fail_at
+    ldr     w11, [x9]
+    cmp     w10, w11
+    b.eq    .Lfgf_fail
+
+    /* Call 2: write config header so pass 1 can extract wTotalLength */
+    cmp     w10, #2
+    b.eq    .Lfgf_hdr
+
+    mov     w0, #(HCINT_XFERCOMP | HCINT_CHHLTD)
+    ret
+
+.Lfgf_hdr:
+    ldr     x9, =fake_cfg_desc
+    ldrb    w10, [x9, #0]
+    strb    w10, [x3, #0]
+    ldrb    w10, [x9, #1]
+    strb    w10, [x3, #1]
+    ldrh    w10, [x9, #2]
+    strh    w10, [x3, #2]
+    ldrb    w10, [x9, #4]
+    strb    w10, [x3, #4]
+    ldrb    w10, [x9, #5]
+    strb    w10, [x3, #5]
+    ldrb    w10, [x9, #6]
+    strb    w10, [x3, #6]
+    ldrb    w10, [x9, #7]
+    strb    w10, [x3, #7]
+    ldrb    w10, [x9, #8]
+    strb    w10, [x3, #8]
+    mov     w0, #(HCINT_XFERCOMP | HCINT_CHHLTD)
+    ret
+
+.Lfgf_fail:
+    mov     w0, #HCINT_CHHLTD
+    ret
+
+/* ========================================================================
  * fake_gcd_xfer - Counter-based fake for test_get_config_desc
  *
  * usb_control_xfer makes 3 calls per transfer (SETUP, DATA, STATUS).
@@ -329,6 +564,13 @@ bulk_result:
 gcd_xfer_call_count:
     .word   0
 
+/* Counter and fail-at for fake_gcd_fail_xfer */
+.balign 4
+gcd_fail_call_count:
+    .word   0
+gcd_fail_at:
+    .word   0
+
 /* Receive buffer for test_get_config_desc */
 .balign 4
 gcd_recv_buf:
@@ -339,3 +581,7 @@ name_parse_bulk:    .asciz "parse_bulk_eps"
 name_no_bulk:       .asciz "parse_no_bulk"
 name_zero_blen:     .asciz "parse_zero_blength"
 name_gcd:           .asciz "get_config_desc"
+name_overrun:       .asciz "parse_overrun"
+name_p1_fail:       .asciz "gcd_pass1_fail"
+name_p2_fail:       .asciz "gcd_pass2_fail"
+name_clamp:         .asciz "gcd_clamp"
