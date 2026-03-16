@@ -31,6 +31,8 @@ _start:
 
     /* === Run test suites === */
     bl      test_example
+    bl      test_vmio_queue
+    bl      test_vmio_engine
 
     /* === Print summary === */
     ldr     x0, =fail_count

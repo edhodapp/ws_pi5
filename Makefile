@@ -8,10 +8,10 @@ LDFLAGS = -T linker.ld -nostdlib
 BUILD   = build
 
 # Main kernel objects
-KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/uart.o
+KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o
 
 # Test kernel objects
-TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/uart.o
+TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o
 
 .PHONY: all test clean
 
@@ -44,6 +44,18 @@ $(BUILD)/test_main.o: tests/test_main.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_example.o: tests/test_example.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/vmio_queue.o: lib/vmio_queue.S include/vmio.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/vmio_engine.o: lib/vmio_engine.S include/vmio.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_vmio_queue.o: tests/test_vmio_queue.S include/vmio.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_vmio_engine.o: tests/test_vmio_engine.S include/vmio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD):
