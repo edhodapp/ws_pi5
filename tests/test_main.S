@@ -35,6 +35,7 @@ _start:
     bl      test_vmio_engine
     bl      test_mailbox
     bl      test_dwc2
+    bl      test_usb_enum
 
     /* === Print summary === */
     ldr     x0, =fail_count
