@@ -32,8 +32,6 @@ Bare-metal ARM assembly project targeting Raspberry Pi 3 (AArch64). No OS — ru
 6. Commit
 
 ## Assembly Conventions
-- Use `.include "file.inc"` (not `#include`) — GNU as doesn't run the C preprocessor
-- Pre-compute compound `.equ` constants as hex literals (no `|` between `.equ` symbols)
 - `-I include/` is passed to the assembler for `.include` search path
 - Callee-saved registers: save/restore `x19-x28`, `x29` (FP), `x30` (LR) per AAPCS64
 - Use `.section .text._start` for the entry point so the linker places it first
