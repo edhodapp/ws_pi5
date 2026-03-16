@@ -23,6 +23,8 @@ qemu-system-aarch64 \
     -kernel "$TEST_KERNEL" \
     -nographic \
     -serial file:"$OUTFILE" \
+    -device usb-net,netdev=net0 \
+    -netdev user,id=net0 \
     >/dev/null 2>&1 &
 QEMU_PID=$!
 
