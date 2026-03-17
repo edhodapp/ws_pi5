@@ -76,6 +76,11 @@ _start:
     bl      test_arp_request_other_ip
     bl      test_arp_reply_ignored
     bl      test_arp_truncated
+    bl      test_ip_checksum
+    bl      test_ip_checksum_carry
+    bl      test_icmp_echo_reply
+    bl      test_icmp_not_echo
+    bl      test_icmp_short
 
     /* === Print summary === */
     ldr     x0, =fail_count

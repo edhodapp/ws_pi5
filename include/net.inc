@@ -31,6 +31,35 @@
 .equ ARP_OP_REQUEST,   1
 .equ ARP_OP_REPLY,     2
 
+/* IPv4 header offsets (relative to ETH_PAYLOAD) */
+.equ IP_VER_IHL,       0
+.equ IP_DSCP_ECN,      1
+.equ IP_TOTLEN,        2
+.equ IP_ID,            4
+.equ IP_FLAGS_FRAG,    6
+.equ IP_TTL,           8
+.equ IP_PROTO,         9
+.equ IP_CHECKSUM,      10
+.equ IP_SRC,           12
+.equ IP_DST,           16
+.equ IP_HDR_MIN,       20
+.equ IP_DEFAULT_TTL,   64
+
+/* IP protocol numbers */
+.equ IP_PROTO_ICMP,    1
+.equ IP_PROTO_TCP,     6
+.equ IP_PROTO_UDP,     17
+
+/* ICMP offsets (relative to IP payload, i.e., ETH_PAYLOAD + IP_HDR_MIN) */
+.equ ICMP_TYPE,        0
+.equ ICMP_CODE,        1
+.equ ICMP_CHECKSUM,    2
+.equ ICMP_ID,          4
+.equ ICMP_SEQ,         6
+.equ ICMP_HDR_LEN,     8
+.equ ICMP_ECHO_REQUEST, 8
+.equ ICMP_ECHO_REPLY,  0
+
 /* Static IP configuration (network byte order for zero-cost wire comparison) */
 .equ NET_IP_NBO,       0x0A00020F      /* 10.0.2.15 */
 .equ NET_GW_NBO,       0x0A000202      /* 10.0.2.2 */
