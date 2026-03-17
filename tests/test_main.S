@@ -64,6 +64,10 @@ _start:
     bl      test_ecm_activate_fail
     bl      test_ecm_send
     bl      test_ecm_recv
+    bl      test_main_success
+    bl      test_main_dwc2_fail
+    bl      test_main_ecm_init_fail
+    bl      test_main_ecm_activate_fail
 
     /* === Print summary === */
     ldr     x0, =fail_count
