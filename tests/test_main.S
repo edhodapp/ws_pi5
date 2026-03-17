@@ -86,6 +86,9 @@ _start:
     bl      test_ip_handle_bad_cksum
     bl      test_ip_handle_not_ours
     bl      test_ip_handle_unknown_proto
+    bl      test_ip_handle_bad_ver
+    bl      test_ip_handle_totlen_short
+    bl      test_ip_handle_totlen_overrun
 
     /* === Print summary === */
     ldr     x0, =fail_count
