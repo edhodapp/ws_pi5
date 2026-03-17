@@ -1,5 +1,6 @@
 .include "dwc2.inc"
 .include "cdc_ecm.inc"
+.include "net.inc"
 
 .section .text
 
@@ -56,10 +57,41 @@ main:
     ldp     x29, x30, [sp], #16
     ret
 
+/*
+ * net_loop — Infinite recv/dispatch/send loop
+ *
+ * Never returns. Called after main succeeds.
+ * Accesses ecm_state directly (file-local).
+ */
+.global net_loop
+net_loop:
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =rx_buf
+    mov     w3, #ETH_FRAME_MAX
+    bl      cdc_ecm_recv
+    cbnz    w0, net_loop            /* recv failed → retry */
+
+    ldr     x0, =rx_buf
+    mov     w1, #ETH_FRAME_MAX
+    bl      net_recv_one
+    cbz     w0, net_loop            /* no reply → loop */
+
+    mov     w3, w0                  /* w3 = reply_len */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =rx_buf
+    bl      cdc_ecm_send
+    b       net_loop
+
 .section .data
 .balign 16
 ecm_state:
     .space  ECM_SIZE
+
+.balign 16
+rx_buf:
+    .space  ETH_FRAME_MAX
 
 .section .rodata
 msg_hello:      .asciz "Hello from bare-metal Pi 3!\r\n"

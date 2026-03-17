@@ -89,6 +89,10 @@ _start:
     bl      test_ip_handle_bad_ver
     bl      test_ip_handle_totlen_short
     bl      test_ip_handle_totlen_overrun
+    bl      test_net_recv_arp
+    bl      test_net_recv_icmp
+    bl      test_net_recv_unknown
+    bl      test_net_recv_short
 
     /* === Print summary === */
     ldr     x0, =fail_count

@@ -23,7 +23,12 @@ _start:
 .Lbss_done:
 
     bl      main
+    cbz     w0, .Lnet_loop
 
 .Lpark:
     wfe
+    b       .Lpark
+
+.Lnet_loop:
+    bl      net_loop
     b       .Lpark
