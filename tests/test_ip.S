@@ -1,15 +1,27 @@
 /*
  * test_ip.S — Tests for IP checksum and IPv4 handler
  *
- * Commit 1 tests:
- *   1. test_ip_checksum       — Round-trip: compute, fill, verify returns 0
- *   2. test_ip_checksum_carry — 3-byte input forces carry folding + odd byte
+ * Checksum tests:
+ *   1. test_ip_checksum         — Round-trip: compute, fill, verify returns 0
+ *   2. test_ip_checksum_carry   — 3-byte input forces carry folding + odd byte
+ *
+ * ip_handle tests:
+ *   3. test_ip_handle_icmp      — Valid ICMP echo request → returns 42
+ *   4. test_ip_handle_short     — 33-byte frame → returns 0
+ *   5. test_ip_handle_bad_cksum — Corrupted IP checksum → returns 0
+ *   6. test_ip_handle_not_ours  — Dest IP = 10.0.2.99 → returns 0
+ *   7. test_ip_handle_unknown_proto — Protocol = UDP → returns 0
  */
 
 .include "net.inc"
 
 .global test_ip_checksum
 .global test_ip_checksum_carry
+.global test_ip_handle_icmp
+.global test_ip_handle_short
+.global test_ip_handle_bad_cksum
+.global test_ip_handle_not_ours
+.global test_ip_handle_unknown_proto
 
 .section .text
 
@@ -86,6 +98,139 @@ test_ip_checksum_carry:
     ret
 
 /* ========================================================================
+ * test_ip_handle_icmp — Valid ICMP echo request → returns 42
+ * ======================================================================== */
+test_ip_handle_icmp:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy 42-byte template to mutable buffer */
+    ldr     x0, =ip_icmp_template
+    ldr     x1, =ip_handle_buf
+    ldp     x2, x3, [x0]
+    stp     x2, x3, [x1]
+    ldp     x2, x3, [x0, #16]
+    stp     x2, x3, [x1, #16]
+    ldr     x2, [x0, #32]
+    str     x2, [x1, #32]
+    ldrh    w2, [x0, #40]
+    strh    w2, [x1, #40]
+
+    ldr     x0, =ip_handle_buf
+    mov     w1, #42
+    bl      ip_handle
+
+    cmp     w0, #42
+    b.ne    .Lfail_ip_icmp
+
+    ldr     x0, =name_ip_icmp
+    bl      test_pass
+    b       .Ldone_ip_icmp
+
+.Lfail_ip_icmp:
+    ldr     x0, =name_ip_icmp
+    bl      test_fail
+
+.Ldone_ip_icmp:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_short — 33-byte frame → returns 0
+ * ======================================================================== */
+test_ip_handle_short:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_icmp_template
+    mov     w1, #33
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_short
+
+    ldr     x0, =name_ip_short
+    bl      test_pass
+    b       .Ldone_ip_short
+
+.Lfail_ip_short:
+    ldr     x0, =name_ip_short
+    bl      test_fail
+
+.Ldone_ip_short:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_bad_cksum — Corrupted IP checksum → returns 0
+ * ======================================================================== */
+test_ip_handle_bad_cksum:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_bad_cksum_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_bad_cksum
+
+    ldr     x0, =name_ip_bad_cksum
+    bl      test_pass
+    b       .Ldone_ip_bad_cksum
+
+.Lfail_ip_bad_cksum:
+    ldr     x0, =name_ip_bad_cksum
+    bl      test_fail
+
+.Ldone_ip_bad_cksum:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_not_ours — Dest IP = 10.0.2.99 → returns 0
+ * ======================================================================== */
+test_ip_handle_not_ours:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_not_ours_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_not_ours
+
+    ldr     x0, =name_ip_not_ours
+    bl      test_pass
+    b       .Ldone_ip_not_ours
+
+.Lfail_ip_not_ours:
+    ldr     x0, =name_ip_not_ours
+    bl      test_fail
+
+.Ldone_ip_not_ours:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_unknown_proto — Protocol = UDP (17) → returns 0
+ * ======================================================================== */
+test_ip_handle_unknown_proto:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_udp_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_unknown
+
+    ldr     x0, =name_ip_unknown
+    bl      test_pass
+    b       .Ldone_ip_unknown
+
+.Lfail_ip_unknown:
+    ldr     x0, =name_ip_unknown
+    bl      test_fail
+
+.Ldone_ip_unknown:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -101,16 +246,88 @@ carry_test_data:
  */
 .balign 4
 ip_cksum_template:
-    .byte   0x45, 0x00, 0x00, 0x1C     /* ver/ihl, dscp, totlen */
-    .byte   0x12, 0x34, 0x00, 0x00     /* id, flags/frag */
-    .byte   0x40, 0x01, 0x00, 0x00     /* ttl=64, proto=ICMP, checksum=0 */
-    .byte   0x0A, 0x00, 0x02, 0x02     /* src: 10.0.2.2 */
-    .byte   0x0A, 0x00, 0x02, 0x0F     /* dst: 10.0.2.15 */
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x00, 0x00     /* checksum=0 */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+
+/*
+ * 42-byte ICMP echo request template (valid, for 10.0.2.15)
+ *
+ * Ethernet (14): dst=02:00:00:00:00:01 src=AA:BB:CC:DD:EE:FF type=0800
+ * IP (20):       ver/ihl=45 dscp=00 totlen=001C id=1234 flags=0000
+ *                ttl=40 proto=01 cksum=509D src=0A000202 dst=0A00020F
+ * ICMP (8):      type=08 code=00 cksum=F7FD id=0001 seq=0001
+ */
+.balign 4
+ip_icmp_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x50, 0x9D                   /* ttl=64, proto=ICMP, cksum */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD                   /* ICMP echo request */
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* Same frame but with corrupted IP checksum (0x519D instead of 0x509D) */
+.balign 4
+ip_bad_cksum_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x51, 0x9D                   /* bad checksum */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* Valid frame but dest IP = 10.0.2.99 (cksum recomputed: 0x5049) */
+.balign 4
+ip_not_ours_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x50, 0x49                   /* cksum for dst=10.0.2.99 */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x63                   /* dst: 10.0.2.99 */
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* Valid IP header but protocol = UDP (17), cksum recomputed: 0x508D */
+.balign 4
+ip_udp_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x11, 0x50, 0x8D                   /* proto=UDP(17), cksum */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x00, 0x00, 0x00, 0x00                   /* dummy payload */
+    .byte   0x00, 0x00, 0x00, 0x00
 
 name_ip_cksum:      .asciz "ip_checksum"
 name_ip_carry:      .asciz "ip_checksum_carry"
+name_ip_icmp:       .asciz "ip_handle_icmp"
+name_ip_short:      .asciz "ip_handle_short"
+name_ip_bad_cksum:  .asciz "ip_handle_bad_cksum"
+name_ip_not_ours:   .asciz "ip_handle_not_ours"
+name_ip_unknown:    .asciz "ip_handle_unknown_proto"
 
 .section .data
 .balign 4
 ip_cksum_buf:
     .space  20
+
+.balign 4
+ip_handle_buf:
+    .space  42

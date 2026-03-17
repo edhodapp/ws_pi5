@@ -81,6 +81,11 @@ _start:
     bl      test_icmp_echo_reply
     bl      test_icmp_not_echo
     bl      test_icmp_short
+    bl      test_ip_handle_icmp
+    bl      test_ip_handle_short
+    bl      test_ip_handle_bad_cksum
+    bl      test_ip_handle_not_ours
+    bl      test_ip_handle_unknown_proto
 
     /* === Print summary === */
     ldr     x0, =fail_count
