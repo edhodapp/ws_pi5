@@ -6,6 +6,7 @@
 - Think in the ISA's primitives, not in translated C.
 
 ## Testability
+- A critical job for a programmer is to prove to themselves that their code is correct — trust nothing without verification.
 - When writing functions with failure paths, discuss whether those paths are reachable under test.
 - If not reachable, discuss the cost of making them testable (e.g., parameterizing MMIO base addresses instead of hardcoded constants, so tests can point at fake register blocks in RAM).
 - Failure handling code that is never tested is a liability — it can generate new errors when it finally runs.
