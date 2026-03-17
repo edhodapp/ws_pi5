@@ -1,8 +1,12 @@
 .include "dwc2.inc"
 .include "usb.inc"
 .include "usb_desc.inc"
+.include "cdc_ecm.inc"
 
 .global cdc_ecm_init
+.global cdc_ecm_activate
+.global cdc_ecm_send
+.global cdc_ecm_recv
 
 .section .text
 
@@ -86,11 +90,102 @@ cdc_ecm_init:
     ldp     x29, x30, [sp], #48
     ret
 
+/*
+ * cdc_ecm_activate - Activate the CDC-ECM data interface
+ *
+ * Sends SET_INTERFACE(alt=1, iface=1) and resets PID toggles.
+ *
+ * x0: DWC2 base address
+ * x1: pointer to ECM state struct (ECM_SIZE bytes)
+ *
+ * Returns:
+ *   w0: 0 on success, 1 on failure
+ */
+cdc_ecm_activate:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    mov     x19, x0                 /* x19 = dwc2_base */
+    mov     x20, x1                 /* x20 = ecm_state */
+
+    /* usb_control_xfer(dwc2_base, dev_addr=1, mps=64, &setup_set_iface, NULL, 0) */
+    mov     x0, x19
+    mov     w1, #1
+    mov     w2, #64
+    ldr     x3, =setup_set_iface
+    mov     x4, #0
+    mov     w5, #0
+    bl      usb_control_xfer
+    cbnz    w0, .Lactivate_fail
+
+    /* Reset PID toggles */
+    str     wzr, [x20, #ECM_IN_PID]
+    str     wzr, [x20, #ECM_OUT_PID]
+
+    mov     w0, #0
+    b       .Lactivate_done
+
+.Lactivate_fail:
+    mov     w0, #1
+
+.Lactivate_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * cdc_ecm_send - Send an Ethernet frame via bulk OUT
+ *
+ * x0: DWC2 base address
+ * x1: pointer to ECM state struct
+ * x2: pointer to frame buffer
+ * w3: frame length
+ *
+ * Returns:
+ *   w0: 0 on success, 1 on failure
+ */
+cdc_ecm_send:
+    mov     x9, x1                  /* save ecm_state */
+    mov     x4, x2                  /* buf */
+    mov     w5, w3                  /* len */
+    ldrb    w2, [x9, #ECM_OUT_ADDR] /* ep_addr */
+    ldrh    w3, [x9, #ECM_OUT_MPS]  /* mps */
+    add     x6, x9, #ECM_OUT_PID    /* pid_ptr */
+    mov     w1, #1                   /* dev_addr */
+    b       usb_bulk_xfer
+
+/*
+ * cdc_ecm_recv - Receive an Ethernet frame via bulk IN
+ *
+ * x0: DWC2 base address
+ * x1: pointer to ECM state struct
+ * x2: pointer to receive buffer
+ * w3: buffer length
+ *
+ * Returns:
+ *   w0: 0 on success, 1 on failure
+ */
+cdc_ecm_recv:
+    mov     x9, x1                  /* save ecm_state */
+    mov     x4, x2                  /* buf */
+    mov     w5, w3                  /* len */
+    ldrb    w2, [x9, #ECM_IN_ADDR]  /* ep_addr */
+    ldrh    w3, [x9, #ECM_IN_MPS]   /* mps */
+    add     x6, x9, #ECM_IN_PID     /* pid_ptr */
+    mov     w1, #1                   /* dev_addr */
+    b       usb_bulk_xfer
+
 /* SET_CONFIGURATION template: bmReqType=0, bReq=9, wValue/wIndex/wLength=0 */
 .section .rodata
 .balign 4
 setup_set_cfg_tmpl:
     .byte   0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+/* SET_INTERFACE: bmReqType=0x01, bReq=0x0B, wValue=1(alt), wIndex=1(iface), wLength=0 */
+.balign 4
+setup_set_iface:
+    .byte   0x01, 0x0B, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00
 
 /* Internal buffers */
 .section .data

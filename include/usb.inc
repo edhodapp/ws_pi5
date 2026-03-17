@@ -4,6 +4,7 @@
 .equ USB_REQ_GET_DESCRIPTOR,    6
 .equ USB_REQ_SET_ADDRESS,       5
 .equ USB_REQ_SET_CONFIGURATION, 9
+.equ USB_REQ_SET_INTERFACE,    11
 
 /* Descriptor Types (high byte of wValue) */
 .equ USB_DESC_DEVICE,           1

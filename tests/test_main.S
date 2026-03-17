@@ -60,6 +60,10 @@ _start:
     bl      test_bulk_xfer_out
     bl      test_bulk_xfer_in
     bl      test_bulk_xfer_fail
+    bl      test_ecm_activate
+    bl      test_ecm_activate_fail
+    bl      test_ecm_send
+    bl      test_ecm_recv
 
     /* === Print summary === */
     ldr     x0, =fail_count
