@@ -129,9 +129,15 @@ test_eth_mac_eq:
     cmp     w0, #1
     b.ne    .Lfail_mac_eq
 
-    /* Different MACs should return 0 */
+    /* Different first 4 bytes should return 0 */
     ldr     x0, =test_dst_mac
     ldr     x1, =test_other_mac
+    bl      eth_mac_eq
+    cbnz    w0, .Lfail_mac_eq
+
+    /* Same first 4 bytes, different last 2 should return 0 */
+    ldr     x0, =test_dst_mac
+    ldr     x1, =test_tail_diff_mac
     bl      eth_mac_eq
     cbnz    w0, .Lfail_mac_eq
 
@@ -167,6 +173,10 @@ test_dst_mac:
 
 test_other_mac:
     .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x99
+
+/* First 4 bytes match test_dst_mac, last 2 differ */
+test_tail_diff_mac:
+    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01
 
 name_type_arp:      .asciz "eth_type_arp"
 name_type_short:    .asciz "eth_type_short"
