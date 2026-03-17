@@ -8,10 +8,10 @@ LDFLAGS = -T linker.ld -nostdlib
 BUILD   = build
 
 # Main kernel objects
-KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o
+KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o
 
 # Test kernel objects
-TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/test_cdc_ecm.o $(BUILD)/test_usb_bulk.o $(BUILD)/test_cdc_ecm_data.o $(BUILD)/test_boot_main.o $(BUILD)/test_eth.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o
+TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/test_cdc_ecm.o $(BUILD)/test_usb_bulk.o $(BUILD)/test_cdc_ecm_data.o $(BUILD)/test_boot_main.o $(BUILD)/test_eth.o $(BUILD)/test_arp.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o
 
 .PHONY: all test clean
 
@@ -112,7 +112,13 @@ $(BUILD)/net_cfg.o: lib/net_cfg.S include/net.inc | $(BUILD)
 $(BUILD)/eth.o: lib/eth.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/arp.o: lib/arp.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 $(BUILD)/test_eth.o: tests/test_eth.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_arp.o: tests/test_arp.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD):

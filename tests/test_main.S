@@ -72,6 +72,10 @@ _start:
     bl      test_eth_type_short
     bl      test_eth_build_hdr
     bl      test_eth_mac_eq
+    bl      test_arp_request_for_us
+    bl      test_arp_request_other_ip
+    bl      test_arp_reply_ignored
+    bl      test_arp_truncated
 
     /* === Print summary === */
     ldr     x0, =fail_count
