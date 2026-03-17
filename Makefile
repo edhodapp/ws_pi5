@@ -34,7 +34,7 @@ $(BUILD)/test_kernel8.elf: $(TEST_OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(TEST_OBJS) -o $@
 
 # Assembly rules
-$(BUILD)/boot.o: src/boot.S | $(BUILD)
+$(BUILD)/boot.o: src/boot.S include/dwc2.inc include/cdc_ecm.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/uart.o: lib/uart.S include/uart.inc | $(BUILD)
