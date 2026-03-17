@@ -65,6 +65,8 @@
 
 /* HCCHAR bits */
 .equ HCCHAR_EPDIR_IN,          0x8000          /* EP Direction IN (bit 15) */
+.equ HCCHAR_EPNUM_SHIFT,       11
+.equ HCCHAR_EPTYPE_BULK,       0x00080000      /* 2 << 18 */
 .equ HCCHAR_CHEN,              0x80000000      /* Channel Enable (bit 31) */
 
 /* HCTSIZ PID values (bits 30:29) */

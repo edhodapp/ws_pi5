@@ -52,6 +52,11 @@ _start:
     bl      test_gcd_pass1_fail
     bl      test_gcd_pass2_fail
     bl      test_gcd_clamp
+    bl      test_cdc_ecm_init
+    bl      test_cdc_ecm_enum_fail
+    bl      test_cdc_ecm_cfg_fail
+    bl      test_cdc_ecm_no_bulk
+    bl      test_cdc_ecm_set_cfg_fail
 
     /* === Print summary === */
     ldr     x0, =fail_count

@@ -8,10 +8,10 @@ LDFLAGS = -T linker.ld -nostdlib
 BUILD   = build
 
 # Main kernel objects
-KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o
+KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o
 
 # Test kernel objects
-TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o
+TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/test_cdc_ecm.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o
 
 .PHONY: all test clean
 
@@ -83,6 +83,12 @@ $(BUILD)/usb_desc.o: lib/usb_desc.S include/dwc2.inc include/usb.inc include/usb
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_usb_desc.o: tests/test_usb_desc.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/cdc_ecm.o: lib/cdc_ecm.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_cdc_ecm.o: tests/test_cdc_ecm.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD):
