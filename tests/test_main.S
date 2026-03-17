@@ -57,6 +57,9 @@ _start:
     bl      test_cdc_ecm_cfg_fail
     bl      test_cdc_ecm_no_bulk
     bl      test_cdc_ecm_set_cfg_fail
+    bl      test_bulk_xfer_out
+    bl      test_bulk_xfer_in
+    bl      test_bulk_xfer_fail
 
     /* === Print summary === */
     ldr     x0, =fail_count
