@@ -9,6 +9,7 @@
  *   5. test_udp_bad_checksum  — Corrupted UDP checksum → returns 0
  *   6. test_udp_len_mismatch  — UDP Length != actual frame → returns 0
  *   7. test_udp_echo_empty    — Echo with zero payload → returns 42
+ *   8. test_udp_echo_odd      — Echo with 3-byte payload → odd-byte checksum path
  */
 
 .include "net.inc"
@@ -29,6 +30,7 @@ test_udp:
     bl      test_udp_bad_checksum
     bl      test_udp_len_mismatch
     bl      test_udp_echo_empty
+    bl      test_udp_echo_odd
     ldp     x29, x30, [sp], #16
     ret
 
@@ -350,6 +352,71 @@ test_udp_echo_empty:
     ret
 
 /* ========================================================================
+ * test_udp_echo_odd — Echo with 3-byte payload "ABC" (odd-length UDP)
+ *
+ * The 11-byte UDP segment exercises udp_checksum's trailing-byte path
+ * during both inbound verification and outbound checksum computation.
+ * ======================================================================== */
+test_udp_echo_odd:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy 45-byte template to mutable buffer */
+    ldr     x0, =udp_echo_odd_template
+    ldr     x1, =udp_echo_odd_buf
+    mov     w2, #45
+.Lcopy_udp_odd:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_udp_odd
+
+    /* Call udp_handle(buf, 45) */
+    ldr     x0, =udp_echo_odd_buf
+    mov     w1, #45
+    bl      udp_handle
+
+    /* Should return 45 */
+    cmp     w0, #45
+    b.ne    .Lfail_udp_odd
+
+    /* Check payload preserved: "ABC" */
+    ldr     x0, =udp_echo_odd_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN)]
+    cmp     w1, #0x41               /* 'A' */
+    b.ne    .Lfail_udp_odd
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN + 1)]
+    cmp     w1, #0x42               /* 'B' */
+    b.ne    .Lfail_udp_odd
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN + 2)]
+    cmp     w1, #0x43               /* 'C' */
+    b.ne    .Lfail_udp_odd
+
+    /* Verify UDP checksum valid (11-byte odd-length segment) */
+    ldr     x0, =udp_echo_odd_buf
+    mov     w1, #11
+    bl      udp_checksum
+    cbnz    w0, .Lfail_udp_odd
+
+    /* Verify IP checksum valid */
+    ldr     x0, =udp_echo_odd_buf
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    cbnz    w0, .Lfail_udp_odd
+
+    ldr     x0, =name_udp_odd
+    bl      test_pass
+    b       .Ldone_udp_odd
+
+.Lfail_udp_odd:
+    ldr     x0, =name_udp_odd
+    bl      test_fail
+
+.Ldone_udp_odd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -465,6 +532,29 @@ udp_echo_empty_template:
     .byte   0x00, 0x08                               /* length: 8 */
     .byte   0xB7, 0x8D                               /* UDP checksum */
 
+/*
+ * 45-byte UDP echo with 3-byte payload "ABC" (odd-length UDP segment)
+ *
+ * IP totlen=001F (31), IP cksum=508A
+ * UDP: sport=3039 dport=0007 len=000B cksum=3345
+ * The 11-byte UDP segment exercises the odd trailing byte path.
+ */
+.balign 4
+udp_echo_odd_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1F
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x11, 0x50, 0x8A                   /* IP checksum */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x07                               /* dport: 7 */
+    .byte   0x00, 0x0B                               /* length: 11 */
+    .byte   0x33, 0x45                               /* UDP checksum */
+    .byte   0x41, 0x42, 0x43                         /* "ABC" */
+
 name_udp_echo:      .asciz "udp_echo"
 name_udp_ckzero:    .asciz "udp_checksum_zero"
 name_udp_short:     .asciz "udp_short"
@@ -472,6 +562,7 @@ name_udp_wport:     .asciz "udp_wrong_port"
 name_udp_badck:     .asciz "udp_bad_checksum"
 name_udp_lenmis:    .asciz "udp_len_mismatch"
 name_udp_empty:     .asciz "udp_echo_empty"
+name_udp_odd:       .asciz "udp_echo_odd"
 
 .section .data
 .balign 4
@@ -485,3 +576,7 @@ udp_cksum_zero_buf:
 .balign 4
 udp_echo_empty_buf:
     .space  42
+
+.balign 4
+udp_echo_odd_buf:
+    .space  46
