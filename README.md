@@ -1,6 +1,6 @@
-# Bare-Metal AArch64 Networking Stack
+# Bare-Metal Web Server Appliance
 
-A ping-responding bare-metal kernel for Raspberry Pi 3, written entirely in AArch64 assembly through human-AI collaboration.
+A bare-metal web server for Raspberry Pi 3, written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete HTTP server — from boot to TCP to serving pages — with no OS, no C runtime, and no abstraction layers.
 
 ## The Experiment
 
