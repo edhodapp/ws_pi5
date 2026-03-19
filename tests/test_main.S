@@ -39,11 +39,13 @@ _start:
     bl      test_dwc2_timeout
     bl      test_usb_enum
     bl      test_dwc2_mbox_fail
+    bl      test_dwc2_xfer_timeout
     bl      test_usb_xfer_setup_fail
     bl      test_usb_xfer_data_fail
     bl      test_usb_xfer_status_fail
     bl      test_usb_enum_set_addr_fail
     bl      test_usb_enum_get_full_fail
+    bl      test_usb_xfer_out_data
     bl      test_parse_bulk_eps
     bl      test_parse_no_bulk
     bl      test_parse_zero_blength

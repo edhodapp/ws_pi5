@@ -17,6 +17,7 @@
 .global test_dwc2
 .global test_dwc2_timeout
 .global test_dwc2_mbox_fail
+.global test_dwc2_xfer_timeout
 
 .section .text
 
@@ -129,11 +130,45 @@ fake_mbox_fail:
     mov     w0, #1
     ret
 
+/*
+ * test_dwc2_xfer_timeout - Verify dwc2_channel_poll returns 0 on timeout
+ *
+ * Calls dwc2_channel_poll with a zeroed channel register block.
+ * HC_INT at offset 0x08 is zero, so the poll loop exhausts its
+ * counter and returns 0 (timeout).
+ */
+test_dwc2_xfer_timeout:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    ldr     x0, =fake_chan_regs
+    bl      dwc2_channel_poll
+
+    /* Expect w0 == 0 (timeout) */
+    cbnz    w0, .Lfail_xfer_timeout
+
+    ldr     x0, =name_dwc2_xfer_timeout
+    bl      test_pass
+    b       .Ldone_xfer_timeout
+
+.Lfail_xfer_timeout:
+    ldr     x0, =name_dwc2_xfer_timeout
+    bl      test_fail
+
+.Ldone_xfer_timeout:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* Fake DWC2 register block — zeroed by BSS init, large enough for HPRT at 0x440 */
 .section .bss
 .balign 8
 fake_dwc2_regs:
     .space  0x448
+
+/* Fake channel register block — zeroed by BSS init, HC_INT at +0x08 is 0 */
+.balign 8
+fake_chan_regs:
+    .space  0x20
 
 .section .rodata
 name_dwc2_init:          .asciz "dwc2_init"
@@ -143,3 +178,4 @@ name_dwc2_timeout:       .asciz "dwc2_port_init_timeout"
 name_dwc2_timeout_fail:  .asciz "dwc2_port_init_timeout_expected_failure"
 name_dwc2_mbox_fail:     .asciz "dwc2_mbox_call_fail"
 name_dwc2_mbox_fail_bad: .asciz "dwc2_mbox_fail_expected_error"
+name_dwc2_xfer_timeout:  .asciz "dwc2_channel_poll_timeout"

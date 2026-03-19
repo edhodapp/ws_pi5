@@ -4,6 +4,7 @@
 .global dwc2_init
 .global dwc2_port_init
 .global dwc2_channel_xfer
+.global dwc2_channel_poll
 
 .section .text
 
@@ -265,6 +266,21 @@ dwc2_channel_xfer:
     /* Start the transfer */
     str     w1, [x0, #HC_CHAR]
 
+/*
+ * dwc2_channel_poll - Poll a DWC2 host channel for completion
+ *
+ * Entry point for the poll loop alone, allowing tests to exercise
+ * the timeout path without the setup code (which writes 0xFFFF
+ * to HC_INT, making it non-zero in RAM).
+ *
+ * x0: channel register base
+ *
+ * Returns:
+ *   w0: HCINT value on completion, 0 on timeout
+ *
+ * Leaf function — clobbers: w4-w5
+ */
+dwc2_channel_poll:
     /* Poll for any interrupt (transfer complete, error, NAK, etc.) */
     mov     w5, #60000
 .Lcxfer_poll:
