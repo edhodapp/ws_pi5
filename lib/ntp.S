@@ -225,10 +225,14 @@ ntp_time:
  * x1: ecm_state pointer
  * x2: tx_buf pointer
  * x3: timer_pool pointer
+ * x4: send_fn pointer (e.g. cdc_ecm_send)
  * Clobbers: x0-x6, x30
  */
 ntp_start:
     stp     x29, x30, [sp, #-16]!
+
+    /* Save send_fn before x4 is reused */
+    mov     x5, x4
 
     /* Store send context */
     ldr     x4, =ntp_send_ctx
@@ -236,6 +240,7 @@ ntp_start:
     str     x1, [x4, #NTPC_ECM_STATE]
     str     x2, [x4, #NTPC_TX_BUF]
     str     x3, [x4, #NTPC_TIMER_POOL]
+    str     x5, [x4, #NTPC_SEND_FN]
 
     /* Arm first timer: expiry = now (fire immediately on first check) */
     mov     x0, x3                      /* pool */
@@ -273,12 +278,13 @@ ntp_timer_cb:
     bl      ntp_build_request
     mov     w20, w0                     /* w20 = frame length (90) */
 
-    /* Send: cdc_ecm_send(dwc2_base, ecm_state, tx_buf, frame_len) */
+    /* Send: send_fn(dwc2_base, ecm_state, tx_buf, frame_len) */
     ldr     x0, [x19, #NTPC_DWC2_BASE]
     ldr     x1, [x19, #NTPC_ECM_STATE]
     ldr     x2, [x19, #NTPC_TX_BUF]
     mov     w3, w20
-    bl      cdc_ecm_send
+    ldr     x4, [x19, #NTPC_SEND_FN]
+    blr     x4
 
 .Lntp_rearm:
     /* Re-arm timer: expiry = now + NTP_POLL_SECS * freq */

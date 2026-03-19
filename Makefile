@@ -158,7 +158,7 @@ $(BUILD)/test_timer.o: tests/test_timer.S include/timer.inc | $(BUILD)
 $(BUILD)/ntp.o: lib/ntp.S include/ntp.inc include/net.inc include/timer.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/test_ntp.o: tests/test_ntp.S include/ntp.inc include/net.inc | $(BUILD)
+$(BUILD)/test_ntp.o: tests/test_ntp.S include/ntp.inc include/net.inc include/timer.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # Fuzz harness (static aarch64 Linux ELF)

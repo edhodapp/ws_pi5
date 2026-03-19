@@ -16,6 +16,7 @@
 
 .include "net.inc"
 .include "ntp.inc"
+.include "timer.inc"
 
 .global test_ntp
 
@@ -33,6 +34,8 @@ test_ntp:
     bl      test_arp_gw_mac_cache
     bl      test_arp_non_gw_no_cache
     bl      test_udp_ntp_dispatch
+    bl      test_ntp_timer_cb_no_gw
+    bl      test_ntp_timer_cb_send
     ldp     x29, x30, [sp], #16
     ret
 
@@ -489,6 +492,153 @@ test_udp_ntp_dispatch:
     ret
 
 /* ========================================================================
+ * Stub: tntp_send_stub — increments tntp_send_count, returns 0
+ * ======================================================================== */
+tntp_send_stub:
+    ldr     x4, =tntp_send_count
+    ldr     w5, [x4]
+    add     w5, w5, #1
+    str     w5, [x4]
+    mov     w0, #0
+    ret
+
+/* ========================================================================
+ * Helper: tntp_setup_ctx — fill ntp_send_ctx for timer_cb tests
+ *
+ * Sets up: timer pool (init'd), tx_buf, send_fn=stub, timer_freq.
+ * Caller must set net_gw_mac_valid separately.
+ * Clobbers: x0-x4, x30
+ * ======================================================================== */
+tntp_setup_ctx:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Init timer pool */
+    ldr     x0, =tntp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+
+    /* Cache timer freq in ntp_state */
+    bl      timer_freq
+    ldr     x1, =ntp_state
+    str     x0, [x1, #NTPS_TIMER_FREQ]
+
+    /* Fill ntp_send_ctx */
+    ldr     x0, =ntp_send_ctx
+    str     xzr, [x0, #NTPC_DWC2_BASE]
+    str     xzr, [x0, #NTPC_ECM_STATE]
+    ldr     x1, =tntp_cb_tx_buf
+    str     x1, [x0, #NTPC_TX_BUF]
+    ldr     x1, =tntp_timer_pool
+    str     x1, [x0, #NTPC_TIMER_POOL]
+    ldr     x1, =tntp_send_stub
+    str     x1, [x0, #NTPC_SEND_FN]
+
+    /* Zero send counter */
+    ldr     x0, =tntp_send_count
+    str     wzr, [x0]
+
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 11. test_ntp_timer_cb_no_gw — gateway MAC unknown → skip send, re-arm
+ * ======================================================================== */
+test_ntp_timer_cb_no_gw:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_setup_ctx
+
+    /* Gateway MAC not known */
+    ldr     x0, =net_gw_mac_valid
+    str     wzr, [x0]
+
+    /* Call ntp_timer_cb(&ntp_send_ctx) */
+    ldr     x0, =ntp_send_ctx
+    bl      ntp_timer_cb
+
+    /* Verify: send stub NOT called */
+    ldr     x0, =tntp_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_ntcng
+
+    /* Verify: timer re-armed — scan pool for non-zero callback */
+    ldr     x0, =tntp_timer_pool
+    ldr     w1, [x0, #TPOOL_CAP]
+    add     x0, x0, #TPOOL_SLOTS
+.Lscan_ng:
+    cbz     w1, .Lfail_ntcng           /* no active slot found */
+    ldr     x2, [x0, #SLOT_CALLBACK]
+    cbnz    x2, .Lfound_ng
+    add     x0, x0, #SLOT_SIZE
+    sub     w1, w1, #1
+    b       .Lscan_ng
+.Lfound_ng:
+
+    ldr     x0, =name_ntcng
+    bl      test_pass
+    b       .Ldone_ntcng
+.Lfail_ntcng:
+    ldr     x0, =name_ntcng
+    bl      test_fail
+.Ldone_ntcng:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 12. test_ntp_timer_cb_send — gateway MAC known → send called, re-arm
+ * ======================================================================== */
+test_ntp_timer_cb_send:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_setup_ctx
+
+    /* Set gateway MAC as known */
+    ldr     x0, =net_gw_mac_valid
+    mov     w1, #1
+    str     w1, [x0]
+
+    /* Populate net_gw_mac with a dummy MAC */
+    ldr     x0, =net_gw_mac
+    mov     w1, #0xAABB
+    movk    w1, #0xCCDD, lsl #16
+    str     w1, [x0]
+    mov     w1, #0xEEFF
+    strh    w1, [x0, #4]
+
+    /* Call ntp_timer_cb(&ntp_send_ctx) */
+    ldr     x0, =ntp_send_ctx
+    bl      ntp_timer_cb
+
+    /* Verify: send stub called once */
+    ldr     x0, =tntp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_ntcs
+
+    /* Verify: timer re-armed — scan pool for non-zero callback */
+    ldr     x0, =tntp_timer_pool
+    ldr     w1, [x0, #TPOOL_CAP]
+    add     x0, x0, #TPOOL_SLOTS
+.Lscan_s:
+    cbz     w1, .Lfail_ntcs
+    ldr     x2, [x0, #SLOT_CALLBACK]
+    cbnz    x2, .Lfound_s
+    add     x0, x0, #SLOT_SIZE
+    sub     w1, w1, #1
+    b       .Lscan_s
+.Lfound_s:
+
+    ldr     x0, =name_ntcs
+    bl      test_pass
+    b       .Ldone_ntcs
+.Lfail_ntcs:
+    ldr     x0, =name_ntcs
+    bl      test_fail
+.Ldone_ntcs:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -622,6 +772,8 @@ name_ntns:  .asciz "ntp_time_not_synced"
 name_agc:   .asciz "arp_gw_mac_cache"
 name_angc:  .asciz "arp_non_gw_no_cache"
 name_und:   .asciz "udp_ntp_dispatch"
+name_ntcng: .asciz "ntp_timer_cb_no_gw"
+name_ntcs:  .asciz "ntp_timer_cb_send"
 
 .section .data
 .balign 16
@@ -639,3 +791,15 @@ tntp_arp_buf2:
 .balign 4
 tntp_udp_ntp_buf:
     .space  90
+
+.balign 8
+tntp_timer_pool:
+    .space  TPOOL_DEFAULT_SIZE
+
+.balign 4
+tntp_send_count:
+    .space  4
+
+.balign 16
+tntp_cb_tx_buf:
+    .space  NTP_FRAME_LEN

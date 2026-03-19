@@ -60,6 +60,7 @@ main:
     ldr     x1, =ecm_state
     ldr     x2, =ntp_tx_buf
     ldr     x3, =timer_pool
+    ldr     x4, =cdc_ecm_send
     bl      ntp_start
 
     mov     w0, #0

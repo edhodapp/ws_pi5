@@ -37,12 +37,13 @@
 .equ NTPS_PAD,           28      /* u32 — padding */
 .equ NTPS_SIZE,          32
 
-/* ntp_send_ctx struct offsets (32 bytes, .data) */
+/* ntp_send_ctx struct offsets (40 bytes, .data) */
 .equ NTPC_DWC2_BASE,    0       /* u64 — DWC2 register base */
 .equ NTPC_ECM_STATE,    8       /* u64 — ecm_state pointer */
 .equ NTPC_TX_BUF,       16      /* u64 — tx buffer pointer */
 .equ NTPC_TIMER_POOL,   24      /* u64 — timer pool pointer */
-.equ NTPC_SIZE,          32
+.equ NTPC_SEND_FN,      32      /* u64 — send function pointer */
+.equ NTPC_SIZE,          40
 
 /* NTP source port for outbound requests */
 .equ NTP_SPORT,         12345
