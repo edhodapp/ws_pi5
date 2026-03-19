@@ -11,6 +11,10 @@
 .global net_our_mac
 .global net_broadcast_mac
 .global net_our_ip
+.global net_gw_ip
+.global net_ntp_ip
+.global net_gw_mac
+.global net_gw_mac_valid
 
 .section .rodata
 
@@ -27,3 +31,20 @@ net_broadcast_mac:
 .balign 4
 net_our_ip:
     .byte   0x0A, 0x00, 0x02, 0x0F     /* 10.0.2.15 */
+
+.balign 4
+net_gw_ip:
+    .byte   0x0A, 0x00, 0x02, 0x02     /* 10.0.2.2 */
+
+.balign 4
+net_ntp_ip:
+    .byte   0xD8, 0xEF, 0x23, 0x00     /* 216.239.35.0 */
+
+.section .data
+
+.balign 4
+net_gw_mac:
+    .space  6                           /* filled by ARP passive learning */
+    .balign 4
+net_gw_mac_valid:
+    .word   0

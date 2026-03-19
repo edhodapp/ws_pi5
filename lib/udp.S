@@ -6,6 +6,7 @@
  */
 
 .include "net.inc"
+.include "ntp.inc"
 
 .global udp_checksum
 .global udp_handle
@@ -124,7 +125,22 @@ udp_handle:
     rev16   w0, w0
     uxth    w0, w0
     cmp     w0, #UDP_ECHO_PORT
-    b.ne    .Ludp_drop
+    b.eq    .Ludp_echo
+    cmp     w0, #NTP_PORT
+    b.eq    .Ludp_ntp
+    b       .Ludp_drop
+
+.Ludp_ntp:
+    /* NTP response: get current ticks, extract NTP payload, call ntp_handle */
+    bl      timer_now
+    mov     x2, x0                          /* x2 = current_ticks */
+    add     x0, x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN)
+    sub     w1, w21, #UDP_HDR_LEN           /* payload len = udp_section - 8 */
+    bl      ntp_handle
+    mov     w0, #0                          /* no reply frame */
+    b       .Ludp_done
+
+.Ludp_echo:
 
     /* === Echo reply (RFC 862) === */
 

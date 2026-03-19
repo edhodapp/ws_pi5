@@ -87,6 +87,25 @@ arp_handle:
     mov     w2, #0x0200            /* 0x0002 byte-swapped to big-endian */
     strh    w2, [x9, #ARP_OPER]
 
+    /* Step 6: Cache gateway MAC if ARP SPA was gateway IP.
+     * ARP TPA now holds the original SPA (copied in step 2). */
+    ldr     x4, =net_gw_ip
+    ldr     w2, [x4]
+    ldr     w3, [x9, #ARP_TPA]     /* original sender IP */
+    cmp     w2, w3
+    b.ne    .Larp_no_gw_cache
+
+    /* ARP THA now holds original SHA (copied in step 1) */
+    ldr     x4, =net_gw_mac
+    ldr     w2, [x9, #ARP_THA]
+    str     w2, [x4]
+    ldrh    w2, [x9, #ARP_THA + 4]
+    strh    w2, [x4, #4]
+    ldr     x4, =net_gw_mac_valid
+    mov     w2, #1
+    str     w2, [x4]
+
+.Larp_no_gw_cache:
     /* Return frame length */
     mov     w0, #ARP_FRAME_LEN
     ret

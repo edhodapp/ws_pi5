@@ -99,6 +99,7 @@ _start:
     bl      test_net_recv_short
     bl      test_udp
     bl      test_timer
+    bl      test_ntp
 
     /* === Print summary === */
     ldr     x0, =fail_count

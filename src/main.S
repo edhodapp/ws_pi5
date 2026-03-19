@@ -1,6 +1,8 @@
 .include "dwc2.inc"
 .include "cdc_ecm.inc"
 .include "net.inc"
+.include "timer.inc"
+.include "ntp.inc"
 
 .section .text
 
@@ -45,6 +47,21 @@ main:
     ldr     x0, =msg_ecm_active
     bl      uart_puts
 
+    /* Initialize timer pool */
+    ldr     x0, =timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+
+    /* Initialize NTP (cache timer frequency) */
+    bl      ntp_init
+
+    /* Start NTP client (arm first timer) */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =ntp_tx_buf
+    ldr     x3, =timer_pool
+    bl      ntp_start
+
     mov     w0, #0
     b       .Ldone
 
@@ -75,13 +92,19 @@ net_loop:
     ldr     x0, =rx_buf
     mov     w1, #ETH_FRAME_MAX
     bl      net_recv_one
-    cbz     w0, net_loop            /* no reply → loop */
+    cbz     w0, .Lnet_timers        /* no reply → check timers → loop */
 
     mov     w3, w0                  /* w3 = reply_len */
     ldr     x0, =DWC2_BASE
     ldr     x1, =ecm_state
     ldr     x2, =rx_buf
     bl      cdc_ecm_send
+
+.Lnet_timers:
+    bl      timer_now
+    mov     x1, x0
+    ldr     x0, =timer_pool
+    bl      timer_check
     b       net_loop
 
 .section .data
@@ -92,6 +115,14 @@ ecm_state:
 .balign 16
 rx_buf:
     .space  ETH_FRAME_MAX
+
+.balign 16
+timer_pool:
+    .space  TPOOL_DEFAULT_SIZE
+
+.balign 16
+ntp_tx_buf:
+    .space  NTP_FRAME_LEN
 
 .section .rodata
 msg_hello:      .asciz "Hello from bare-metal Pi 3!\r\n"
