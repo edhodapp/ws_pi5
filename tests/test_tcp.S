@@ -11,6 +11,9 @@
  *   7. test_tcp_rst_syn       — SYN to port 80 → RST+ACK, SEQ=0, ACK=SEG.SEQ+1
  *   8. test_tcp_rst_ack       — ACK to port 80 → RST, SEQ=SEG.ACK
  *   9. test_tcp_rst_wrong_port — SYN to port 12345 → RST+ACK (no listener)
+ *  10. test_tcp_checksum_odd  — Odd-length segment (21 bytes) exercises trailing byte
+ *  11. test_tcp_rst_bare_data — flags=0x00 (no SYN/ACK/FIN) → cinc SYN=0 path
+ *  12. test_tcp_rst_fin       — flags=FIN (no ACK) → cinc FIN=1 path
  */
 
 .include "net.inc"
@@ -34,6 +37,9 @@ test_tcp:
     bl      test_tcp_rst_syn
     bl      test_tcp_rst_ack
     bl      test_tcp_rst_wrong_port
+    bl      test_tcp_checksum_odd
+    bl      test_tcp_rst_bare_data
+    bl      test_tcp_rst_fin
     ldp     x29, x30, [sp], #16
     ret
 
@@ -504,6 +510,170 @@ test_tcp_rst_wrong_port:
     ret
 
 /* ========================================================================
+ * test_tcp_checksum_odd — Odd-length segment (21 bytes) exercises trailing byte
+ *
+ * SYN + 1-byte payload "X". tcp_section_len=21 (odd).
+ * ======================================================================== */
+test_tcp_checksum_odd:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy 55-byte template to mutable buffer */
+    ldr     x0, =tcp_syn_odd_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #55
+.Lcopy_tcp_ckodd:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_tcp_ckodd
+
+    /* Compute checksum (tcp_section_len = 55 - 34 = 21, odd) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #21
+    bl      tcp_checksum
+
+    /* Store */
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Re-verify: should return 0 */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #21
+    bl      tcp_checksum
+
+    cbnz    w0, .Lfail_tcp_ckodd
+
+    ldr     x0, =name_tcp_ckodd
+    bl      test_pass
+    b       .Ldone_tcp_ckodd
+
+.Lfail_tcp_ckodd:
+    ldr     x0, =name_tcp_ckodd
+    bl      test_fail
+
+.Ldone_tcp_ckodd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_rst_bare_data — flags=0x00 (no SYN/ACK/FIN)
+ *
+ * Exercises cinc SYN=0 (no increment). SEG.LEN = 0 data + 0 + 0 = 0.
+ * RST+ACK reply: SEQ=0, ACK=SEG.SEQ+0=100.
+ * ======================================================================== */
+test_tcp_rst_bare_data:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Build valid bare-data frame */
+    ldr     x0, =tcp_bare_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    /* Call tcp_handle */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Return value = 54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rstbare
+
+    ldr     x0, =tcp_test_buf
+
+    /* Flags = RST+ACK (no ACK in incoming → RST+ACK path) */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_rstbare
+
+    /* SEQ = 0 */
+    ldr     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    cbnz    w1, .Lfail_tcp_rstbare
+
+    /* ACK = 100 (SEG.SEQ + 0, no SYN/FIN/data) */
+    ldr     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w1, w1
+    cmp     w1, #100
+    b.ne    .Lfail_tcp_rstbare
+
+    /* Verify TCP checksum */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #20
+    bl      tcp_checksum
+    cbnz    w0, .Lfail_tcp_rstbare
+
+    ldr     x0, =name_tcp_rstbare
+    bl      test_pass
+    b       .Ldone_tcp_rstbare
+
+.Lfail_tcp_rstbare:
+    ldr     x0, =name_tcp_rstbare
+    bl      test_fail
+
+.Ldone_tcp_rstbare:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_rst_fin — flags=FIN(0x01), no ACK
+ *
+ * Exercises cinc FIN=1 (increment). SEG.LEN = 0 data + 0 SYN + 1 FIN = 1.
+ * RST+ACK reply: SEQ=0, ACK=SEG.SEQ+1=101.
+ * ======================================================================== */
+test_tcp_rst_fin:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Build valid FIN frame */
+    ldr     x0, =tcp_fin_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    /* Call tcp_handle */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Return value = 54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rstfin
+
+    ldr     x0, =tcp_test_buf
+
+    /* Flags = RST+ACK */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_rstfin
+
+    /* SEQ = 0 */
+    ldr     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    cbnz    w1, .Lfail_tcp_rstfin
+
+    /* ACK = 101 (SEG.SEQ(100) + FIN(1)) */
+    ldr     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w1, w1
+    cmp     w1, #101
+    b.ne    .Lfail_tcp_rstfin
+
+    /* Verify TCP checksum */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #20
+    bl      tcp_checksum
+    cbnz    w0, .Lfail_tcp_rstfin
+
+    ldr     x0, =name_tcp_rstfin
+    bl      test_pass
+    b       .Ldone_tcp_rstfin
+
+.Lfail_tcp_rstfin:
+    ldr     x0, =name_tcp_rstfin
+    bl      test_fail
+
+.Ldone_tcp_rstfin:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -658,6 +828,77 @@ tcp_syn_wrongport_template:
     .byte   0x00, 0x00                               /* checksum: 0 */
     .byte   0x00, 0x00                               /* urgent: 0 */
 
+/*
+ * 55-byte TCP SYN + 1-byte payload "X" (odd-length TCP segment: 21 bytes)
+ * IP totlen=0029 (41), IP cksum=508B
+ */
+.balign 4
+tcp_syn_odd_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x29                   /* totlen: 41 */
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8B                   /* IP checksum */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x01                   /* seq: 1 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x02                                     /* flags: SYN */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+    .byte   0x58                                     /* "X" */
+
+/*
+ * 54-byte TCP bare data: flags=0x00 (no SYN/ACK/FIN), SEQ=100, checksum=0
+ */
+.balign 4
+tcp_bare_data_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x64                   /* seq: 100 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x00                                     /* flags: none */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
+/*
+ * 54-byte TCP FIN: flags=0x01 (FIN only, no ACK), SEQ=100, checksum=0
+ */
+.balign 4
+tcp_fin_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x64                   /* seq: 100 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x01                                     /* flags: FIN */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
 name_tcp_cksum:     .asciz "tcp_checksum"
 name_tcp_ckdata:    .asciz "tcp_checksum_data"
 name_tcp_short:     .asciz "tcp_short"
@@ -667,6 +908,9 @@ name_tcp_doffovr:   .asciz "tcp_doff_overrun"
 name_tcp_rstsyn:    .asciz "tcp_rst_syn"
 name_tcp_rstack:    .asciz "tcp_rst_ack"
 name_tcp_rstwp:     .asciz "tcp_rst_wrong_port"
+name_tcp_ckodd:     .asciz "tcp_checksum_odd"
+name_tcp_rstbare:   .asciz "tcp_rst_bare_data"
+name_tcp_rstfin:    .asciz "tcp_rst_fin"
 
 .section .data
 .balign 4
