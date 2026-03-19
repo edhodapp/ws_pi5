@@ -100,6 +100,7 @@ _start:
     bl      test_udp
     bl      test_timer
     bl      test_ntp
+    bl      test_tcp
 
     /* === Print summary === */
     ldr     x0, =fail_count

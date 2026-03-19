@@ -110,8 +110,17 @@ ip_handle:
     cmp     w0, #IP_PROTO_ICMP
     b.eq    .Lip_icmp
     cmp     w0, #IP_PROTO_UDP
+    b.eq    .Lip_udp
+    cmp     w0, #IP_PROTO_TCP
     b.ne    .Lip_drop
 
+    /* TCP → tcp_handle(frame, ETH_HDR_LEN + ip_total_length) */
+    mov     x0, x19
+    add     w1, w21, #ETH_HDR_LEN
+    bl      tcp_handle
+    b       .Lip_done
+
+.Lip_udp:
     /* UDP → udp_handle(frame, ETH_HDR_LEN + ip_total_length) */
     mov     x0, x19
     add     w1, w21, #ETH_HDR_LEN
