@@ -60,6 +60,14 @@
 .equ ICMP_ECHO_REQUEST, 8
 .equ ICMP_ECHO_REPLY,  0
 
+/* UDP offsets (relative to IP payload, i.e., ETH_PAYLOAD + IP_HDR_MIN) */
+.equ UDP_SPORT,        0
+.equ UDP_DPORT,        2
+.equ UDP_LENGTH,       4
+.equ UDP_CHECKSUM,     6
+.equ UDP_HDR_LEN,      8
+.equ UDP_ECHO_PORT,    7
+
 /* Static IP configuration (network byte order for zero-cost wire comparison) */
 .equ NET_IP_NBO,       0x0A00020F      /* 10.0.2.15 */
 .equ NET_GW_NBO,       0x0A000202      /* 10.0.2.2 */

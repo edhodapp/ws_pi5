@@ -108,8 +108,17 @@ ip_handle:
     /* 7. Dispatch on IP.Protocol */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_PROTO)]
     cmp     w0, #IP_PROTO_ICMP
+    b.eq    .Lip_icmp
+    cmp     w0, #IP_PROTO_UDP
     b.ne    .Lip_drop
 
+    /* UDP → udp_handle(frame, ETH_HDR_LEN + ip_total_length) */
+    mov     x0, x19
+    add     w1, w21, #ETH_HDR_LEN
+    bl      udp_handle
+    b       .Lip_done
+
+.Lip_icmp:
     /* ICMP → icmp_handle(frame, ETH_HDR_LEN + ip_total_length) */
     mov     x0, x19
     add     w1, w21, #ETH_HDR_LEN

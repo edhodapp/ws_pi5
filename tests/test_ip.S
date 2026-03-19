@@ -10,7 +10,7 @@
  *   4. test_ip_handle_short     — 33-byte frame → returns 0
  *   5. test_ip_handle_bad_cksum — Corrupted IP checksum → returns 0
  *   6. test_ip_handle_not_ours  — Dest IP = 10.0.2.99 → returns 0
- *   7. test_ip_handle_unknown_proto — Protocol = UDP → returns 0
+ *   7. test_ip_handle_unknown_proto — Protocol = 255 → returns 0
  */
 
 .include "net.inc"
@@ -215,7 +215,7 @@ test_ip_handle_not_ours:
 test_ip_handle_unknown_proto:
     stp     x29, x30, [sp, #-16]!
 
-    ldr     x0, =ip_udp_frame
+    ldr     x0, =ip_unknown_proto_frame
     mov     w1, #42
     bl      ip_handle
 
@@ -376,15 +376,15 @@ ip_not_ours_frame:
     .byte   0x08, 0x00, 0xF7, 0xFD
     .byte   0x00, 0x01, 0x00, 0x01
 
-/* Valid IP header but protocol = UDP (17), cksum recomputed: 0x508D */
+/* Valid IP header but protocol = 255 (truly unknown), cksum recomputed */
 .balign 4
-ip_udp_frame:
+ip_unknown_proto_frame:
     .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
     .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
     .byte   0x08, 0x00
     .byte   0x45, 0x00, 0x00, 0x1C
     .byte   0x12, 0x34, 0x00, 0x00
-    .byte   0x40, 0x11, 0x50, 0x8D                   /* proto=UDP(17), cksum */
+    .byte   0x40, 0xFF, 0x4F, 0x9F                   /* proto=255, cksum */
     .byte   0x0A, 0x00, 0x02, 0x02
     .byte   0x0A, 0x00, 0x02, 0x0F
     .byte   0x00, 0x00, 0x00, 0x00                   /* dummy payload */
