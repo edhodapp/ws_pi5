@@ -12,6 +12,8 @@
 .global test_icmp_echo_reply
 .global test_icmp_not_echo
 .global test_icmp_short
+.global test_icmp_echo_payload
+.global test_icmp_echo_payload_odd
 
 .section .text
 
@@ -164,6 +166,154 @@ test_icmp_short:
     ret
 
 /* ========================================================================
+ * test_icmp_echo_payload — Echo request with 32-byte payload
+ *
+ * Verifies payload bytes survive the in-place reply transformation,
+ * and that ICMP/IP checksums are recomputed correctly over the full
+ * 40-byte ICMP section (8-byte header + 32-byte payload).
+ * ======================================================================== */
+test_icmp_echo_payload:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy 74-byte template to mutable buffer */
+    ldr     x0, =icmp_payload_template
+    ldr     x1, =icmp_payload_buf
+    mov     w2, #74
+.Lcopy_payload:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_payload
+
+    /* Call icmp_handle(buf, 74) */
+    ldr     x0, =icmp_payload_buf
+    mov     w1, #74
+    bl      icmp_handle
+
+    /* Should return 74 */
+    cmp     w0, #74
+    b.ne    .Lfail_payload
+
+    /* Check ICMP type == 0 (reply) */
+    ldr     x0, =icmp_payload_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cbnz    w1, .Lfail_payload
+
+    /* Check ICMP id preserved (id=1, big-endian 00 01 → LE 0x0100) */
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_ID)]
+    cmp     w1, #0x0100
+    b.ne    .Lfail_payload
+
+    /* Check ICMP seq preserved (seq=2, big-endian 00 02 → LE 0x0200) */
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_SEQ)]
+    cmp     w1, #0x0200
+    b.ne    .Lfail_payload
+
+    /* Payload byte 0 at frame offset 42 = 0xDE */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_HDR_LEN)]
+    cmp     w1, #0xDE
+    b.ne    .Lfail_payload
+
+    /* Payload byte 31 at frame offset 73 = 0xAD */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_HDR_LEN + 31)]
+    cmp     w1, #0xAD
+    b.ne    .Lfail_payload
+
+    /* Verify ICMP checksum valid (40-byte ICMP section) */
+    add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    mov     w1, #40
+    bl      ip_checksum
+    cbnz    w0, .Lfail_payload
+
+    /* Verify IP checksum valid */
+    ldr     x0, =icmp_payload_buf
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #20
+    bl      ip_checksum
+    cbnz    w0, .Lfail_payload
+
+    ldr     x0, =name_icmp_payload
+    bl      test_pass
+    b       .Ldone_payload
+
+.Lfail_payload:
+    ldr     x0, =name_icmp_payload
+    bl      test_fail
+
+.Ldone_payload:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_icmp_echo_payload_odd — Echo request with 33-byte payload
+ *
+ * The 41-byte ICMP section (8 header + 33 payload) is odd-length,
+ * exercising the trailing-byte path in ip_checksum during ICMP
+ * checksum recomputation.
+ * ======================================================================== */
+test_icmp_echo_payload_odd:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy 75-byte template to mutable buffer */
+    ldr     x0, =icmp_payload_odd_template
+    ldr     x1, =icmp_payload_odd_buf
+    mov     w2, #75
+.Lcopy_payload_odd:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_payload_odd
+
+    /* Call icmp_handle(buf, 75) */
+    ldr     x0, =icmp_payload_odd_buf
+    mov     w1, #75
+    bl      icmp_handle
+
+    /* Should return 75 */
+    cmp     w0, #75
+    b.ne    .Lfail_payload_odd
+
+    /* Check ICMP type == 0 (reply) */
+    ldr     x0, =icmp_payload_odd_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cbnz    w1, .Lfail_payload_odd
+
+    /* Payload byte 0 = 0xDE */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_HDR_LEN)]
+    cmp     w1, #0xDE
+    b.ne    .Lfail_payload_odd
+
+    /* Payload byte 32 (the odd trailing byte) at frame offset 74 = 0xDE */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_HDR_LEN + 32)]
+    cmp     w1, #0xDE
+    b.ne    .Lfail_payload_odd
+
+    /* Verify ICMP checksum valid (41-byte odd-length ICMP section) */
+    add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    mov     w1, #41
+    bl      ip_checksum
+    cbnz    w0, .Lfail_payload_odd
+
+    /* Verify IP checksum valid */
+    ldr     x0, =icmp_payload_odd_buf
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #20
+    bl      ip_checksum
+    cbnz    w0, .Lfail_payload_odd
+
+    ldr     x0, =name_icmp_payload_odd
+    bl      test_pass
+    b       .Ldone_payload_odd
+
+.Lfail_payload_odd:
+    ldr     x0, =name_icmp_payload_odd
+    bl      test_fail
+
+.Ldone_payload_odd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -218,9 +368,70 @@ icmp_not_echo_frame:
 name_icmp_echo:       .asciz "icmp_echo_reply"
 name_icmp_not_echo:   .asciz "icmp_not_echo"
 name_icmp_short:      .asciz "icmp_short"
+name_icmp_payload:    .asciz "icmp_echo_payload"
+name_icmp_payload_odd: .asciz "icmp_echo_payload_odd"
+
+/*
+ * 74-byte ICMP echo request with 32-byte payload
+ *
+ * Ethernet (14): dst=02:00:00:00:00:01 src=AA:BB:CC:DD:EE:FF type=0800
+ * IP (20):       ver/ihl=45 dscp=00 totlen=003C id=1234 flags=0000
+ *                ttl=40 proto=01 cksum=507D src=0A000202 dst=0A00020F
+ * ICMP (8):      type=08 code=00 cksum=0D1F id=0001 seq=0002
+ * Payload (32):  DE AD repeated
+ */
+.balign 4
+icmp_payload_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x3C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x50, 0x7D
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0x0D, 0x1F
+    .byte   0x00, 0x01, 0x00, 0x02
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+
+/*
+ * 75-byte ICMP echo request with 33-byte payload (odd length)
+ *
+ * Same structure as above but totlen=003D, cksum=507C
+ * ICMP cksum=2F1E, payload has one extra 0xDE byte.
+ * The 41-byte ICMP section exercises ip_checksum's trailing-byte path.
+ */
+.balign 4
+icmp_payload_odd_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x3D
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x50, 0x7C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0x2F, 0x1E
+    .byte   0x00, 0x01, 0x00, 0x02
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD
+    .byte   0xDE
 
 .section .data
 /* Mutable buffer for in-place reply test */
 .balign 4
 icmp_echo_buf:
     .space  42
+
+.balign 4
+icmp_payload_buf:
+    .space  74
+
+.balign 4
+icmp_payload_odd_buf:
+    .space  76

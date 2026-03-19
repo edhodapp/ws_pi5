@@ -53,7 +53,7 @@ lib/            Shared library code
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 65 tests across 18 files
+tests/          Test sources — 67 tests across 18 files
 scripts/        Build and test automation
 ```
 
@@ -85,7 +85,7 @@ make clean
 
 ## Testing
 
-65 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to ICMP checksum calculation.
+67 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to ICMP checksum calculation.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
