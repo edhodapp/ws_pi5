@@ -4,7 +4,7 @@ A bare-metal web server for Raspberry Pi 3, written entirely in AArch64 assembly
 
 ## The Experiment
 
-This project is two things at once: a real artifact (a bare-metal kernel that responds to ICMP pings over USB Ethernet) and an experiment in how humans and AI can collaborate on systems programming.
+This project is two things at once: a real artifact (a bare-metal web server appliance built from scratch in assembly) and an experiment in how humans and AI can collaborate on systems programming.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
