@@ -52,6 +52,9 @@ main:
     mov     w1, #TPOOL_DEFAULT_CAP
     bl      timer_pool_init
 
+    /* Initialize TCP connection table */
+    bl      tcp_init
+
     /* Initialize NTP (cache timer frequency) */
     bl      ntp_init
 

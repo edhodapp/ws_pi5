@@ -1,8 +1,12 @@
 /*
- * tcp.S — TCP checksum and packet handler (Phase 1: RST only)
+ * tcp.S — TCP checksum, connection table, and packet handler
+ *
+ * Phase 1: validation + RST for unmatched segments
+ * Phase 2: connection table, three-way handshake (LISTEN → SYN_RCVD → ESTABLISHED)
  *
  * tcp_checksum: ones' complement checksum with pseudo-header (RFC 793)
- * tcp_handle:   validation + RST generation (no connection table)
+ * tcp_init:     zero connection table, set slot 0 to LISTEN on port 80
+ * tcp_handle:   validation + connection lookup + state machine + RST fallback
  */
 
 .include "net.inc"
@@ -10,6 +14,8 @@
 
 .global tcp_checksum
 .global tcp_handle
+.global tcp_init
+.global tcp_conn_table
 
 .section .text
 
@@ -20,10 +26,6 @@
  * w1: TCP segment length in bytes (header + data)
  * Returns: w0 = 16-bit checksum (0 when verifying a valid segment)
  * Clobbers: x0-x3
- *
- * Structurally identical to udp_checksum. Differences:
- *   1. Protocol constant: 0x0600 (TCP) instead of 0x1100 (UDP)
- *   2. Length: from parameter, not from a header field
  */
 tcp_checksum:
     mov     w2, #0                  /* accumulator */
@@ -79,21 +81,47 @@ tcp_checksum:
     ret
 
 /*
- * tcp_handle — TCP packet handler (Phase 1: RST for all segments)
+ * tcp_init — Initialize connection table, set slot 0 to LISTEN on port 80
+ *
+ * No parameters, no return value.
+ * Clobbers: x0-x2
+ */
+tcp_init:
+    /* Zero all 1024 bytes (64 iterations of 16 bytes) */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #64
+.Ltcp_init_zero:
+    stp     xzr, xzr, [x0], #16
+    subs    w1, w1, #1
+    b.ne    .Ltcp_init_zero
+
+    /* Set slot 0: state = LISTEN, lport = 80 (NBO) */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #TCPS_LISTEN
+    strb    w1, [x0, #TCONN_STATE]
+    mov     w1, #0x5000             /* port 80 NBO as LE halfword */
+    strh    w1, [x0, #TCONN_LPORT]
+    ret
+
+/*
+ * tcp_handle — TCP packet handler with connection state machine
  *
  * x0: frame buffer pointer (Ethernet + IP + TCP)
  * w1: frame length (ETH_HDR_LEN + IP.TotalLength)
- * Returns: w0 = reply length (54 for RST) or 0 (dropped)
- * Clobbers: x0-x6, x19-x22, x30
+ * Returns: w0 = reply length (54 for RST/SYN-ACK) or 0 (dropped)
+ * Clobbers: x0-x6, x19-x24, x30
  *
- * Validates TCP header then generates RST per RFC 793 §3.4:
- *   - ACK set → RST with SEQ=SEG.ACK
- *   - No ACK  → RST+ACK with SEQ=0, ACK=SEG.SEQ+SEG.LEN
+ * Flow:
+ *   1. Validate TCP header (length, data offset, checksum)
+ *   2. Scan connection table for exact match or LISTEN fallback
+ *   3. Dispatch by state: LISTEN→SYN-ACK, SYN_RCVD→ESTABLISHED, etc.
+ *   4. Unmatched → RST (Phase 1 behavior preserved)
  */
 tcp_handle:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
 
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = frame_len */
@@ -118,24 +146,75 @@ tcp_handle:
     bl      tcp_checksum
     cbnz    w0, .Ltcp_drop
 
-    /* --- RST generation (RFC 793 §3.4) --- */
+    /* --- Connection table lookup --- */
 
-    /* Read incoming flags */
+    /* Pre-load match keys from frame */
+    ldr     w4, [x19, #(ETH_PAYLOAD + IP_SRC)]                  /* rip (NBO) */
+    ldrh    w5, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]  /* rport (NBO) */
+    ldrh    w6, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]  /* lport (NBO) */
+
+    /* Single-pass scan: exact match takes priority, track LISTEN fallback */
+    ldr     x23, =tcp_conn_table
+    mov     x24, #0                 /* listen_match = NULL */
+    mov     w3, #TCP_MAX_CONNS
+
+.Ltcp_scan:
+    cbz     w3, .Ltcp_scan_done
+    sub     w3, w3, #1
+    ldrb    w0, [x23, #TCONN_STATE]
+    cbz     w0, .Ltcp_scan_next     /* CLOSED → skip */
+    cmp     w0, #TCPS_LISTEN
+    b.eq    .Ltcp_check_listen
+    /* Exact match: all three fields must match */
+    ldrh    w1, [x23, #TCONN_LPORT]
+    cmp     w1, w6
+    b.ne    .Ltcp_scan_next
+    ldrh    w1, [x23, #TCONN_RPORT]
+    cmp     w1, w5
+    b.ne    .Ltcp_scan_next
+    ldr     w1, [x23, #TCONN_RIP]
+    cmp     w1, w4
+    b.ne    .Ltcp_scan_next
+    /* Exact match → dispatch by state (w0 still has state) */
+    b       .Ltcp_conn_dispatch
+
+.Ltcp_check_listen:
+    ldrh    w1, [x23, #TCONN_LPORT]
+    cmp     w1, w6
+    b.ne    .Ltcp_scan_next
+    mov     x24, x23               /* remember LISTEN slot */
+    /* fall through — keep scanning for exact matches */
+
+.Ltcp_scan_next:
+    add     x23, x23, #TCONN_SIZE
+    b       .Ltcp_scan
+
+.Ltcp_scan_done:
+    /* No exact match. Check LISTEN fallback. */
+    cbz     x24, .Ltcp_no_conn
+    /* Must be pure SYN (SYN=1, ACK=0) */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    tst     w0, #TCP_SYN
+    b.eq    .Ltcp_no_conn
+    tst     w0, #TCP_ACK_FLAG
+    b.ne    .Ltcp_no_conn
+    b       .Ltcp_handle_listen_syn
+
+.Ltcp_no_conn:
+    /* --- RST generation (RFC 793 §3.4, Phase 1 behavior) --- */
     ldrb    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
-    /* Branch on ACK flag */
     tst     w2, #TCP_ACK_FLAG
     b.ne    .Ltcp_rst_has_ack
 
     /* No ACK → RST+ACK, SEQ=0, ACK=SEG.SEQ+SEG.LEN */
-    /* SEG.LEN = data_bytes + (SYN?1:0) + (FIN?1:0) */
     sub     w3, w21, w22            /* data_bytes */
     tst     w2, #TCP_SYN
     cinc    w3, w3, ne
     tst     w2, #TCP_FIN
     cinc    w3, w3, ne
 
-    /* ACK = rev(rev(SEG.SEQ) + SEG.LEN) — big-endian arithmetic */
+    /* ACK = rev(rev(SEG.SEQ) + SEG.LEN) */
     ldr     w4, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
     rev     w4, w4
     add     w4, w4, w3
@@ -143,17 +222,127 @@ tcp_handle:
 
     mov     w20, #0                 /* w20 = reply SEQ = 0 */
     mov     w22, #TCP_RST_ACK       /* w22 = reply flags */
-    b       .Ltcp_rst_common
+    mov     w23, #0                 /* w23 = window = 0 */
+    b       .Ltcp_reply_common
 
 .Ltcp_rst_has_ack:
     /* ACK set → RST, SEQ=SEG.ACK */
     ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     mov     w21, #0                 /* reply ACK = 0 */
     mov     w22, #TCP_RST           /* flags = RST only */
+    mov     w23, #0                 /* window = 0 */
+    b       .Ltcp_reply_common
 
-.Ltcp_rst_common:
-    /* w20=reply_seq(NBO), w21=reply_ack(NBO), w22=reply_flags */
+/* --- State dispatch for exact-match connections --- */
 
+.Ltcp_conn_dispatch:
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Ltcp_handle_syn_rcvd
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Ltcp_handle_established
+    b       .Ltcp_no_conn           /* Unknown state → RST */
+
+/* --- LISTEN + SYN → allocate connection, send SYN-ACK --- */
+
+.Ltcp_handle_listen_syn:
+    /* Scan table for free slot (state == CLOSED) */
+    ldr     x23, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltcp_alloc_scan:
+    cbz     w3, .Ltcp_no_conn      /* no free slot → RST */
+    sub     w3, w3, #1
+    ldrb    w0, [x23, #TCONN_STATE]
+    cbz     w0, .Ltcp_alloc_found
+    add     x23, x23, #TCONN_SIZE
+    b       .Ltcp_alloc_scan
+
+.Ltcp_alloc_found:
+    /* x23 = free slot, x24 = LISTEN slot */
+
+    /* ISN from hardware counter */
+    mrs     x0, CNTPCT_EL0
+    mov     w7, w0                  /* w7 = ISN (lower 32 bits, host order) */
+
+    /* Populate new connection */
+    mov     w0, #TCPS_SYN_RCVD
+    strb    w0, [x23, #TCONN_STATE]
+
+    /* lport from LISTEN slot */
+    ldrh    w0, [x24, #TCONN_LPORT]
+    strh    w0, [x23, #TCONN_LPORT]
+
+    /* rport from frame TCP_SPORT (NBO) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
+    strh    w0, [x23, #TCONN_RPORT]
+
+    /* rip from frame IP_SRC (NBO) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_SRC)]
+    str     w0, [x23, #TCONN_RIP]
+
+    /* SND_UNA = ISN (host order) */
+    str     w7, [x23, #TCONN_SND_UNA]
+
+    /* SND_NXT = ISN + 1 (host order) */
+    add     w0, w7, #1
+    str     w0, [x23, #TCONN_SND_NXT]
+
+    /* RCV_NXT = rev(SEG.SEQ) + 1 (host order) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w0, w0
+    add     w0, w0, #1
+    str     w0, [x23, #TCONN_RCV_NXT]
+
+    /* Build SYN-ACK reply registers */
+    rev     w20, w7                 /* w20 = reply SEQ = rev(ISN) (NBO) */
+    ldr     w0, [x23, #TCONN_RCV_NXT]
+    rev     w21, w0                 /* w21 = reply ACK = rev(RCV_NXT) (NBO) */
+    mov     w22, #TCP_SYN_ACK       /* w22 = flags */
+    mov     w23, #0xB405            /* w23 = window 1460 NBO as LE halfword */
+    b       .Ltcp_reply_common
+
+/* --- SYN_RCVD state handler --- */
+
+.Ltcp_handle_syn_rcvd:
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    /* RST → close connection */
+    tst     w0, #TCP_RST
+    b.ne    .Ltcp_conn_close
+    /* Must have ACK */
+    tst     w0, #TCP_ACK_FLAG
+    b.eq    .Ltcp_no_conn
+    /* Verify: rev(SEG.ACK) == SND_NXT */
+    ldr     w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w1, w1
+    ldr     w2, [x23, #TCONN_SND_NXT]
+    cmp     w1, w2
+    b.ne    .Ltcp_no_conn           /* Bad ACK → RST */
+    /* Transition to ESTABLISHED */
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x23, #TCONN_STATE]
+    mov     w0, #0
+    b       .Ltcp_done
+
+/* --- ESTABLISHED state handler --- */
+
+.Ltcp_handle_established:
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    tst     w0, #TCP_RST
+    b.ne    .Ltcp_conn_close
+    /* Phase 2: drop everything else (Phase 3 adds data handling) */
+    mov     w0, #0
+    b       .Ltcp_done
+
+/* --- Close connection (RST received) --- */
+
+.Ltcp_conn_close:
+    strb    wzr, [x23, #TCONN_STATE]   /* TCPS_CLOSED = 0 */
+    mov     w0, #0
+    b       .Ltcp_done
+
+/* --- Shared reply construction (RST and SYN-ACK) --- */
+/* w20=SEQ(NBO), w21=ACK(NBO), w22=flags, w23=window(NBO LE halfword) */
+
+.Ltcp_reply_common:
     /* 1. Swap ETH dst ↔ src (4+2 byte pattern) */
     ldr     w3, [x19, #ETH_DST]
     ldrh    w4, [x19, #(ETH_DST + 4)]
@@ -206,14 +395,14 @@ tcp_handle:
     strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
     strb    w22, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
-    /* 11. Window = 0, urgent = 0 */
-    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* 11. Window from w23, urgent = 0 */
+    strh    w23, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_URGENT)]
 
     /* 12. Compute TCP checksum */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x19
-    mov     w1, #TCP_HDR_MIN        /* RST has no payload: 20 bytes */
+    mov     w1, #TCP_HDR_MIN
     bl      tcp_checksum
     strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
@@ -225,7 +414,15 @@ tcp_handle:
     mov     w0, #0
 
 .Ltcp_done:
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
+
+/* --- Connection table (BSS) --- */
+
+.section .bss
+.balign 16
+tcp_conn_table:
+    .space  TCP_CONN_TABLE_SIZE

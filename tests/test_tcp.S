@@ -1,5 +1,8 @@
 /*
- * test_tcp.S — Tests for TCP handler (Phase 1: validation + RST)
+ * test_tcp.S — Tests for TCP handler
+ *
+ * Phase 1 (tests 1-12): validation + RST (no tcp_init, table all-CLOSED)
+ * Phase 2 (tests 13-19): connection table + three-way handshake
  *
  * Tests:
  *   1. test_tcp_checksum      — Compute+store+verify TCP checksum on 54-byte SYN
@@ -14,6 +17,13 @@
  *  10. test_tcp_checksum_odd  — Odd-length segment (21 bytes) exercises trailing byte
  *  11. test_tcp_rst_bare_data — flags=0x00 (no SYN/ACK/FIN) → cinc SYN=0 path
  *  12. test_tcp_rst_fin       — flags=FIN (no ACK) → cinc FIN=1 path
+ *  13. test_tcp_init          — Verify slot 0 = LISTEN port 80, slots 1-15 = CLOSED
+ *  14. test_tcp_syn_ack       — SYN to port 80 → SYN-ACK (after tcp_init)
+ *  15. test_tcp_handshake     — Full SYN → SYN-ACK → ACK → ESTABLISHED
+ *  16. test_tcp_syn_no_listen — SYN to port 12345 (no LISTEN) → RST+ACK
+ *  17. test_tcp_syn_rcvd_rst  — SYN → SYN-ACK, then RST → conn CLOSED
+ *  18. test_tcp_syn_rcvd_bad_ack — SYN → SYN-ACK, then ACK with wrong ACK# → RST
+ *  19. test_tcp_table_full    — All slots occupied, SYN → RST (no free slot)
  */
 
 .include "net.inc"
@@ -28,6 +38,16 @@
  */
 test_tcp:
     stp     x29, x30, [sp, #-16]!
+
+    /* Zero connection table so Phase 1 tests see all-CLOSED
+     * (main() may have called tcp_init earlier in test_boot_main) */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #64
+.Lttcp_zero_table:
+    stp     xzr, xzr, [x0], #16
+    subs    w1, w1, #1
+    b.ne    .Lttcp_zero_table
+
     bl      test_tcp_checksum
     bl      test_tcp_checksum_data
     bl      test_tcp_short
@@ -40,6 +60,13 @@ test_tcp:
     bl      test_tcp_checksum_odd
     bl      test_tcp_rst_bare_data
     bl      test_tcp_rst_fin
+    bl      test_tcp_init_test
+    bl      test_tcp_syn_ack
+    bl      test_tcp_handshake
+    bl      test_tcp_syn_no_listen
+    bl      test_tcp_syn_rcvd_rst
+    bl      test_tcp_syn_rcvd_bad_ack
+    bl      test_tcp_table_full
     ldp     x29, x30, [sp], #16
     ret
 
@@ -674,6 +701,469 @@ test_tcp_rst_fin:
     ret
 
 /* ========================================================================
+ * Phase 2 Tests (13-19)
+ * ======================================================================== */
+
+/* ========================================================================
+ * test_tcp_init — Verify slot 0 = LISTEN port 80, slots 1-15 = CLOSED
+ * ======================================================================== */
+test_tcp_init_test:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    ldr     x0, =tcp_conn_table
+
+    /* Slot 0: state = LISTEN (1) */
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfail_tcp_init
+
+    /* Slot 0: lport = 0x5000 (port 80 NBO) */
+    ldrh    w1, [x0, #TCONN_LPORT]
+    mov     w2, #0x5000
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_init
+
+    /* Slots 1-15: all state = CLOSED (0) */
+    add     x0, x0, #TCONN_SIZE    /* point to slot 1 */
+    mov     w3, #15
+.Ltcp_init_check:
+    ldrb    w1, [x0, #TCONN_STATE]
+    cbnz    w1, .Lfail_tcp_init
+    add     x0, x0, #TCONN_SIZE
+    subs    w3, w3, #1
+    b.ne    .Ltcp_init_check
+
+    ldr     x0, =name_tcp_init
+    bl      test_pass
+    b       .Ldone_tcp_init
+
+.Lfail_tcp_init:
+    ldr     x0, =name_tcp_init
+    bl      test_fail
+
+.Ldone_tcp_init:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_ack — SYN to port 80 → SYN-ACK reply (after tcp_init)
+ *
+ * Verify: return=54, flags=SYN+ACK(0x12), ACK=SEG.SEQ+1=2 (NBO),
+ *         ports swapped, checksums valid, conn state=SYN_RCVD,
+ *         reply SEQ == SND_UNA (the ISN)
+ * ======================================================================== */
+test_tcp_syn_ack:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Build valid SYN frame */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    /* Call tcp_handle */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Return value = 54 (SYN-ACK reply) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_synack
+
+    ldr     x19, =tcp_test_buf
+
+    /* TCP flags = SYN+ACK (0x12) */
+    ldrb    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_SYN_ACK
+    b.ne    .Lfail_tcp_synack
+
+    /* TCP ACK = 2 (SEG.SEQ(1) + 1 for SYN, in NBO) */
+    ldr     w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w1, w1
+    cmp     w1, #2
+    b.ne    .Lfail_tcp_synack
+
+    /* TCP sport = 80 (swapped from dport) */
+    ldrh    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w1, #80
+    b.ne    .Lfail_tcp_synack
+
+    /* TCP dport = 12345 (swapped from sport) */
+    ldrh    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]
+    rev16   w1, w1
+    uxth    w1, w1
+    mov     w2, #12345
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_synack
+
+    /* TCP window = 1460 (NBO) */
+    ldrh    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    rev16   w1, w1
+    uxth    w1, w1
+    mov     w2, #1460
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_synack
+
+    /* Verify reply SEQ == SND_UNA from connection table */
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* reply SEQ in host order */
+
+    /* Find the SYN_RCVD connection */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lsynack_find:
+    cbz     w3, .Lfail_tcp_synack  /* no SYN_RCVD found */
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.eq    .Lsynack_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lsynack_find
+
+.Lsynack_found:
+    /* Verify state = SYN_RCVD */
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.ne    .Lfail_tcp_synack
+
+    /* Verify SND_UNA == reply SEQ */
+    ldr     w1, [x0, #TCONN_SND_UNA]
+    cmp     w1, w20
+    b.ne    .Lfail_tcp_synack
+
+    /* Verify IP checksum */
+    mov     x0, x19
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    cbnz    w0, .Lfail_tcp_synack
+
+    /* Verify TCP checksum */
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    cbnz    w0, .Lfail_tcp_synack
+
+    ldr     x0, =name_tcp_synack
+    bl      test_pass
+    b       .Ldone_tcp_synack
+
+.Lfail_tcp_synack:
+    ldr     x0, =name_tcp_synack
+    bl      test_fail
+
+.Ldone_tcp_synack:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_handshake — Full three-way handshake: SYN → SYN-ACK → ACK
+ *
+ * 1. tcp_init
+ * 2. SYN → tcp_handle → return 54 (SYN-ACK)
+ * 3. Extract ISN from SYN-ACK SEQ field
+ * 4. Build ACK with SEQ=2, ACK=ISN+1 → tcp_handle → return 0
+ * 5. Verify connection state = ESTABLISHED
+ * ======================================================================== */
+test_tcp_handshake:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Step 1: Send SYN */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Must return 54 (SYN-ACK) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_hs
+
+    /* Step 2: Extract ISN from SYN-ACK reply SEQ */
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* w20 = ISN (host order) */
+
+    /* Step 3: Build ACK packet in tcp_test_buf2 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+.Lcopy_hs_ack:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_hs_ack
+
+    /* Write ACK = rev(ISN + 1) into buf2 TCP_ACK field */
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Compute and store TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Step 4: Send ACK */
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Must return 0 (accepted, no reply) */
+    cbnz    w0, .Lfail_tcp_hs
+
+    /* Step 5: Verify connection state = ESTABLISHED */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lhs_find:
+    cbz     w3, .Lfail_tcp_hs      /* no ESTABLISHED found */
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lhs_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lhs_find
+
+.Lhs_found:
+    ldr     x0, =name_tcp_hs
+    bl      test_pass
+    b       .Ldone_tcp_hs
+
+.Lfail_tcp_hs:
+    ldr     x0, =name_tcp_hs
+    bl      test_fail
+
+.Ldone_tcp_hs:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_no_listen — SYN to port 12345 (no LISTEN) → RST+ACK
+ *
+ * After tcp_init, port 80 is LISTEN. SYN to port 12345 has no match.
+ * ======================================================================== */
+test_tcp_syn_no_listen:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Build SYN to wrong port */
+    ldr     x0, =tcp_syn_wrongport_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Return value = 54 (RST) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_synnolist
+
+    ldr     x0, =tcp_test_buf
+
+    /* Flags = RST+ACK */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_synnolist
+
+    ldr     x0, =name_tcp_synnolist
+    bl      test_pass
+    b       .Ldone_tcp_synnolist
+
+.Lfail_tcp_synnolist:
+    ldr     x0, =name_tcp_synnolist
+    bl      test_fail
+
+.Ldone_tcp_synnolist:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_rcvd_rst — SYN → SYN-ACK, then RST → conn CLOSED
+ * ======================================================================== */
+test_tcp_syn_rcvd_rst:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_srst
+
+    /* Build RST from peer (use tcp_rst_from_peer_template) */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* RST to existing connection → return 0 (close, no reply) */
+    cbnz    w0, .Lfail_tcp_srst
+
+    /* Verify no SYN_RCVD slots remain (all should be CLOSED or LISTEN) */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lsrst_check:
+    cbz     w3, .Lsrst_ok
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.eq    .Lfail_tcp_srst         /* still SYN_RCVD → fail */
+    add     x0, x0, #TCONN_SIZE
+    b       .Lsrst_check
+
+.Lsrst_ok:
+    ldr     x0, =name_tcp_srst
+    bl      test_pass
+    b       .Ldone_tcp_srst
+
+.Lfail_tcp_srst:
+    ldr     x0, =name_tcp_srst
+    bl      test_fail
+
+.Ldone_tcp_srst:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_rcvd_bad_ack — SYN → SYN-ACK, then ACK with wrong ACK# → RST
+ * ======================================================================== */
+test_tcp_syn_rcvd_bad_ack:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_badack2
+
+    /* Build ACK with wrong ACK number (use bad_ack template: ACK=0xDEADBEEF) */
+    ldr     x0, =tcp_bad_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Bad ACK → RST reply (return 54) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_badack2
+
+    ldr     x0, =tcp_test_buf
+
+    /* Flags should include RST */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    tst     w1, #TCP_RST
+    b.eq    .Lfail_tcp_badack2
+
+    ldr     x0, =name_tcp_badack2
+    bl      test_pass
+    b       .Ldone_tcp_badack2
+
+.Lfail_tcp_badack2:
+    ldr     x0, =name_tcp_badack2
+    bl      test_fail
+
+.Ldone_tcp_badack2:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_table_full — Fill slots 1-15 as SYN_RCVD, then SYN → RST
+ * ======================================================================== */
+test_tcp_table_full:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Fill slots 1-15 with state=SYN_RCVD (non-CLOSED) */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, #TCONN_SIZE    /* skip slot 0 (LISTEN) */
+    mov     w2, #TCPS_SYN_RCVD
+    mov     w3, #15
+.Ltfull_fill:
+    strb    w2, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    subs    w3, w3, #1
+    b.ne    .Ltfull_fill
+
+    /* SYN to port 80 — should fail to allocate, fall back to RST */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Return 54 (RST reply) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_tfull
+
+    ldr     x0, =tcp_test_buf
+
+    /* Flags = RST+ACK */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_tfull
+
+    ldr     x0, =name_tcp_tfull
+    bl      test_pass
+    b       .Ldone_tcp_tfull
+
+.Lfail_tcp_tfull:
+    ldr     x0, =name_tcp_tfull
+    bl      test_fail
+
+.Ldone_tcp_tfull:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -899,6 +1389,78 @@ tcp_fin_template:
     .byte   0x00, 0x00                               /* checksum: 0 */
     .byte   0x00, 0x00                               /* urgent: 0 */
 
+/*
+ * 54-byte ACK for handshake completion: sport=12345, dport=80, SEQ=2, ACK=0 (placeholder)
+ * Same ETH/IP headers as tcp_syn_template.
+ */
+.balign 4
+tcp_handshake_ack_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src: 10.0.2.2 */
+    .byte   0x0A, 0x00, 0x02, 0x0F                   /* dst: 10.0.2.15 */
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x02                   /* seq: 2 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 (filled at runtime) */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x10                                     /* flags: ACK */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
+/*
+ * 54-byte RST from peer: sport=12345, dport=80, SEQ=2, flags=RST+ACK
+ * Used to test SYN_RCVD + RST → CLOSED
+ */
+.balign 4
+tcp_rst_from_peer_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x02                   /* seq: 2 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x04                                     /* flags: RST */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
+/*
+ * 54-byte ACK with wrong ACK number: sport=12345, dport=80, SEQ=2, ACK=0xDEADBEEF
+ * Used to test SYN_RCVD + bad ACK → RST
+ */
+.balign 4
+tcp_bad_ack_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x02                   /* seq: 2 */
+    .byte   0xDE, 0xAD, 0xBE, 0xEF                   /* ack: 0xDEADBEEF (wrong) */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x10                                     /* flags: ACK */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
 name_tcp_cksum:     .asciz "tcp_checksum"
 name_tcp_ckdata:    .asciz "tcp_checksum_data"
 name_tcp_short:     .asciz "tcp_short"
@@ -911,8 +1473,19 @@ name_tcp_rstwp:     .asciz "tcp_rst_wrong_port"
 name_tcp_ckodd:     .asciz "tcp_checksum_odd"
 name_tcp_rstbare:   .asciz "tcp_rst_bare_data"
 name_tcp_rstfin:    .asciz "tcp_rst_fin"
+name_tcp_init:      .asciz "tcp_init"
+name_tcp_synack:    .asciz "tcp_syn_ack"
+name_tcp_hs:        .asciz "tcp_handshake"
+name_tcp_synnolist: .asciz "tcp_syn_no_listen"
+name_tcp_srst:      .asciz "tcp_syn_rcvd_rst"
+name_tcp_badack2:   .asciz "tcp_syn_rcvd_bad_ack"
+name_tcp_tfull:     .asciz "tcp_table_full"
 
 .section .data
 .balign 4
 tcp_test_buf:
+    .space  128
+
+.balign 4
+tcp_test_buf2:
     .space  128
