@@ -100,6 +100,42 @@ The TDD workflow:
 
 The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the background, polls serial output for pass/fail markers, and kills QEMU cleanly to ensure output is flushed.
 
+## Fuzzing
+
+Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `net_recv_one`). All five functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
+
+### Prerequisites
+
+```
+sudo apt install gcc-aarch64-linux-gnu
+```
+
+### Build and run
+
+Build the fuzz harness (static aarch64 Linux ELF):
+
+```
+make fuzz
+```
+
+Generate seed corpus:
+
+```
+make fuzz-corpus
+```
+
+Run a single input manually:
+
+```
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/fuzz_net < fuzz/corpus/arp_request.bin
+```
+
+With AFL++ (QEMU mode for aarch64 coverage):
+
+```
+afl-fuzz -Q -i fuzz/corpus -o fuzz/findings -- ./build/fuzz_net
+```
+
 ## Hardware Test Plan
 
 See [test_plan.md](test_plan.md) for the physical test setup:

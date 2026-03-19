@@ -3,3 +3,5 @@ build/
 *.elf
 *.img
 *.bin
+fuzz/corpus/
+fuzz/findings/
