@@ -55,6 +55,7 @@ lib/            Shared library code
 include/        Shared constants and macros (.inc files)
 tests/          Test sources — 67 tests across 18 files
 scripts/        Build and test automation
+hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
 
 ## Building

@@ -77,3 +77,5 @@ sudo tcpdump -i usb0 -w capture.pcap
 - Ethernet switch or hub
 - USB-A to micro-USB cable (Pi 4 to Pi 3)
 - 2x Ethernet cables
+
+See `hw_test/` for the automated implementation of these tests.
