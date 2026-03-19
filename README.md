@@ -29,13 +29,14 @@ Boots on a Raspberry Pi 3, brings up a USB Ethernet adapter (CDC-ECM class), and
 
 ```
 boot.S          Core 0 init, stack, BSS zero
-  main.S        uart_init → dwc2_init → cdc_ecm_init → cdc_ecm_activate
+  main.S        uart_init → dwc2_init → cdc_ecm_init → cdc_ecm_activate → ntp_start
     net_loop    Receive Ethernet frames via USB bulk-IN
       net.S     Dispatch by EtherType
-        ARP  →  arp.S    Validate request, build reply in-place
+        ARP  →  arp.S    Validate request, build reply in-place, cache gateway MAC
         IPv4 →  ip.S     Validate header + checksum, dispatch by protocol
           ICMP → icmp.S  Swap MACs/IPs, recompute checksums, reply
-          UDP  → udp.S   Checksum with pseudo-header, echo on port 7
+          UDP  → udp.S   Checksum with pseudo-header, echo on port 7, NTP dispatch
+      timer_check        Fire expired software timers (NTP poll, etc.)
       cdc_ecm_send       Transmit reply via USB bulk-OUT
 ```
 
@@ -62,11 +63,12 @@ lib/            Shared library code
   ip.S            RFC 1071 checksum, IPv4 header validation, protocol dispatch
   icmp.S          ICMP echo reply — swap addresses, recompute checksums
   udp.S           UDP checksum with pseudo-header, validation, echo service (port 7)
+  ntp.S           SNTP client — request builder, response parser, timer-driven polling
   timer.S         ARM generic timer access and software timer pool
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 97 tests across 20 files
+tests/          Test sources — 109 tests across 20 files
 scripts/        Build and test automation
 hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
@@ -99,7 +101,7 @@ make clean
 
 ## Testing
 
-97 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to UDP checksum calculation and timer infrastructure.
+109 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to NTP client logic and timer infrastructure.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -167,14 +169,14 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - DWC2 USB host controller initialization via VideoCore mailbox
 - USB device enumeration (control transfers, descriptor parsing)
 - CDC-ECM Ethernet device activation and bulk data transfer
-- ARP request/reply
+- ARP request/reply with passive gateway MAC learning
 - ICMP echo request/reply (ping)
 - UDP with echo service (port 7)
 - Timer infrastructure (ARM generic timer, software timer pool)
+- SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
+- Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
 
 **Next:**
-- DNS client (UDP) — resolve hostnames for NTP
-- NTP client (UDP) — wall-clock time for HTTP `Date` headers
 - TCP
 - HTTP
 
