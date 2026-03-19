@@ -97,6 +97,7 @@ _start:
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown
     bl      test_net_recv_short
+    bl      test_timer
 
     /* === Print summary === */
     ldr     x0, =fail_count
