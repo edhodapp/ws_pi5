@@ -13,6 +13,16 @@ Assembly is an interesting medium for AI collaboration because it resists the us
 
 TDD at the ISA level keeps both parties honest. The test suite is the shared source of truth: if the tests pass on QEMU, the implementation is correct regardless of who wrote it. This eliminates the trust problem — you don't have to take the AI's word for anything.
 
+### Implementation-specific tests as an AI constraint
+
+Conventional wisdom says: don't write tests that are tightly coupled to implementation details, because they break during refactors and create maintenance burden. This project deliberately violates that rule as an experiment.
+
+The reasoning: that conventional wisdom is calibrated to human costs. When a human has to rewrite 10 tests after a structural change, that's real friction. When an AI can regenerate the entire test file in seconds, the maintenance cost drops to near zero — and the value of catching bugs in internal logic dominates.
+
+Implementation-specific tests serve as a ratchet against AI hallucination. A behavioral test says "the callback fired" — the AI could produce a broken scan loop that happens to work for one timer. An implementation-specific test says "slot 0's callback field is zero after cancel" — there's nowhere to hide. Every test that pins internal state narrows the space of wrong-but-compiles outputs the AI could produce.
+
+This is an open question, not a conclusion. The hypothesis is that the human rule "don't test implementation details" is really "don't create maintenance burdens that outlive their value," and that AI collaboration changes the cost structure enough to flip the tradeoff. Whether this holds up across larger refactors remains to be seen.
+
 ## What It Does
 
 Boots on a Raspberry Pi 3, brings up a USB Ethernet adapter (CDC-ECM class), and responds to ARP queries and ICMP echo requests. The full path:
@@ -53,7 +63,7 @@ lib/            Shared library code
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 67 tests across 18 files
+tests/          Test sources — 77 tests across 19 files
 scripts/        Build and test automation
 hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
@@ -86,7 +96,7 @@ make clean
 
 ## Testing
 
-67 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to ICMP checksum calculation.
+77 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to ICMP checksum calculation and timer infrastructure.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
