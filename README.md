@@ -25,7 +25,7 @@ This is an open question, not a conclusion. The hypothesis is that the human rul
 
 ## What It Does
 
-Boots on a Raspberry Pi 3, brings up a USB Ethernet adapter (CDC-ECM class), and responds to ARP queries and ICMP echo requests. The full path:
+Boots on a Raspberry Pi 3, brings up a USB Ethernet adapter (CDC-ECM class), and handles network traffic. The full path:
 
 ```
 boot.S          Core 0 init, stack, BSS zero
@@ -35,6 +35,7 @@ boot.S          Core 0 init, stack, BSS zero
         ARP  →  arp.S    Validate request, build reply in-place
         IPv4 →  ip.S     Validate header + checksum, dispatch by protocol
           ICMP → icmp.S  Swap MACs/IPs, recompute checksums, reply
+          UDP  → udp.S   Checksum with pseudo-header, echo on port 7
       cdc_ecm_send       Transmit reply via USB bulk-OUT
 ```
 
@@ -60,10 +61,12 @@ lib/            Shared library code
   arp.S           ARP request validation and in-place reply builder
   ip.S            RFC 1071 checksum, IPv4 header validation, protocol dispatch
   icmp.S          ICMP echo reply — swap addresses, recompute checksums
+  udp.S           UDP checksum with pseudo-header, validation, echo service (port 7)
+  timer.S         ARM generic timer access and software timer pool
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 77 tests across 19 files
+tests/          Test sources — 97 tests across 20 files
 scripts/        Build and test automation
 hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
@@ -96,7 +99,7 @@ make clean
 
 ## Testing
 
-77 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to ICMP checksum calculation and timer infrastructure.
+97 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to UDP checksum calculation and timer infrastructure.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -113,7 +116,7 @@ The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the backgr
 
 ## Fuzzing
 
-Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `net_recv_one`). All five functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
+Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `udp_handle`, `net_recv_one`). All functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
 
 ### Prerequisites
 
@@ -166,8 +169,12 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - CDC-ECM Ethernet device activation and bulk data transfer
 - ARP request/reply
 - ICMP echo request/reply (ping)
+- UDP with echo service (port 7)
+- Timer infrastructure (ARM generic timer, software timer pool)
 
 **Next:**
+- DNS client (UDP) — resolve hostnames for NTP
+- NTP client (UDP) — wall-clock time for HTTP `Date` headers
 - TCP
 - HTTP
 
