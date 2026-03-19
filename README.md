@@ -171,6 +171,19 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - TCP
 - HTTP
 
+## Future: Multi-Pi Architecture
+
+The network stack is composed of plain functions that operate on buffers — nothing ties them to a specific role. This opens the door to a cluster of bare-metal Pi 3s, each with a single narrow responsibility, sharing the same assembly library:
+
+- **Firewall/filter** — inspects packets at the IP level, forwards or drops. No TCP state needed. Defends against DoS by rejecting traffic before it reaches the web server.
+- **Load balancer** — parses through TCP, rewrites headers, distributes connections across multiple web server nodes. Needs connection tracking but not HTTP parsing.
+- **Web server** — the current project. Handles TCP, serves HTTP responses. No persistent storage — reads files from the NAS over the local network.
+- **NAS** — serves a fixed set of files over a minimal read-only protocol. No directory paths, no filesystem traversal — files identified by index. Nothing to steal, nothing to overwrite.
+
+Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. The total codebase across all four roles might stay under 20 KB, small enough to audit by hand.
+
+Four Pi 3s is roughly $140 of hardware for a complete hardened web stack.
+
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
