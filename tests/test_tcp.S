@@ -145,6 +145,8 @@ test_tcp:
     bl      test_tcp_rtx_clear_on_ack
     bl      test_tcp_send_gate_rtx
     bl      test_tcp_send_ready_gate_rtx
+    bl      test_tcp_rtx_cb_send
+    bl      test_tcp_rtx_cb_max_retries
     ldp     x29, x30, [sp], #16
     ret
 
@@ -6129,6 +6131,164 @@ test_tcp_send_ready_gate_rtx:
     ret
     .ltorg
 
+/*
+ * ttcp_mock_send_fn — Mock send function that records calls
+ *
+ * x0: dwc2_base, x1: ecm_state, x2: tx_buf, w3: frame_len
+ * Records: call count, last frame_len
+ */
+ttcp_mock_send_fn:
+    ldr     x4, =ttcp_mock_send_count
+    ldr     w5, [x4]
+    add     w5, w5, #1
+    str     w5, [x4]
+    ldr     x4, =ttcp_mock_send_len
+    str     w3, [x4]
+    mov     w0, #0
+    ret
+
+/* ========================================================================
+ * test_tcp_rtx_cb_send — Retransmit callback sends frame via mock
+ *
+ * Handshake → tcp_send → set up mock send_ctx → call tcp_retransmit_cb →
+ * verify mock was called, RTXCOUNT incremented
+ * ======================================================================== */
+test_tcp_rtx_cb_send:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcbs
+    mov     x21, x0                 /* conn */
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rcbs
+
+    /* Set up mock send context */
+    mov     x0, #0                  /* fake dwc2_base */
+    mov     x1, #0                  /* fake ecm_state */
+    ldr     x2, =tcp_test_buf3      /* tx_buf */
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counters */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+    ldr     x0, =ttcp_mock_send_len
+    str     wzr, [x0]
+
+    /* Verify RTXCOUNT == 0 before callback */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_rcbs
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x21
+    bl      tcp_retransmit_cb
+
+    /* Verify mock was called once */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_rcbs
+
+    /* Verify frame_len was 59 (54 + 5) */
+    ldr     x0, =ttcp_mock_send_len
+    ldr     w0, [x0]
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_rcbs
+
+    /* Verify RTXCOUNT == 1 */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_rcbs
+
+    ldr     x0, =name_tcp_rcbs
+    bl      test_pass
+    b       .Ldone_tcp_rcbs
+.Lfail_tcp_rcbs:
+    ldr     x0, =name_tcp_rcbs
+    bl      test_fail
+.Ldone_tcp_rcbs:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_cb_max_retries — Max retries → CLOSED
+ *
+ * Handshake → tcp_send → set RTXCOUNT = TCP_MAX_RETRIES → callback →
+ * verify state == CLOSED, RTXLEN == 0
+ * ======================================================================== */
+test_tcp_rtx_cb_max_retries:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcbm
+    mov     x21, x0                 /* conn */
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rcbm
+
+    /* Set RTXCOUNT = TCP_MAX_RETRIES */
+    mov     w0, #TCP_MAX_RETRIES
+    strb    w0, [x21, #TCONN_RTXCOUNT]
+
+    /* Set up mock send context (shouldn't be called) */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counter */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x21
+    bl      tcp_retransmit_cb
+
+    /* Verify state == CLOSED */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rcbm
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_rcbm
+
+    /* Verify mock was NOT called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_rcbm
+
+    ldr     x0, =name_tcp_rcbm
+    bl      test_pass
+    b       .Ldone_tcp_rcbm
+.Lfail_tcp_rcbm:
+    ldr     x0, =name_tcp_rcbm
+    bl      test_fail
+.Ldone_tcp_rcbm:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
 /* ========================================================================
  * Test data
  * ======================================================================== */
@@ -6660,6 +6820,8 @@ name_tcp_rtxs:      .asciz "tcp_rtx_save_on_send"
 name_tcp_rtxc:      .asciz "tcp_rtx_clear_on_ack"
 name_tcp_sgate:     .asciz "tcp_send_gate_rtx"
 name_tcp_srgate:    .asciz "tcp_send_ready_gate_rtx"
+name_tcp_rcbs:      .asciz "tcp_rtx_cb_send"
+name_tcp_rcbm:      .asciz "tcp_rtx_cb_max_retries"
 
 tcp_send_payload:
     .ascii  "World"
@@ -6684,3 +6846,11 @@ tcp_send_test_buf:
 .balign 8
 test_tcp_timer_pool:
     .space  TPOOL_DEFAULT_SIZE
+
+.balign 4
+ttcp_mock_send_count:
+    .word   0
+
+.balign 4
+ttcp_mock_send_len:
+    .word   0
