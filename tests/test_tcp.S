@@ -30,6 +30,8 @@
  *  23. test_tcp_unknown_state — Exact match in CLOSE_WAIT (unknown to Phase 2) → RST
  *  24. test_tcp_syn_rcvd_no_ack — SYN_RCVD + bare data (no ACK/RST) → RST
  *  25. test_tcp_established_rst — Full handshake → ESTABLISHED, then RST → CLOSED
+ *  26. test_tcp_listen_ack_reject — ACK to LISTEN port (no SYN) → RST (line 198 taken)
+ *  27. test_tcp_established_data_drop — ACK to ESTABLISHED conn (no RST) → drop (line 330 not-taken)
  */
 
 .include "net.inc"
@@ -79,6 +81,8 @@ test_tcp:
     bl      test_tcp_unknown_state
     bl      test_tcp_syn_rcvd_no_ack
     bl      test_tcp_established_rst
+    bl      test_tcp_listen_ack_reject
+    bl      test_tcp_established_data_drop
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1553,6 +1557,162 @@ test_tcp_established_rst:
     ret
 
 /* ========================================================================
+ * test_tcp_listen_ack_reject — ACK to LISTEN port (no existing conn) → RST
+ *
+ * Exercises line 198 taken (b.eq .Ltcp_no_conn — SYN not set).
+ * After tcp_init, send ACK-only to port 80.  No SYN_RCVD connection
+ * exists, so scan finds LISTEN (x24 set) but no exact match.  At
+ * scan_done, flags=ACK has no SYN bit → line 198 branches to RST.
+ * ======================================================================== */
+test_tcp_listen_ack_reject:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Build valid ACK to port 80 */
+    ldr     x0, =tcp_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Should return 54 (RST reply) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_lar
+
+    /* Verify flags = RST (has ACK in original → RST with SEQ=SEG.ACK) */
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST
+    b.ne    .Lfail_tcp_lar
+
+    ldr     x0, =name_tcp_lar
+    bl      test_pass
+    b       .Ldone_tcp_lar
+
+.Lfail_tcp_lar:
+    ldr     x0, =name_tcp_lar
+    bl      test_fail
+
+.Ldone_tcp_lar:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_established_data_drop — ACK to ESTABLISHED conn → drop (return 0)
+ *
+ * Exercises line 330 not-taken (non-RST in ESTABLISHED → drop).
+ * Full handshake → ESTABLISHED, then send another ACK — handler sees
+ * no RST bit and falls through to drop path.
+ * ======================================================================== */
+test_tcp_established_data_drop:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Step 1: SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_edd
+
+    /* Extract ISN from SYN-ACK SEQ field */
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* w20 = ISN (host order) */
+
+    /* Step 2: ACK with correct ACK=ISN+1 → ESTABLISHED */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+.Lcopy_edd_ack:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_edd_ack
+
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_edd
+
+    /* Step 3: Send another ACK (non-RST) to ESTABLISHED → drop */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+.Lcopy_edd_data:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_edd_data
+
+    ldr     x19, =tcp_test_buf
+    /* ACK=ISN+1 (same as step 2) */
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Should return 0 (dropped, no reply) */
+    cbnz    w0, .Lfail_tcp_edd
+
+    /* Verify connection still ESTABLISHED (not closed) */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ledd_check:
+    cbz     w3, .Lfail_tcp_edd     /* no ESTABLISHED found → fail */
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Ledd_ok
+    add     x0, x0, #TCONN_SIZE
+    b       .Ledd_check
+
+.Ledd_ok:
+    ldr     x0, =name_tcp_edd
+    bl      test_pass
+    b       .Ldone_tcp_edd
+
+.Lfail_tcp_edd:
+    ldr     x0, =name_tcp_edd
+    bl      test_fail
+
+.Ldone_tcp_edd:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -1947,6 +2107,8 @@ name_tcp_lsar:      .asciz "tcp_listen_synack_reject"
 name_tcp_unkst:     .asciz "tcp_unknown_state"
 name_tcp_srnoack:   .asciz "tcp_syn_rcvd_no_ack"
 name_tcp_erst:      .asciz "tcp_established_rst"
+name_tcp_lar:       .asciz "tcp_listen_ack_reject"
+name_tcp_edd:       .asciz "tcp_established_data_drop"
 
 .section .data
 .balign 4
