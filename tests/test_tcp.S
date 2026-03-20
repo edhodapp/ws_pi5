@@ -170,6 +170,8 @@ test_tcp:
     bl      test_tcp_icmp_err_no_match
     bl      test_tcp_icmp_err_rtx_clear
     bl      test_tcp_icmp_err_short
+    bl      test_tcp_ts_syn_negotiate
+    bl      test_tcp_ts_syn_no_opt
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7627,6 +7629,162 @@ test_tcp_icmp_err_short:
     ret
 
 /* ========================================================================
+ * test_tcp_ts_syn_negotiate — SYN with TSopt → TS_ENABLED=1, TS_RECENT set
+ *
+ * Build a 66-byte SYN (14+20+32) with TCP timestamps option containing
+ * TSval=0x12345678. After tcp_handle → SYN-ACK, verify the new connection
+ * has TCONN_TS_ENABLED=1 and TCONN_TS_RECENT=0x12345678.
+ * ======================================================================== */
+test_tcp_ts_syn_negotiate:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build SYN with TSopt in tcp_test_buf.
+       Start from the 54-byte SYN template, then extend to 66 bytes. */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum      /* copy + fill checksum (we'll overwrite) */
+
+    ldr     x19, =tcp_test_buf
+
+    /* Set data offset to 0x80 (8 words = 32 bytes) */
+    mov     w0, #0x80
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Update IP total length: 52 (20+32) = 0x0034 BE */
+    mov     w0, #0x3400
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Write options at offset 54 (ETH+IP+TCP_HDR_MIN):
+       NOP(01) NOP(01) Kind(08) Len(0A) TSval(12345678) TSecr(00000000) */
+    mov     w0, #0x01
+    strb    w0, [x19, #54]         /* NOP */
+    strb    w0, [x19, #55]         /* NOP */
+    mov     w0, #0x08
+    strb    w0, [x19, #56]         /* Kind = Timestamps */
+    mov     w0, #0x0A
+    strb    w0, [x19, #57]         /* Length = 10 */
+    /* TSval = 0x12345678 (NBO) */
+    mov     w0, #0x12
+    strb    w0, [x19, #58]
+    mov     w0, #0x34
+    strb    w0, [x19, #59]
+    mov     w0, #0x56
+    strb    w0, [x19, #60]
+    mov     w0, #0x78
+    strb    w0, [x19, #61]
+    /* TSecr = 0 (4 bytes already zero from fill) */
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum over 32 bytes */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #32                 /* TCP segment = 32 bytes */
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle */
+    mov     x0, x19
+    mov     w1, #66
+    bl      tcp_handle
+    /* Should return > 0 (SYN-ACK) */
+    cbz     w0, .Lfail_tcp_tssn
+
+    /* Find the SYN_RCVD connection */
+    ldr     x19, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltssn_scan:
+    cbz     w3, .Lfail_tcp_tssn
+    sub     w3, w3, #1
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Ltssn_found
+    add     x19, x19, #TCONN_SIZE
+    b       .Ltssn_scan
+.Ltssn_found:
+    /* Verify TS_ENABLED = 1 */
+    ldrb    w0, [x19, #TCONN_TS_ENABLED]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_tssn
+
+    /* Verify TS_RECENT = 0x12345678 (host order) */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    ldr     w1, =0x12345678
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_tssn
+
+    ldr     x0, =name_tcp_tssn
+    bl      test_pass
+    b       .Ldone_tcp_tssn
+.Lfail_tcp_tssn:
+    ldr     x0, =name_tcp_tssn
+    bl      test_fail
+.Ldone_tcp_tssn:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_syn_no_opt — SYN without TSopt → TS_ENABLED=0
+ * ======================================================================== */
+test_tcp_ts_syn_no_opt:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build plain 54-byte SYN (no options) */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cbz     w0, .Lfail_tcp_tsno
+
+    /* Find the SYN_RCVD connection */
+    ldr     x19, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltsno_scan:
+    cbz     w3, .Lfail_tcp_tsno
+    sub     w3, w3, #1
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Ltsno_found
+    add     x19, x19, #TCONN_SIZE
+    b       .Ltsno_scan
+.Ltsno_found:
+    /* Verify TS_ENABLED = 0 */
+    ldrb    w0, [x19, #TCONN_TS_ENABLED]
+    cbnz    w0, .Lfail_tcp_tsno
+
+    ldr     x0, =name_tcp_tsno
+    bl      test_pass
+    b       .Ldone_tcp_tsno
+.Lfail_tcp_tsno:
+    ldr     x0, =name_tcp_tsno
+    bl      test_fail
+.Ldone_tcp_tsno:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -8182,6 +8340,8 @@ name_tcp_iem:       .asciz "tcp_icmp_err_match"
 name_tcp_ienm:      .asciz "tcp_icmp_err_no_match"
 name_tcp_ierc:      .asciz "tcp_icmp_err_rtx_clear"
 name_tcp_ies:       .asciz "tcp_icmp_err_short"
+name_tcp_tssn:      .asciz "tcp_ts_syn_negotiate"
+name_tcp_tsno:      .asciz "tcp_ts_syn_no_opt"
 
 tcp_send_payload:
     .ascii  "World"

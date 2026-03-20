@@ -35,6 +35,7 @@
 .global tcp_icmp_err
 .global tcp_rtxbuf_pool
 .global tcp_send_ctx
+.global tcp_parse_tsopt
 
 .section .text
 
@@ -867,6 +868,23 @@ tcp_listen_syn_handler:
     rev     w0, w0
     add     w0, w0, #1
     str     w0, [x21, #TCONN_RCV_NXT]
+
+    /* TSopt negotiation: parse incoming SYN for timestamps */
+    ldrb    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    lsr     w1, w1, #4
+    lsl     w1, w1, #2             /* w1 = tcp_header_len bytes */
+    mov     x0, x19                 /* frame */
+    bl      tcp_parse_tsopt
+    cbz     w1, .Llsyn_no_ts
+    /* TSopt found: w0 = TSval (NBO) — save before clobbering */
+    rev     w0, w0                  /* TSval → host order */
+    str     w0, [x21, #TCONN_TS_RECENT]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_TS_ENABLED]
+    b       .Llsyn_ts_done
+.Llsyn_no_ts:
+    strb    wzr, [x21, #TCONN_TS_ENABLED]
+.Llsyn_ts_done:
 
     /* Build SYN-ACK reply */
     mov     x0, x19                 /* frame */
@@ -1720,6 +1738,76 @@ tcp_timewait_cb:
     strb    wzr, [x0, #TCONN_STATE]
     mov     w1, #-1
     str     w1, [x0, #TCONN_TIMER_SLOT]
+    ret
+
+/*
+ * tcp_parse_tsopt — Parse TCP Timestamps option from frame
+ *
+ * x0: frame pointer (Ethernet + IP + TCP)
+ * w1: tcp_header_len (bytes, from data offset field)
+ * Returns: w0 = TSval (NBO), w1 = 1 if found, 0 if not found
+ * Clobbers: x0-x4
+ * Leaf function.
+ */
+tcp_parse_tsopt:
+    /* If header_len <= 20, no options */
+    cmp     w1, #TCP_HDR_MIN
+    b.le    .Ltso_not_found
+
+    /* x2 = pointer to first option byte */
+    add     x2, x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_HDR_MIN)
+    /* x3 = end of options */
+    add     x3, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x3, x3, x1
+
+.Ltso_loop:
+    cmp     x2, x3
+    b.hs    .Ltso_not_found
+
+    ldrb    w4, [x2]
+    cbz     w4, .Ltso_not_found     /* Kind 0 = EOL */
+    cmp     w4, #TCP_OPT_NOP
+    b.eq    .Ltso_nop
+
+    /* Kind != 0, != 1 → variable-length option */
+    /* Need at least 2 bytes (kind + length) */
+    add     x0, x2, #1
+    cmp     x0, x3
+    b.hs    .Ltso_not_found
+
+    ldrb    w0, [x2, #1]           /* length byte */
+    cmp     w0, #2
+    b.lt    .Ltso_not_found        /* malformed */
+
+    /* Check for Kind=8 (Timestamps), Length=10 */
+    cmp     w4, #TCP_OPT_TIMESTAMPS
+    b.ne    .Ltso_skip
+
+    cmp     w0, #TCP_OPT_TS_LEN
+    b.ne    .Ltso_skip
+
+    /* Verify enough bytes remain */
+    add     x0, x2, #TCP_OPT_TS_LEN
+    cmp     x0, x3
+    b.hi    .Ltso_not_found
+
+    /* Found! TSval at offset +2, TSecr at offset +6 */
+    ldr     w0, [x2, #2]           /* TSval (NBO) */
+    mov     w1, #1
+    ret
+
+.Ltso_nop:
+    add     x2, x2, #1
+    b       .Ltso_loop
+
+.Ltso_skip:
+    ldrb    w0, [x2, #1]           /* length */
+    add     x2, x2, x0             /* skip this option */
+    b       .Ltso_loop
+
+.Ltso_not_found:
+    mov     w0, #0
+    mov     w1, #0
     ret
 
 /*
