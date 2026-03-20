@@ -9,6 +9,7 @@
 
 .include "net.inc"
 .include "tcp.inc"
+.include "timer.inc"
 
 .global test_tcp_functional
 
@@ -143,8 +144,13 @@ test_tcp_functional:
     umull   x22, w21, w0
     add     x22, x22, x19
 
-    /* --- 1. tcp_init() --- */
+    /* --- 1. tcp_init() + timer pool setup --- */
     bl      tcp_init
+    ldr     x0, =func_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =func_timer_pool
+    bl      tcp_set_timer_pool
 
     /* --- 2. Pre-seed slot 1 if port_match == exact (code 0) --- */
     ldrb    w0, [x22, #ENT_PORT_MATCH]
@@ -301,6 +307,11 @@ tcp_func_table:
 msg_func_pass:   .asciz "PASS: func_"
 msg_func_fail:   .asciz "FAIL: func_"
 msg_newline_f:   .asciz "\r\n"
+
+.section .data
+.balign 8
+func_timer_pool:
+    .space  TPOOL_DEFAULT_SIZE
 
 .section .bss
 .balign 16

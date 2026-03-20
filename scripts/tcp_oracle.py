@@ -19,6 +19,11 @@ TCPS_LISTEN      = 1
 TCPS_SYN_RCVD    = 2
 TCPS_ESTABLISHED = 3
 TCPS_CLOSE_WAIT  = 4
+TCPS_LAST_ACK    = 5
+TCPS_FIN_WAIT_1  = 6
+TCPS_FIN_WAIT_2  = 7
+TCPS_TIME_WAIT   = 8
+TCPS_CLOSING     = 9
 
 ETH_HDR_LEN = 14
 IP_HDR_MIN  = 20
@@ -59,7 +64,8 @@ ENTRY_SIZE = 192
 # ---------------------------------------------------------------------------
 # Parameter enumerations
 # ---------------------------------------------------------------------------
-CONN_STATES = ['CLOSED', 'LISTEN', 'SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT']
+CONN_STATES = ['CLOSED', 'LISTEN', 'SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT',
+               'LAST_ACK', 'FIN_WAIT_1', 'FIN_WAIT_2', 'TIME_WAIT', 'CLOSING']
 FLAGS       = ['RST', 'SYN', 'SYNACK', 'FIN_ACK', 'ACK', 'NONE']
 PORT_MATCH  = ['exact', 'listen_only', 'no_match']
 PAYLOAD     = ['none', 'some', 'bad_seq']
@@ -72,6 +78,11 @@ STATE_MAP = {
     'SYN_RCVD': TCPS_SYN_RCVD,
     'ESTABLISHED': TCPS_ESTABLISHED,
     'CLOSE_WAIT': TCPS_CLOSE_WAIT,
+    'LAST_ACK': TCPS_LAST_ACK,
+    'FIN_WAIT_1': TCPS_FIN_WAIT_1,
+    'FIN_WAIT_2': TCPS_FIN_WAIT_2,
+    'TIME_WAIT': TCPS_TIME_WAIT,
+    'CLOSING': TCPS_CLOSING,
 }
 
 FLAGS_MAP = {
@@ -107,7 +118,9 @@ def is_valid_combo(conn_state, flags, port_match, payload, checksum, header):
         return True
 
     # port_match constraints
-    if port_match == 'exact' and conn_state not in ('SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT'):
+    if port_match == 'exact' and conn_state not in (
+            'SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT',
+            'LAST_ACK', 'FIN_WAIT_1', 'FIN_WAIT_2', 'TIME_WAIT', 'CLOSING'):
         return False
     if port_match == 'listen_only' and conn_state not in ('LISTEN', 'CLOSED'):
         return False
@@ -240,6 +253,41 @@ FSA_TABLE = {
         3: None,
         4: (TCPS_CLOSE_WAIT, 'drop'),
     },
+    TCPS_LAST_ACK: {
+        0: (TCPS_CLOSED, 'conn_close'),
+        1: None,
+        2: None,
+        3: None,
+        4: (TCPS_CLOSED, 'lastack_ack'),
+    },
+    TCPS_FIN_WAIT_1: {
+        0: (TCPS_CLOSED, 'conn_close'),
+        1: None,
+        2: None,
+        3: (TCPS_CLOSING, 'finwait1_fin'),
+        4: (TCPS_FIN_WAIT_2, 'finwait1_ack'),
+    },
+    TCPS_FIN_WAIT_2: {
+        0: (TCPS_CLOSED, 'conn_close'),
+        1: None,
+        2: None,
+        3: (TCPS_TIME_WAIT, 'finwait2_fin'),
+        4: (TCPS_FIN_WAIT_2, 'drop'),
+    },
+    TCPS_TIME_WAIT: {
+        0: (TCPS_CLOSED, 'conn_close'),
+        1: None,
+        2: None,
+        3: (TCPS_TIME_WAIT, 'drop'),
+        4: (TCPS_TIME_WAIT, 'drop'),
+    },
+    TCPS_CLOSING: {
+        0: (TCPS_CLOSED, 'conn_close'),
+        1: None,
+        2: None,
+        3: None,
+        4: (TCPS_TIME_WAIT, 'closing_ack'),
+    },
 }
 
 
@@ -326,6 +374,31 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
 
     if handler == 'drop':
         next_state = entry[0]
+        return (0, next_state, 0)
+
+    if handler == 'lastack_ack':
+        next_state = entry[0]  # CLOSED
+        # ACK is always correct for exact-match (ACK = SND_NXT)
+        return (0, next_state, 0)
+
+    if handler == 'finwait1_ack':
+        next_state = entry[0]  # FIN_WAIT_2
+        # ACK is always correct for exact-match
+        return (0, next_state, 0)
+
+    if handler == 'finwait1_fin':
+        next_state = entry[0]  # CLOSING
+        # RCV_NXT += 1, build ACK reply
+        return (54, next_state, TCP_ACK_FLAG)
+
+    if handler == 'finwait2_fin':
+        next_state = entry[0]  # TIME_WAIT
+        # RCV_NXT += 1, arm timer, build ACK reply
+        return (54, next_state, TCP_ACK_FLAG)
+
+    if handler == 'closing_ack':
+        next_state = entry[0]  # TIME_WAIT
+        # ACK is always correct for exact-match
         return (0, next_state, 0)
 
     # Should not reach here

@@ -12,12 +12,16 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "vmio.inc"
+.include "timer.inc"
 
 .global tcp_checksum
 .global tcp_build_reply
 .global tcp_handle
 .global tcp_init
 .global tcp_conn_table
+.global tcp_close
+.global tcp_set_timer_pool
+.global tcp_timewait_cb
 
 .section .text
 
@@ -103,6 +107,17 @@ tcp_init:
     strb    w1, [x0, #TCONN_STATE]
     mov     w1, #0x5000             /* port 80 NBO as LE halfword */
     strh    w1, [x0, #TCONN_LPORT]
+    ret
+
+/*
+ * tcp_set_timer_pool — Store timer pool pointer for TCP use
+ *
+ * x0: timer pool pointer
+ * Clobbers: x1
+ */
+tcp_set_timer_pool:
+    ldr     x1, =tcp_timer_pool_ptr
+    str     x0, [x1]
     ret
 
 /*
@@ -470,6 +485,12 @@ tcp_listen_syn_handler:
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_SRC)]
     str     w0, [x21, #TCONN_RIP]
 
+    /* Capture peer MAC from ETH_SRC (6 bytes: 4 + 2) */
+    ldr     w0, [x19, #ETH_SRC]
+    str     w0, [x21, #TCONN_RMAC]
+    ldrh    w0, [x19, #(ETH_SRC + 4)]
+    strh    w0, [x21, #(TCONN_RMAC + 4)]
+
     str     w22, [x21, #TCONN_SND_UNA]
 
     add     w0, w22, #1
@@ -611,6 +632,323 @@ tcp_estab_fin_handler:
     ret
 
 /*
+ * tcp_close — Initiate active close on a connection
+ *
+ * x0: connection pointer
+ * x1: frame buffer (54 bytes written if successful)
+ * Returns: w0 = 54 (FIN+ACK sent) or 0 (invalid state)
+ * Clobbers: x0-x6, x19-x22, x30
+ *
+ * Valid from ESTABLISHED → FIN_WAIT_1, or CLOSE_WAIT → LAST_ACK.
+ * Builds ETH+IP+TCP frame from scratch using connection fields.
+ */
+tcp_close:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+    mov     x20, x1                 /* x20 = frame buf */
+
+    /* Check state: must be ESTABLISHED or CLOSE_WAIT */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Ltc_valid
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.eq    .Ltc_valid
+
+    /* Invalid state */
+    mov     w0, #0
+    b       .Ltc_done
+
+.Ltc_valid:
+    mov     w21, w0                 /* w21 = old state */
+
+    /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
+    mov     x0, x20                 /* frame */
+    add     x1, x19, #TCONN_RMAC   /* dst = peer MAC from conn */
+    mov     w2, #0x0800             /* EtherType IPv4 */
+    bl      eth_build_hdr
+
+    /* 2. Build IP header */
+    /* ver/ihl=0x45, dscp=0x00 */
+    mov     w0, #0x45
+    strb    w0, [x20, #ETH_PAYLOAD]
+    strb    wzr, [x20, #(ETH_PAYLOAD + 1)]
+
+    /* totlen = 40 (0x0028 BE → 0x2800 LE) */
+    mov     w0, #0x2800
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* id = 0 */
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_ID)]
+
+    /* flags/frag = 0 */
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+
+    /* ttl=64, proto=TCP(6) */
+    mov     w0, #IP_DEFAULT_TTL
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_TTL)]
+    mov     w0, #6
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_PROTO)]
+
+    /* IP src = net_our_ip */
+    ldr     x0, =net_our_ip
+    ldr     w0, [x0]
+    str     w0, [x20, #(ETH_PAYLOAD + IP_SRC)]
+
+    /* IP dst = conn RIP */
+    ldr     w0, [x19, #TCONN_RIP]
+    str     w0, [x20, #(ETH_PAYLOAD + IP_DST)]
+
+    /* IP checksum */
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x20, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* 3. Build TCP header */
+    /* sport = conn LPORT, dport = conn RPORT */
+    ldrh    w0, [x19, #TCONN_LPORT]
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
+    ldrh    w0, [x19, #TCONN_RPORT]
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]
+
+    /* SEQ = rev(SND_NXT) (NBO) */
+    ldr     w22, [x19, #TCONN_SND_NXT]
+    rev     w0, w22
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* ACK = rev(RCV_NXT) (NBO) */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* data offset=0x50, flags=FIN+ACK */
+    mov     w0, #0x50
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #TCP_FIN_ACK
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+
+    /* window = 1460 NBO (0xB405 LE) */
+    mov     w0, #0xB405
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+
+    /* urgent = 0 */
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_URGENT)]
+
+    /* TCP checksum */
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #TCP_HDR_MIN
+    bl      tcp_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* 4. SND_NXT += 1 (FIN consumes one seq) */
+    add     w22, w22, #1
+    str     w22, [x19, #TCONN_SND_NXT]
+
+    /* 5. State transition */
+    cmp     w21, #TCPS_ESTABLISHED
+    b.ne    .Ltc_closewait
+    mov     w0, #TCPS_FIN_WAIT_1
+    b       .Ltc_set_state
+.Ltc_closewait:
+    mov     w0, #TCPS_LAST_ACK
+.Ltc_set_state:
+    strb    w0, [x19, #TCONN_STATE]
+
+    mov     w0, #54
+
+.Ltc_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_lastack_ack_handler — LAST_ACK + ACK → CLOSED
+ *
+ * Verify SEG.ACK == SND_NXT. Bad → restore LAST_ACK, return -1.
+ * Good → return 0 (FSA already wrote CLOSED).
+ * Leaf function.
+ */
+tcp_lastack_ack_handler:
+    ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4
+    ldr     w5, [x0, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ne    .Llaa_bad
+    mov     w0, #0
+    ret
+.Llaa_bad:
+    mov     w4, #TCPS_LAST_ACK
+    strb    w4, [x0, #TCONN_STATE]
+    mov     w0, #-1
+    ret
+
+/*
+ * tcp_finwait1_ack_handler — FIN_WAIT_1 + ACK → FIN_WAIT_2
+ *
+ * Verify SEG.ACK == SND_NXT. Bad → restore FIN_WAIT_1, return -1.
+ * Good → return 0 (FSA already wrote FIN_WAIT_2).
+ * Leaf function.
+ */
+tcp_finwait1_ack_handler:
+    ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4
+    ldr     w5, [x0, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ne    .Lfw1a_bad
+    mov     w0, #0
+    ret
+.Lfw1a_bad:
+    mov     w4, #TCPS_FIN_WAIT_1
+    strb    w4, [x0, #TCONN_STATE]
+    mov     w0, #-1
+    ret
+
+/*
+ * tcp_finwait1_fin_handler — FIN_WAIT_1 + FIN → CLOSING (simultaneous close)
+ *
+ * RCV_NXT += 1, build ACK reply. Return 54.
+ * Same pattern as tcp_estab_fin_handler.
+ */
+tcp_finwait1_fin_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* RCV_NXT += 1 (FIN consumes one seq) */
+    ldr     w5, [x0, #TCONN_RCV_NXT]
+    add     w5, w5, #1
+    str     w5, [x0, #TCONN_RCV_NXT]
+
+    ldr     w19, [x0, #TCONN_SND_NXT]
+    rev     w20, w5                     /* new RCV_NXT → NBO */
+
+    mov     x0, x1                  /* frame */
+    rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
+    mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
+    mov     w3, #TCP_ACK_FLAG
+    mov     w4, #0xB405            /* window 1460 NBO */
+    bl      tcp_build_reply
+
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tcp_finwait2_fin_handler — FIN_WAIT_2 + FIN → TIME_WAIT
+ *
+ * RCV_NXT += 1, arm 2MSL timer, build ACK reply. Return 54.
+ */
+tcp_finwait2_fin_handler:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x21, x0                 /* x21 = conn */
+
+    /* RCV_NXT += 1 (FIN consumes one seq) */
+    ldr     w5, [x21, #TCONN_RCV_NXT]
+    add     w5, w5, #1
+    str     w5, [x21, #TCONN_RCV_NXT]
+
+    ldr     w19, [x21, #TCONN_SND_NXT]
+    rev     w20, w5                     /* new RCV_NXT → NBO */
+
+    /* Build ACK reply first (clobbers frame) */
+    mov     x0, x1                  /* frame */
+    rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
+    mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
+    mov     w3, #TCP_ACK_FLAG
+    mov     w4, #0xB405            /* window 1460 NBO */
+    bl      tcp_build_reply
+    mov     w22, w0                 /* save return value (54) */
+
+    /* Arm 2MSL timer (60 seconds) */
+    mrs     x0, CNTFRQ_EL0
+    mov     x1, #60
+    mul     x1, x0, x1             /* x1 = 60 * freq = expiry delta */
+    mrs     x0, CNTPCT_EL0
+    add     x1, x0, x1             /* x1 = now + 60s = expiry tick */
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]               /* x0 = timer pool */
+    /* x1 = expiry tick */
+    ldr     x2, =tcp_timewait_cb   /* callback */
+    mov     x3, x21                 /* context = conn ptr */
+    bl      timer_set
+    str     w0, [x21, #TCONN_TIMER_SLOT]
+
+    mov     w0, w22                 /* restore return value */
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_closing_ack_handler — CLOSING + ACK → TIME_WAIT
+ *
+ * Verify SEG.ACK == SND_NXT. Bad → restore CLOSING, return -1.
+ * Good → arm 2MSL timer, return 0 (FSA already wrote TIME_WAIT).
+ * Note: non-leaf due to timer_set call.
+ */
+tcp_closing_ack_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* conn */
+
+    ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4
+    ldr     w5, [x19, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ne    .Lcla_bad
+
+    /* Arm 2MSL timer (60 seconds) */
+    mrs     x0, CNTFRQ_EL0
+    mov     x1, #60
+    mul     x1, x0, x1
+    mrs     x0, CNTPCT_EL0
+    add     x1, x0, x1
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    ldr     x2, =tcp_timewait_cb
+    mov     x3, x19
+    bl      timer_set
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     w0, #0
+    b       .Lcla_done
+
+.Lcla_bad:
+    mov     w4, #TCPS_CLOSING
+    strb    w4, [x19, #TCONN_STATE]
+    mov     w0, #-1
+
+.Lcla_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tcp_timewait_cb — Timer callback for TIME_WAIT expiry
+ *
+ * x0: connection pointer (passed as context)
+ * Sets state=CLOSED, TIMER_SLOT=-1.
+ * Leaf function.
+ */
+tcp_timewait_cb:
+    strb    wzr, [x0, #TCONN_STATE]
+    mov     w1, #-1
+    str     w1, [x0, #TCONN_TIMER_SLOT]
+    ret
+
+/*
  * tcp_isn — Generate initial sequence number (weak, overridable)
  *
  * Returns: w0 = 32-bit ISN
@@ -679,37 +1017,48 @@ tcp_fsa_table:
     .word 0, 0; .xword 0                                       /* FIN → RST */
     .word TCPS_CLOSE_WAIT, 0; .xword tcp_drop_handler           /* ACK → CLOSE_WAIT (absorb) */
 
-    /* State 5: LAST_ACK — not yet implemented */
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
+    /* State 5: LAST_ACK */
+    .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
+    .word 0, 0; .xword 0                                       /* SYN → RST */
+    .word 0, 0; .xword 0                                       /* SYNACK → RST */
+    .word 0, 0; .xword 0                                       /* FIN → RST */
+    .word TCPS_CLOSED, 0; .xword tcp_lastack_ack_handler         /* ACK → CLOSED */
 
-    /* State 6: FIN_WAIT_1 — not yet implemented */
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
+    /* State 6: FIN_WAIT_1 */
+    .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
+    .word 0, 0; .xword 0                                       /* SYN → RST */
+    .word 0, 0; .xword 0                                       /* SYNACK → RST */
+    .word TCPS_CLOSING, 0; .xword tcp_finwait1_fin_handler       /* FIN → CLOSING */
+    .word TCPS_FIN_WAIT_2, 0; .xword tcp_finwait1_ack_handler   /* ACK → FIN_WAIT_2 */
 
-    /* State 7: FIN_WAIT_2 — not yet implemented */
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
+    /* State 7: FIN_WAIT_2 */
+    .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
+    .word 0, 0; .xword 0                                       /* SYN → RST */
+    .word 0, 0; .xword 0                                       /* SYNACK → RST */
+    .word TCPS_TIME_WAIT, 0; .xword tcp_finwait2_fin_handler     /* FIN → TIME_WAIT */
+    .word TCPS_FIN_WAIT_2, 0; .xword tcp_drop_handler           /* ACK → FIN_WAIT_2 */
 
-    /* State 8: TIME_WAIT — not yet implemented */
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
-    .word 0, 0; .xword 0
+    /* State 8: TIME_WAIT */
+    .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
+    .word 0, 0; .xword 0                                       /* SYN → RST */
+    .word 0, 0; .xword 0                                       /* SYNACK → RST */
+    .word TCPS_TIME_WAIT, 0; .xword tcp_drop_handler             /* FIN → TIME_WAIT */
+    .word TCPS_TIME_WAIT, 0; .xword tcp_drop_handler             /* ACK → TIME_WAIT */
 
-/* --- Connection table (BSS) --- */
+    /* State 9: CLOSING */
+    .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
+    .word 0, 0; .xword 0                                       /* SYN → RST */
+    .word 0, 0; .xword 0                                       /* SYNACK → RST */
+    .word 0, 0; .xword 0                                       /* FIN → RST */
+    .word TCPS_TIME_WAIT, 0; .xword tcp_closing_ack_handler     /* ACK → TIME_WAIT */
+
+/* --- Connection table and TCP state (BSS) --- */
 
 .section .bss
 .balign 16
 tcp_conn_table:
     .space  TCP_CONN_TABLE_SIZE
+
+.balign 8
+tcp_timer_pool_ptr:
+    .space  8

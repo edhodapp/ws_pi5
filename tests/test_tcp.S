@@ -36,6 +36,7 @@
 
 .include "net.inc"
 .include "tcp.inc"
+.include "timer.inc"
 
 .global test_tcp
 
@@ -90,6 +91,16 @@ test_tcp:
     bl      test_tcp_estab_data_multi
     bl      test_tcp_fsa_null_handler
     bl      test_tcp_scan_lport_miss
+    bl      test_tcp_close_estab
+    bl      test_tcp_close_closewait
+    bl      test_tcp_close_invalid
+    bl      test_tcp_finwait1_ack
+    bl      test_tcp_finwait1_fin
+    bl      test_tcp_finwait2_fin
+    bl      test_tcp_closing_ack
+    bl      test_tcp_lastack_ack
+    bl      test_tcp_timewait_rst
+    bl      test_tcp_timewait_timeout
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2246,8 +2257,8 @@ test_tcp_estab_data_multi:
 /* ========================================================================
  * test_tcp_fsa_null_handler — FSA dispatch with NULL handler entry → RST
  *
- * Handshake → ESTABLISHED, overwrite state to LAST_ACK (state 5, all-zero
- * FSA row). Send matching ACK → exact match → FSA lookup → handler=0 →
+ * Handshake → ESTABLISHED, overwrite state to LAST_ACK (state 5).
+ * Send matching SYNACK → exact match → FSA lookup → handler=0 →
  * cbz x16 taken → .Ltcp_no_conn → RST.
  * ======================================================================== */
 test_tcp_fsa_null_handler:
@@ -2304,21 +2315,12 @@ test_tcp_fsa_null_handler:
     mov     w1, #TCPS_LAST_ACK
     strb    w1, [x0, #TCONN_STATE]
 
-    /* Send matching ACK → exact match → LAST_ACK → FSA handler=NULL → RST */
-    ldr     x0, =tcp_handshake_ack_template
+    /* Send matching SYNACK → exact match → LAST_ACK+SYNACK → NULL handler → RST */
+    ldr     x0, =tcp_synack_to80_template
     ldr     x1, =tcp_test_buf
     mov     w2, #54
     bl      ttcp_fill_checksum
-    ldr     x19, =tcp_test_buf
-    add     w0, w20, #1
-    rev     w0, w0
-    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
-    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
-    mov     x0, x19
-    mov     w1, #20
-    bl      tcp_checksum
-    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
-    mov     x0, x19
+    ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
 
@@ -2412,6 +2414,960 @@ test_tcp_scan_lport_miss:
     ldr     x0, =name_tcp_slm
     bl      test_fail
 .Ldone_tcp_slm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_close_estab — tcp_close from ESTABLISHED → FIN_WAIT_1
+ * ======================================================================== */
+test_tcp_close_estab:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ce
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* w20 = ISN (host order) */
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_ce
+
+    /* Find ESTABLISHED conn */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lce_find:
+    cbz     w3, .Lfail_tcp_ce
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lce_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lce_find
+.Lce_found:
+    mov     x21, x0
+    ldr     w22, [x21, #TCONN_SND_NXT]  /* save SND_NXT before close */
+
+    /* Call tcp_close */
+    mov     x0, x21
+    ldr     x1, =tcp_test_buf2
+    bl      tcp_close
+
+    /* Verify return = 54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ce
+
+    /* Verify flags = FIN+ACK (0x11) */
+    ldr     x0, =tcp_test_buf2
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_FIN_ACK
+    b.ne    .Lfail_tcp_ce
+
+    /* Verify state = FIN_WAIT_1 */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_FIN_WAIT_1
+    b.ne    .Lfail_tcp_ce
+
+    /* Verify SND_NXT = old + 1 */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_ce
+
+    ldr     x0, =name_tcp_ce
+    bl      test_pass
+    b       .Ldone_tcp_ce
+.Lfail_tcp_ce:
+    ldr     x0, =name_tcp_ce
+    bl      test_fail
+.Ldone_tcp_ce:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_close_closewait — tcp_close from CLOSE_WAIT → LAST_ACK
+ * ======================================================================== */
+test_tcp_close_closewait:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ccw
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_ccw
+
+    /* Find ESTABLISHED conn */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lccw_find:
+    cbz     w3, .Lfail_tcp_ccw
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lccw_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lccw_find
+.Lccw_found:
+    mov     x21, x0
+
+    /* Send FIN+ACK → CLOSE_WAIT */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ccw
+
+    /* Verify CLOSE_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_ccw
+
+    /* Save SND_NXT before close */
+    ldr     w22, [x21, #TCONN_SND_NXT]
+
+    /* Call tcp_close from CLOSE_WAIT */
+    mov     x0, x21
+    ldr     x1, =tcp_test_buf2
+    bl      tcp_close
+
+    /* Verify return = 54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ccw
+
+    /* Verify flags = FIN+ACK */
+    ldr     x0, =tcp_test_buf2
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_FIN_ACK
+    b.ne    .Lfail_tcp_ccw
+
+    /* Verify state = LAST_ACK */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_LAST_ACK
+    b.ne    .Lfail_tcp_ccw
+
+    /* Verify SND_NXT = old + 1 */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_ccw
+
+    ldr     x0, =name_tcp_ccw
+    bl      test_pass
+    b       .Ldone_tcp_ccw
+.Lfail_tcp_ccw:
+    ldr     x0, =name_tcp_ccw
+    bl      test_fail
+.Ldone_tcp_ccw:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_close_invalid — tcp_close from LISTEN → returns 0, no change
+ * ======================================================================== */
+test_tcp_close_invalid:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Attempt close on LISTEN slot */
+    ldr     x0, =tcp_conn_table
+    ldr     x1, =tcp_test_buf
+    bl      tcp_close
+
+    /* Verify return = 0 */
+    cbnz    w0, .Lfail_tcp_ci
+
+    /* Verify state unchanged (LISTEN) */
+    ldr     x0, =tcp_conn_table
+    ldrb    w0, [x0, #TCONN_STATE]
+    cmp     w0, #TCPS_LISTEN
+    b.ne    .Lfail_tcp_ci
+
+    ldr     x0, =name_tcp_ci
+    bl      test_pass
+    b       .Ldone_tcp_ci
+.Lfail_tcp_ci:
+    ldr     x0, =name_tcp_ci
+    bl      test_fail
+.Ldone_tcp_ci:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_finwait1_ack — FIN_WAIT_1 + ACK → FIN_WAIT_2
+ * ======================================================================== */
+test_tcp_finwait1_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fw1a
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_fw1a
+
+    /* Find ESTABLISHED, set FIN_WAIT_1, SND_NXT += 1 (simulates our FIN) */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfw1a_find:
+    cbz     w3, .Lfail_tcp_fw1a
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lfw1a_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lfw1a_find
+.Lfw1a_found:
+    mov     x21, x0
+    mov     w1, #TCPS_FIN_WAIT_1
+    strb    w1, [x21, #TCONN_STATE]
+    ldr     w22, [x21, #TCONN_SND_NXT]
+    add     w22, w22, #1
+    str     w22, [x21, #TCONN_SND_NXT]  /* SND_NXT = ISN + 2 */
+
+    /* Send ACK with ACK# = SND_NXT */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    rev     w0, w22
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ret = 0 (no reply) */
+    cbnz    w0, .Lfail_tcp_fw1a
+
+    /* Verify state = FIN_WAIT_2 */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_FIN_WAIT_2
+    b.ne    .Lfail_tcp_fw1a
+
+    ldr     x0, =name_tcp_fw1a
+    bl      test_pass
+    b       .Ldone_tcp_fw1a
+.Lfail_tcp_fw1a:
+    ldr     x0, =name_tcp_fw1a
+    bl      test_fail
+.Ldone_tcp_fw1a:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_finwait1_fin — FIN_WAIT_1 + FIN → CLOSING (simultaneous close)
+ * ======================================================================== */
+test_tcp_finwait1_fin:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fw1f
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_fw1f
+
+    /* Find ESTABLISHED, set FIN_WAIT_1 */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfw1f_find:
+    cbz     w3, .Lfail_tcp_fw1f
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lfw1f_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lfw1f_find
+.Lfw1f_found:
+    mov     x21, x0
+    mov     w1, #TCPS_FIN_WAIT_1
+    strb    w1, [x21, #TCONN_STATE]
+    ldr     w22, [x21, #TCONN_RCV_NXT]  /* save RCV_NXT */
+
+    /* Send FIN+ACK */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ret = 54 (ACK reply) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fw1f
+
+    /* Verify state = CLOSING */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSING
+    b.ne    .Lfail_tcp_fw1f
+
+    /* Verify RCV_NXT += 1 */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_fw1f
+
+    ldr     x0, =name_tcp_fw1f
+    bl      test_pass
+    b       .Ldone_tcp_fw1f
+.Lfail_tcp_fw1f:
+    ldr     x0, =name_tcp_fw1f
+    bl      test_fail
+.Ldone_tcp_fw1f:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_finwait2_fin — FIN_WAIT_2 + FIN → TIME_WAIT, timer armed
+ * ======================================================================== */
+test_tcp_finwait2_fin:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Init test timer pool */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fw2f
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_fw2f
+
+    /* Find ESTABLISHED, set FIN_WAIT_2 */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfw2f_find:
+    cbz     w3, .Lfail_tcp_fw2f
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lfw2f_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lfw2f_find
+.Lfw2f_found:
+    mov     x21, x0
+    mov     w1, #TCPS_FIN_WAIT_2
+    strb    w1, [x21, #TCONN_STATE]
+
+    /* Send FIN+ACK */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ret = 54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fw2f
+
+    /* Verify state = TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_fw2f
+
+    /* Verify timer armed (TIMER_SLOT != -1) */
+    ldr     w0, [x21, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.eq    .Lfail_tcp_fw2f
+
+    ldr     x0, =name_tcp_fw2f
+    bl      test_pass
+    b       .Ldone_tcp_fw2f
+.Lfail_tcp_fw2f:
+    ldr     x0, =name_tcp_fw2f
+    bl      test_fail
+.Ldone_tcp_fw2f:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_closing_ack — CLOSING + ACK → TIME_WAIT, timer armed
+ * ======================================================================== */
+test_tcp_closing_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Init test timer pool */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_cla
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_cla
+
+    /* Find ESTABLISHED, set CLOSING, SND_NXT += 1 */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lcla_find:
+    cbz     w3, .Lfail_tcp_cla
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lcla_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lcla_find
+.Lcla_found:
+    mov     x21, x0
+    mov     w1, #TCPS_CLOSING
+    strb    w1, [x21, #TCONN_STATE]
+    ldr     w22, [x21, #TCONN_SND_NXT]
+    add     w22, w22, #1
+    str     w22, [x21, #TCONN_SND_NXT]
+
+    /* Send ACK with ACK# = SND_NXT */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    rev     w0, w22
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ret = 0 */
+    cbnz    w0, .Lfail_tcp_cla
+
+    /* Verify state = TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_cla
+
+    /* Verify timer armed */
+    ldr     w0, [x21, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.eq    .Lfail_tcp_cla
+
+    ldr     x0, =name_tcp_cla
+    bl      test_pass
+    b       .Ldone_tcp_cla
+.Lfail_tcp_cla:
+    ldr     x0, =name_tcp_cla
+    bl      test_fail
+.Ldone_tcp_cla:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_lastack_ack — LAST_ACK + ACK → CLOSED
+ * ======================================================================== */
+test_tcp_lastack_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_laa
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_laa
+
+    /* Find ESTABLISHED, set LAST_ACK, SND_NXT += 1 */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Llaa_find:
+    cbz     w3, .Lfail_tcp_laa
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Llaa_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Llaa_find
+.Llaa_found:
+    mov     x21, x0
+    mov     w1, #TCPS_LAST_ACK
+    strb    w1, [x21, #TCONN_STATE]
+    ldr     w22, [x21, #TCONN_SND_NXT]
+    add     w22, w22, #1
+    str     w22, [x21, #TCONN_SND_NXT]
+
+    /* Send ACK with ACK# = SND_NXT */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    rev     w0, w22
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ret = 0 */
+    cbnz    w0, .Lfail_tcp_laa
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_laa
+
+    ldr     x0, =name_tcp_laa
+    bl      test_pass
+    b       .Ldone_tcp_laa
+.Lfail_tcp_laa:
+    ldr     x0, =name_tcp_laa
+    bl      test_fail
+.Ldone_tcp_laa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_timewait_rst — RST to TIME_WAIT → CLOSED
+ * ======================================================================== */
+test_tcp_timewait_rst:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_twr
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_twr
+
+    /* Find ESTABLISHED, set TIME_WAIT */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltwr_find:
+    cbz     w3, .Lfail_tcp_twr
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Ltwr_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Ltwr_find
+.Ltwr_found:
+    mov     x19, x0
+    mov     w1, #TCPS_TIME_WAIT
+    strb    w1, [x19, #TCONN_STATE]
+
+    /* Send RST */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_twr
+
+    ldr     x0, =name_tcp_twr
+    bl      test_pass
+    b       .Ldone_tcp_twr
+.Lfail_tcp_twr:
+    ldr     x0, =name_tcp_twr
+    bl      test_fail
+.Ldone_tcp_twr:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_timewait_timeout — TIME_WAIT timer expiry → CLOSED
+ * ======================================================================== */
+test_tcp_timewait_timeout:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Init test timer pool */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_twto
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_twto
+
+    /* Find ESTABLISHED, set TIME_WAIT */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltwto_find:
+    cbz     w3, .Lfail_tcp_twto
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Ltwto_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Ltwto_find
+.Ltwto_found:
+    mov     x19, x0
+    mov     w1, #TCPS_TIME_WAIT
+    strb    w1, [x19, #TCONN_STATE]
+
+    /* Arm timer with expiry=0 (already expired) */
+    ldr     x0, =test_tcp_timer_pool
+    mov     x1, #0                      /* expiry = 0 */
+    ldr     x2, =tcp_timewait_cb        /* callback */
+    mov     x3, x19                     /* context = conn ptr */
+    bl      timer_set
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Fire timer: timer_check(pool, tick=1) */
+    ldr     x0, =test_tcp_timer_pool
+    mov     x1, #1                      /* current tick */
+    bl      timer_check
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_twto
+
+    /* Verify TIMER_SLOT = -1 */
+    ldr     w0, [x19, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.ne    .Lfail_tcp_twto
+
+    ldr     x0, =name_tcp_twto
+    bl      test_pass
+    b       .Ldone_tcp_twto
+.Lfail_tcp_twto:
+    ldr     x0, =name_tcp_twto
+    bl      test_fail
+.Ldone_tcp_twto:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
@@ -2897,6 +3853,16 @@ name_tcp_cwr:       .asciz "tcp_close_wait_rst"
 name_tcp_edm:       .asciz "tcp_estab_data_multi"
 name_tcp_fnh:       .asciz "tcp_fsa_null_handler"
 name_tcp_slm:       .asciz "tcp_scan_lport_miss"
+name_tcp_ce:        .asciz "tcp_close_estab"
+name_tcp_ccw:       .asciz "tcp_close_closewait"
+name_tcp_ci:        .asciz "tcp_close_invalid"
+name_tcp_fw1a:      .asciz "tcp_finwait1_ack"
+name_tcp_fw1f:      .asciz "tcp_finwait1_fin"
+name_tcp_fw2f:      .asciz "tcp_finwait2_fin"
+name_tcp_cla:       .asciz "tcp_closing_ack"
+name_tcp_laa:       .asciz "tcp_lastack_ack"
+name_tcp_twr:       .asciz "tcp_timewait_rst"
+name_tcp_twto:      .asciz "tcp_timewait_timeout"
 
 .section .data
 .balign 4
@@ -2906,3 +3872,7 @@ tcp_test_buf:
 .balign 4
 tcp_test_buf2:
     .space  128
+
+.balign 8
+test_tcp_timer_pool:
+    .space  TPOOL_DEFAULT_SIZE

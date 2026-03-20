@@ -1,4 +1,4 @@
-conn_state:  CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT
+conn_state:  CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, LAST_ACK, FIN_WAIT_1, FIN_WAIT_2, TIME_WAIT, CLOSING
 flags:       RST, SYN, SYNACK, FIN_ACK, ACK, NONE
 port_match:  exact, listen_only, no_match
 payload:     none, some, bad_seq
@@ -18,7 +18,7 @@ IF [checksum] = "invalid" THEN [conn_state] = "CLOSED"
     AND [payload] = "none" AND [header] = "valid";
 
 # port_match constraints
-IF [port_match] = "exact" THEN [conn_state] IN {"SYN_RCVD", "ESTABLISHED", "CLOSE_WAIT"};
+IF [port_match] = "exact" THEN [conn_state] IN {"SYN_RCVD", "ESTABLISHED", "CLOSE_WAIT", "LAST_ACK", "FIN_WAIT_1", "FIN_WAIT_2", "TIME_WAIT", "CLOSING"};
 IF [port_match] = "listen_only" THEN [conn_state] IN {"LISTEN", "CLOSED"};
 IF [port_match] = "no_match" THEN [conn_state] = "CLOSED";
 

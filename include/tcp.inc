@@ -41,6 +41,10 @@
 .equ TCPS_FIN_WAIT_1,  6
 .equ TCPS_FIN_WAIT_2,  7
 .equ TCPS_TIME_WAIT,   8
+.equ TCPS_CLOSING,     9
+
+/* Pre-combined flag values (additions) */
+.equ TCP_FIN_ACK,      0x11    /* FIN + ACK */
 
 /* Connection struct (64 bytes, Phase 2+) */
 .equ TCONN_STATE,      0       /* u8  */
@@ -56,7 +60,8 @@
 .equ TCONN_SND_WND,    40      /* u16 — peer's advertised window */
 .equ TCONN_RCV_WND,    42      /* u16 — our advertised window */
 .equ TCONN_TIMER_SLOT, 44      /* w32 — retransmit timer slot (-1=none) */
-.equ TCONN_PAD4,       48
+.equ TCONN_RMAC,       48      /* 6 bytes — peer MAC (captured from SYN) */
+.equ TCONN_PAD4,       54
 .equ TCONN_SIZE,       64      /* power of 2 → lsl #6 for indexing */
 
 /* Connection table */
@@ -70,4 +75,4 @@
 .equ TCP_EVT_FIN,      3       /* FIN set (may have ACK) */
 .equ TCP_EVT_ACK,      4       /* ACK set, no SYN/FIN/RST */
 .equ TCP_N_EVENTS,     5
-.equ TCP_N_STATES,     9       /* CLOSED(0) through TIME_WAIT(8) */
+.equ TCP_N_STATES,     10      /* CLOSED(0) through CLOSING(9) */

@@ -55,6 +55,10 @@ main:
     /* Initialize TCP connection table */
     bl      tcp_init
 
+    /* Give TCP a handle to the timer pool */
+    ldr     x0, =timer_pool
+    bl      tcp_set_timer_pool
+
     /* Initialize NTP (cache timer frequency) */
     bl      ntp_init
 
