@@ -68,7 +68,7 @@ CONN_STATES = ['CLOSED', 'LISTEN', 'SYN_RCVD', 'ESTABLISHED', 'CLOSE_WAIT',
                'LAST_ACK', 'FIN_WAIT_1', 'FIN_WAIT_2', 'TIME_WAIT', 'CLOSING']
 FLAGS       = ['RST', 'SYN', 'SYNACK', 'FIN_ACK', 'ACK', 'NONE']
 PORT_MATCH  = ['exact', 'listen_only', 'no_match']
-PAYLOAD     = ['none', 'some', 'bad_seq']
+PAYLOAD     = ['none', 'some', 'bad_seq', 'dup_seq']
 CHECKSUM    = ['valid', 'invalid']
 HEADER      = ['valid', 'short_frame', 'bad_doff', 'doff_overrun']
 
@@ -131,7 +131,10 @@ def is_valid_combo(conn_state, flags, port_match, payload, checksum, header):
     if payload == 'bad_seq':
         if not (conn_state == 'ESTABLISHED' and flags == 'ACK' and port_match == 'exact'):
             return False
-    if payload in ('some', 'bad_seq'):
+    if payload == 'dup_seq':
+        if not (conn_state == 'ESTABLISHED' and flags == 'ACK' and port_match == 'exact'):
+            return False
+    if payload in ('some', 'bad_seq', 'dup_seq'):
         if header != 'valid' or checksum != 'valid':
             return False
 
@@ -364,8 +367,11 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
             # SEQ = PRE_RCV_NXT = 2, matches RCV_NXT -> accept data, reply ACK
             return (54, next_state, TCP_ACK_FLAG)
         elif payload == 'bad_seq':
-            # SEQ = 999 != RCV_NXT -> out of order -> drop
+            # SEQ = 999 > RCV_NXT -> future, drop
             return (0, next_state, 0)
+        elif payload == 'dup_seq':
+            # SEQ = 0 < RCV_NXT = 2 -> duplicate data, re-ACK
+            return (54, next_state, TCP_ACK_FLAG)
         return (0, next_state, 0)
 
     if handler == 'estab_fin':
@@ -436,7 +442,9 @@ def build_frame_v2(conn_state, flags, port_match, payload, checksum, header):
         # Good SEQ: must match RCV_NXT of pre-seeded connection
         tcp_seq_host = PRE_RCV_NXT  # 2
     elif payload == 'bad_seq':
-        tcp_seq_host = 999  # wrong SEQ
+        tcp_seq_host = 999  # wrong SEQ (future: > RCV_NXT)
+    elif payload == 'dup_seq':
+        tcp_seq_host = 0    # duplicate: < RCV_NXT (which is 2)
     else:
         tcp_seq_host = 1
 
@@ -455,7 +463,7 @@ def build_frame_v2(conn_state, flags, port_match, payload, checksum, header):
         data_off_byte = 0x50  # 5 words = 20 bytes (normal)
 
     # Payload data
-    if payload in ('some', 'bad_seq'):
+    if payload in ('some', 'bad_seq', 'dup_seq'):
         payload_data = bytes([0x48, 0x65, 0x6C, 0x6C, 0x6F])  # "Hello"
     else:
         payload_data = b''

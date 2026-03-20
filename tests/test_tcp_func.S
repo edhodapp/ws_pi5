@@ -181,6 +181,10 @@ test_tcp_functional:
     ldr     w1, [x22, #ENT_PRE_RCV_NXT]
     str     w1, [x0, #TCONN_RCV_NXT]
 
+    /* Initialize retransmit state (no pending retransmit) */
+    mov     w1, #-1
+    str     w1, [x0, #TCONN_TIMER_SLOT]
+
 .Lfunc_no_preseed:
 
     /* --- 3. Copy frame data to scratch buffer --- */

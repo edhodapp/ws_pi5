@@ -1,7 +1,7 @@
 conn_state:  CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, LAST_ACK, FIN_WAIT_1, FIN_WAIT_2, TIME_WAIT, CLOSING
 flags:       RST, SYN, SYNACK, FIN_ACK, ACK, NONE
 port_match:  exact, listen_only, no_match
-payload:     none, some, bad_seq
+payload:     none, some, bad_seq, dup_seq
 checksum:    valid, invalid
 header:      valid, short_frame, bad_doff, doff_overrun
 
@@ -25,4 +25,6 @@ IF [port_match] = "no_match" THEN [conn_state] = "CLOSED";
 # payload constraints
 IF [payload] = "bad_seq" THEN [conn_state] = "ESTABLISHED"
     AND [flags] = "ACK" AND [port_match] = "exact";
-IF [payload] IN {"some", "bad_seq"} THEN [header] = "valid" AND [checksum] = "valid";
+IF [payload] = "dup_seq" THEN [conn_state] = "ESTABLISHED"
+    AND [flags] = "ACK" AND [port_match] = "exact";
+IF [payload] IN {"some", "bad_seq", "dup_seq"} THEN [header] = "valid" AND [checksum] = "valid";
