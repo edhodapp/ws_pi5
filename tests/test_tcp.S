@@ -154,6 +154,12 @@ test_tcp:
     bl      test_tcp_fin_rtx_clear_lastack
     bl      test_tcp_dup_data_ack
     bl      test_tcp_rst_clears_rtx
+    bl      test_tcp_rtx_arm_rto_cap
+    bl      test_tcp_rtx_clear_no_pool
+    bl      test_tcp_rtx_cb_stale_closed
+    bl      test_tcp_rtx_cb_stale_listen
+    bl      test_tcp_rtx_cb_no_send_fn
+    bl      test_tcp_snd_una_future_ack
     ldp     x29, x30, [sp], #16
     ret
 
@@ -6717,6 +6723,370 @@ test_tcp_rst_clears_rtx:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_rtx_arm_rto_cap — RTO capped at 60s when RTXCOUNT >= 6
+ *
+ * Handshake → tcp_send → set up timer pool + mock send_ctx →
+ * set RTXCOUNT=5 → tcp_retransmit_cb → RTXCOUNT becomes 6 →
+ * re-arm hits 1<<6=64 > 60 cap → verify RTXCOUNT==6, mock called
+ * ======================================================================== */
+test_tcp_rtx_arm_rto_cap:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rtocap
+    mov     x21, x0                 /* conn */
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rtocap
+
+    /* Init timer pool (so tcp_rtx_arm actually arms) */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counters */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Set RTXCOUNT = 5 (callback increments to 6, 1<<6=64 > 60 cap) */
+    mov     w0, #5
+    strb    w0, [x21, #TCONN_RTXCOUNT]
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x21
+    bl      tcp_retransmit_cb
+
+    /* Verify RTXCOUNT == 6 */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cmp     w0, #6
+    b.ne    .Lfail_tcp_rtocap
+
+    /* Verify mock was called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_rtocap
+
+    /* Verify timer was armed (TIMER_SLOT != -1) */
+    ldr     w0, [x21, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.eq    .Lfail_tcp_rtocap
+
+    /* Clean up: clear timer pool ptr to avoid affecting later tests */
+    mov     x0, #0
+    bl      tcp_set_timer_pool
+
+    ldr     x0, =name_tcp_rtocap
+    bl      test_pass
+    b       .Ldone_tcp_rtocap
+.Lfail_tcp_rtocap:
+    mov     x0, #0
+    bl      tcp_set_timer_pool
+    ldr     x0, =name_tcp_rtocap
+    bl      test_fail
+.Ldone_tcp_rtocap:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_clear_no_pool — tcp_rtx_clear with TIMER_SLOT != -1
+ * but timer pool ptr == NULL
+ *
+ * Defensive guard: should not crash, should still zero RTXLEN/RTXCOUNT
+ * ======================================================================== */
+test_tcp_rtx_clear_no_pool:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcnp
+    mov     x19, x0                 /* conn */
+
+    /* Ensure timer pool ptr is NULL */
+    mov     x0, #0
+    bl      tcp_set_timer_pool
+
+    /* Set up state as if retransmit is active with a stale timer slot */
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+    mov     w0, #3
+    strb    w0, [x19, #TCONN_RTXCOUNT]
+    mov     w0, #5                  /* fake timer slot */
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Call tcp_rtx_clear — should not crash */
+    mov     x0, x19
+    bl      tcp_rtx_clear
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_rcnp
+
+    /* Verify RTXCOUNT == 0 */
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_rcnp
+
+    /* Verify TIMER_SLOT == -1 */
+    ldr     w0, [x19, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.ne    .Lfail_tcp_rcnp
+
+    ldr     x0, =name_tcp_rcnp
+    bl      test_pass
+    b       .Ldone_tcp_rcnp
+.Lfail_tcp_rcnp:
+    ldr     x0, =name_tcp_rcnp
+    bl      test_fail
+.Ldone_tcp_rcnp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_cb_stale_closed — Retransmit callback on CLOSED conn (stale timer)
+ *
+ * Set conn state=CLOSED, set up mock send, call tcp_retransmit_cb →
+ * should return without sending
+ * ======================================================================== */
+test_tcp_rtx_cb_stale_closed:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcsc
+    mov     x19, x0                 /* conn */
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counter */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Force state to CLOSED (simulates stale timer firing after close) */
+    strb    wzr, [x19, #TCONN_STATE]
+
+    /* Set RTXLEN to nonzero so we can detect if callback runs the send path */
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* Verify mock was NOT called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_rcsc
+
+    ldr     x0, =name_tcp_rcsc
+    bl      test_pass
+    b       .Ldone_tcp_rcsc
+.Lfail_tcp_rcsc:
+    ldr     x0, =name_tcp_rcsc
+    bl      test_fail
+.Ldone_tcp_rcsc:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_cb_stale_listen — Retransmit callback on LISTEN conn (stale timer)
+ *
+ * Set conn state=LISTEN, call tcp_retransmit_cb → should return without sending
+ * ======================================================================== */
+test_tcp_rtx_cb_stale_listen:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcsl
+    mov     x19, x0                 /* conn */
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counter */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Force state to LISTEN */
+    mov     w0, #TCPS_LISTEN
+    strb    w0, [x19, #TCONN_STATE]
+
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* Verify mock was NOT called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_rcsl
+
+    ldr     x0, =name_tcp_rcsl
+    bl      test_pass
+    b       .Ldone_tcp_rcsl
+.Lfail_tcp_rcsl:
+    ldr     x0, =name_tcp_rcsl
+    bl      test_fail
+.Ldone_tcp_rcsl:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_cb_no_send_fn — Retransmit callback with send_fn == NULL
+ *
+ * Active conn, RTXCOUNT < MAX, but send_fn not set up → should return safely
+ * ======================================================================== */
+test_tcp_rtx_cb_no_send_fn:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcnsf
+    mov     x19, x0                 /* conn */
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rcnsf
+
+    /* Set send_fn to NULL (clear send context) */
+    mov     x0, #0
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0                  /* send_fn = NULL */
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counter to verify no send */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Call tcp_retransmit_cb(conn) — should bail out at send_fn NULL check */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* Verify mock was NOT called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_rcnsf
+
+    /* Verify state is still ESTABLISHED (not closed) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_rcnsf
+
+    ldr     x0, =name_tcp_rcnsf
+    bl      test_pass
+    b       .Ldone_tcp_rcnsf
+.Lfail_tcp_rcnsf:
+    ldr     x0, =name_tcp_rcnsf
+    bl      test_fail
+.Ldone_tcp_rcnsf:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_snd_una_future_ack — ACK beyond SND_NXT is ignored
+ *
+ * Handshake → tcp_send 5 bytes → ACK with seg_ack = ISN+100 (> SND_NXT) →
+ * verify SND_UNA unchanged (still ISN+1)
+ * ======================================================================== */
+test_tcp_snd_una_future_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sufa
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes → SND_NXT = ISN+6 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sufa
+
+    /* Record SND_UNA before (should be ISN+1) */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sufa
+
+    /* Send ACK with seg_ack = ISN+100 (way past SND_NXT) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0                  /* no payload */
+    mov     w2, #0
+    mov     w3, #2                  /* SEQ = peer's seq */
+    add     w4, w22, #100           /* ACK = ISN+100 (bogus) */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify SND_UNA is still ISN+1 (not advanced) */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sufa
+
+    ldr     x0, =name_tcp_sufa
+    bl      test_pass
+    b       .Ldone_tcp_sufa
+.Lfail_tcp_sufa:
+    ldr     x0, =name_tcp_sufa
+    bl      test_fail
+.Ldone_tcp_sufa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -7256,6 +7626,12 @@ name_tcp_frcf:      .asciz "tcp_fin_rtx_clear_fw1"
 name_tcp_frcl:      .asciz "tcp_fin_rtx_clear_lastack"
 name_tcp_dda:       .asciz "tcp_dup_data_ack"
 name_tcp_rcr:       .asciz "tcp_rst_clears_rtx"
+name_tcp_rtocap:    .asciz "tcp_rtx_arm_rto_cap"
+name_tcp_rcnp:      .asciz "tcp_rtx_clear_no_pool"
+name_tcp_rcsc:      .asciz "tcp_rtx_cb_stale_closed"
+name_tcp_rcsl:      .asciz "tcp_rtx_cb_stale_listen"
+name_tcp_rcnsf:     .asciz "tcp_rtx_cb_no_send_fn"
+name_tcp_sufa:      .asciz "tcp_snd_una_future_ack"
 
 tcp_send_payload:
     .ascii  "World"

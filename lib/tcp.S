@@ -30,6 +30,7 @@
 .global tcp_send_ready
 .global tcp_set_send_ctx
 .global tcp_retransmit_cb
+.global tcp_rtx_clear
 .global tcp_rtxbuf_pool
 .global tcp_send_ctx
 
