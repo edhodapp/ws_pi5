@@ -114,6 +114,8 @@ test_tcp:
     bl      test_tcp_rx_overflow
     bl      test_tcp_send
     bl      test_tcp_send_invalid
+    bl      test_tcp_send_zero_len
+    bl      test_tcp_send_oversize
     bl      test_tcp_window_tracks_fill
     bl      test_tcp_window_after_flush
     bl      test_tcp_window_zero
@@ -4255,6 +4257,88 @@ test_tcp_send_invalid:
     ret
 
 /* ========================================================================
+ * test_tcp_send_zero_len — tcp_send with payload_len=0 returns 0
+ * Covers: cbz w21, .Lts_err (payload_len == 0, ESTABLISHED state)
+ * ======================================================================== */
+test_tcp_send_zero_len:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tszl
+    mov     x21, x0
+
+    /* Save SND_NXT before call */
+    ldr     w22, [x21, #TCONN_SND_NXT]
+
+    /* tcp_send with payload_len=0 should fail */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #0
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_tszl
+
+    /* SND_NXT must be unchanged */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    cmp     w0, w22
+    b.ne    .Lfail_tcp_tszl
+
+    ldr     x0, =name_tcp_tszl
+    bl      test_pass
+    b       .Ldone_tcp_tszl
+.Lfail_tcp_tszl:
+    ldr     x0, =name_tcp_tszl
+    bl      test_fail
+.Ldone_tcp_tszl:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_oversize — tcp_send with payload_len=1461 returns 0
+ * Covers: b.hi .Lts_err (payload_len > 1460, ESTABLISHED state)
+ * ======================================================================== */
+test_tcp_send_oversize:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tsos
+    mov     x21, x0
+
+    /* Save SND_NXT before call */
+    ldr     w22, [x21, #TCONN_SND_NXT]
+
+    /* tcp_send with payload_len=1461 should fail */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #1461
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_tsos
+
+    /* SND_NXT must be unchanged */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    cmp     w0, w22
+    b.ne    .Lfail_tcp_tsos
+
+    ldr     x0, =name_tcp_tsos
+    bl      test_pass
+    b       .Ldone_tcp_tsos
+.Lfail_tcp_tsos:
+    ldr     x0, =name_tcp_tsos
+    bl      test_fail
+.Ldone_tcp_tsos:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * test_tcp_window_tracks_fill (S1) — Window shrinks as buffer fills
  * Handshake → send 100 bytes → verify ACK window = (2048-100) NBO
  * → send 200 bytes → verify ACK window = (2048-300) NBO
@@ -5292,6 +5376,8 @@ name_tcp_rxfl:      .asciz "tcp_rx_flush"
 name_tcp_rxov:      .asciz "tcp_rx_overflow"
 name_tcp_ts:        .asciz "tcp_send"
 name_tcp_tsi:       .asciz "tcp_send_invalid"
+name_tcp_tszl:      .asciz "tcp_send_zero_len"
+name_tcp_tsos:      .asciz "tcp_send_oversize"
 name_tcp_wtf:       .asciz "tcp_window_tracks_fill"
 name_tcp_waf:       .asciz "tcp_window_after_flush"
 name_tcp_wz:        .asciz "tcp_window_zero"
