@@ -748,6 +748,11 @@ tcp_listen_syn_handler:
 
 .Llsyn_alloc_found:
     /* x21 = free slot */
+    /* tcp_isn(lport, rport, lip, rip) — all NBO */
+    ldrh    w0, [x20, #TCONN_LPORT]                              /* our port */
+    ldrh    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]   /* peer port */
+    ldr     w2, [x19, #(ETH_PAYLOAD + IP_DST)]                   /* our IP */
+    ldr     w3, [x19, #(ETH_PAYLOAD + IP_SRC)]                   /* peer IP */
     bl      tcp_isn
     mov     w22, w0                 /* w22 = ISN */
 
@@ -1648,14 +1653,37 @@ tcp_timewait_cb:
 /*
  * tcp_isn — Generate initial sequence number (weak, overridable)
  *
+ * w0: lport (NBO), w1: rport (NBO), w2: lip (NBO), w3: rip (NBO)
  * Returns: w0 = 32-bit ISN
- * Clobbers: x0
+ * Clobbers: x0-x6
  *
- * Default: hardware counter. Override in fuzz harness for user-mode QEMU.
+ * Hash 4-tuple with secret, multiply by golden-ratio constant,
+ * fold to 32 bits, add time component.
+ * Override in fuzz harness for user-mode QEMU.
  */
 .weak tcp_isn
 tcp_isn:
-    mrs     x0, CNTPCT_EL0
+    /* Pack 4-tuple: x4 = lport | (rport << 16), x5 = lip | (rip << 32) */
+    orr     x4, x0, x1, lsl #16
+    orr     x5, x2, x3, lsl #32
+    eor     x4, x4, x5
+
+    /* XOR with ISN secret */
+    ldr     x5, =tcp_isn_secret
+    ldr     x5, [x5]
+    eor     x4, x4, x5
+
+    /* Multiply by golden-ratio constant */
+    ldr     x5, =0x517cc1b727220a95
+    mul     x4, x4, x5
+
+    /* Fold 64→32 */
+    eor     x4, x4, x4, lsr #32
+
+    /* Add time component (coarse: shift right 6) */
+    mrs     x5, CNTPCT_EL0
+    lsr     x5, x5, #6
+    add     w0, w4, w5
     ret
 
 /* --- FSA transition table (9 states × 5 events = 45 entries × 16 bytes) ---

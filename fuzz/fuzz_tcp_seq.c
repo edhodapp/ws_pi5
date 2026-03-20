@@ -22,8 +22,10 @@ extern int tcp_listen(int port);
 
 /* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
    under QEMU user mode, so provide a simple counter instead. */
-unsigned long tcp_isn(void)
+unsigned long tcp_isn(unsigned int lport, unsigned int rport,
+                      unsigned int lip, unsigned int rip)
 {
+    (void)lport; (void)rport; (void)lip; (void)rip;
     static unsigned int n;
     return n++;
 }
@@ -42,11 +44,8 @@ int main(void)
     while (__AFL_LOOP(10000)) {
 #endif
 
-    /* Reset ISN counter for deterministic replay */
-    extern unsigned long tcp_isn(void);
-    /* Re-read the static — the counter is inside tcp_isn itself.
-       We just reset tcp state which is sufficient for determinism
-       across AFL persistent-mode iterations. */
+    /* Reset TCP state for deterministic replay across AFL
+       persistent-mode iterations. */
     tcp_init();
     tcp_listen(80);
 

@@ -163,6 +163,9 @@ test_tcp:
     bl      test_tcp_listen_port
     bl      test_tcp_listen_multi
     bl      test_tcp_listen_full
+    bl      test_tcp_isn_different_tuples
+    bl      test_tcp_isn_same_tuple
+    bl      test_tcp_isn_nonzero
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7285,6 +7288,115 @@ test_tcp_listen_full:
     ret
 
 /* ========================================================================
+ * test_tcp_isn_different_tuples — Different 4-tuples produce different ISNs
+ * ======================================================================== */
+test_tcp_isn_different_tuples:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Call with tuple A: lport=80, rport=12345, lip=10.0.2.15, rip=10.0.2.2 */
+    mov     w0, #0x5000             /* port 80 NBO */
+    mov     w1, #0x3930             /* port 12345 NBO (0x3039 → rev16 = 0x3930) */
+    ldr     w2, =0x0F02000A        /* 10.0.2.15 NBO */
+    ldr     w3, =0x0202000A        /* 10.0.2.2 NBO */
+    bl      tcp_isn
+    mov     w19, w0
+
+    /* Call with tuple B: lport=80, rport=54321, lip=10.0.2.15, rip=10.0.2.2 */
+    mov     w0, #0x5000
+    mov     w1, #0x31D4             /* port 54321 = 0xD431, NBO LE = 0x31D4 */
+    ldr     w2, =0x0F02000A
+    ldr     w3, =0x0202000A
+    bl      tcp_isn
+    mov     w20, w0
+
+    /* Results should differ */
+    cmp     w19, w20
+    b.eq    .Lfail_tcp_idt
+
+    ldr     x0, =name_tcp_idt
+    bl      test_pass
+    b       .Ldone_tcp_idt
+.Lfail_tcp_idt:
+    ldr     x0, =name_tcp_idt
+    bl      test_fail
+.Ldone_tcp_idt:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_isn_same_tuple — Same 4-tuple in rapid succession produces
+ * close results (time component only difference)
+ * ======================================================================== */
+test_tcp_isn_same_tuple:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    mov     w0, #0x5000
+    mov     w1, #0x3930
+    ldr     w2, =0x0F02000A
+    ldr     w3, =0x0202000A
+    bl      tcp_isn
+    mov     w19, w0
+
+    /* Same tuple again immediately */
+    mov     w0, #0x5000
+    mov     w1, #0x3930
+    ldr     w2, =0x0F02000A
+    ldr     w3, =0x0202000A
+    bl      tcp_isn
+    mov     w20, w0
+
+    /* Difference should be small (< 1024 ticks given rapid succession) */
+    sub     w0, w20, w19
+    cmp     w0, #0
+    b.lt    .Lfail_tcp_ist          /* shouldn't go backwards */
+    cmp     w0, #1024
+    b.hi    .Lfail_tcp_ist
+
+    ldr     x0, =name_tcp_ist
+    bl      test_pass
+    b       .Ldone_tcp_ist
+.Lfail_tcp_ist:
+    ldr     x0, =name_tcp_ist
+    bl      test_fail
+.Ldone_tcp_ist:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_isn_nonzero — ISN is nonzero for typical inputs
+ * ======================================================================== */
+test_tcp_isn_nonzero:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    mov     w0, #0x5000
+    mov     w1, #0x3930
+    ldr     w2, =0x0F02000A
+    ldr     w3, =0x0202000A
+    bl      tcp_isn
+
+    cbz     w0, .Lfail_tcp_inz
+
+    ldr     x0, =name_tcp_inz
+    bl      test_pass
+    b       .Ldone_tcp_inz
+.Lfail_tcp_inz:
+    ldr     x0, =name_tcp_inz
+    bl      test_fail
+.Ldone_tcp_inz:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -7833,6 +7945,9 @@ name_tcp_sufa:      .asciz "tcp_snd_una_future_ack"
 name_tcp_lp:        .asciz "tcp_listen_port"
 name_tcp_lm:        .asciz "tcp_listen_multi"
 name_tcp_lf:        .asciz "tcp_listen_full"
+name_tcp_idt:       .asciz "tcp_isn_different_tuples"
+name_tcp_ist:       .asciz "tcp_isn_same_tuple"
+name_tcp_inz:       .asciz "tcp_isn_nonzero"
 
 tcp_send_payload:
     .ascii  "World"
