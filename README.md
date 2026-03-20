@@ -72,7 +72,7 @@ drivers/        Hardware drivers
   cdc_ecm.S       CDC-ECM device init, activate, send/recv
   timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 143 unit tests across 22 files
+tests/          Test sources — 171 unit tests across 22 files
 tests/func/     PICT-based functional test models
 fuzz/           Fuzz harness for network packet parsers
 scripts/        Build and test automation (including Python oracle)
@@ -121,7 +121,7 @@ make clean
 
 ### Unit Tests
 
-143 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP data transfer and passive close.
+171 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP connection lifecycle, data transfer, and active/passive close.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -137,6 +137,26 @@ The TDD workflow:
 6. Commit
 
 The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the background, polls serial output for pass/fail markers, and kills QEMU cleanly to ensure output is flushed.
+
+### Scenario Tests — Windowing and Buffer Contents
+
+Seven multi-step protocol-level tests verify correctness properties across sequences of TCP operations. These go beyond single-call unit tests to exercise the interaction between receive buffering, window advertisement, data sending, and buffer management.
+
+**Window tests (S1-S3):**
+
+- **`test_tcp_window_tracks_fill`** (S1) — Verifies the window shrinks monotonically as data accumulates. Handshakes, sends 100 bytes, checks ACK window = `rev16(2048-100)`, then sends 200 more and checks window = `rev16(2048-300)`. Tests that the running RXLEN total feeds correctly into the NBO window computation across multiple segments.
+- **`test_tcp_window_after_flush`** (S2) — Verifies the application can reclaim buffer space. Sends 100 bytes (window shrinks), calls `tcp_rx_flush`, sends 50 more. Checks that the ACK window reflects only the 50 post-flush bytes — `rev16(2048-50)` — not the cumulative 150. This is the critical test for the consume-then-advertise cycle that prevents deadlock.
+- **`test_tcp_window_zero`** (S3) — Boundary test for zero-window advertisement. Pre-sets RXLEN to 2043, sends 5 bytes to fill the buffer exactly to 2048. Verifies the ACK window is literally 0. This is what tells the peer to stop sending until a window update arrives.
+
+**Buffer contents tests (S4-S5):**
+
+- **`test_tcp_buffer_contents`** (S4) — Verifies data integrity and ordering across concatenation. Sends "AAAA" then "BBBB" as separate segments. Peeks and byte-compares all 8 bytes against `0x41414141 0x42424242`. Catches off-by-one errors in the destination offset calculation (`pool + (slot << 11) + rxlen`).
+- **`test_tcp_buffer_survives_flush`** (S5) — Verifies flush doesn't leave stale data visible. Sends "AAAA", flushes, sends "CCCC". Peeks and verifies 4 bytes of "CCCC" — not 8 bytes with stale "AAAA" prefix. This works because flush zeroes RXLEN, so the next write starts at offset 0 in the slot, overwriting the old data.
+
+**Send + integration tests (S6-S7):**
+
+- **`test_tcp_send_frame_fields`** (S6) — Exhaustive field-level verification of a `tcp_send` output frame. Receives 100 bytes first (so the window isn't full-size), then sends "World". Checks: ETH dst matches RMAC, IP total length = 45 (NBO), TCP sport=80, dport=12345, SEQ = `rev(SND_NXT_before)`, ACK = `rev(RCV_NXT)`, flags = PSH+ACK, window = `rev16(2048-100)`, TCP checksum validates to 0, and payload bytes at offset 54 are 'W' and 'd'. This is the only test that verifies `tcp_build_frame` produces a wire-correct frame from `tcp_send`'s perspective.
+- **`test_tcp_send_rx_independent`** (S7) — Verifies send and receive paths don't interfere. Receives 50 bytes of 'X', then sends "World". Checks three things: rx peek still returns 50 bytes with 'X' at offset 0, send returned 59 (54+5), and SND_NXT advanced by exactly 5. This catches any accidental clobbering of RXLEN or the rx buffer pointer during the send path.
 
 ### Functional Tests (PICT-Based Exhaustive Testing)
 
@@ -168,17 +188,21 @@ Each entry is 16 bytes: a next-state word and a handler function pointer (reusin
 
 Event classification maps TCP flags to 5 event codes in priority order: RST > SYN > FIN > ACK. This collapses the flag-combination space into a small, well-defined set that the table can address directly.
 
-**Implemented states:** LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, CLOSED.
+**Implemented states:** CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, LAST_ACK, FIN_WAIT_1, FIN_WAIT_2, CLOSING, TIME_WAIT.
 
 **What works:**
 - Three-way handshake (passive open): SYN → SYN-ACK → ACK → ESTABLISHED
-- Data transfer: ACK+PSH with payload → ACK reply, RCV_NXT tracking
+- Data transfer: ACK+PSH with payload → receive buffering, ACK reply with dynamic window
+- `tcp_send`: application-driven data transmission with PSH+ACK
+- `tcp_rx_peek`/`tcp_rx_flush`: application access to receive buffer (2 KB per connection)
+- Dynamic window advertisement: tracks buffer fill, advertises zero when full
 - Out-of-order detection: segments with wrong SEQ are silently dropped
-- Passive close: FIN → ACK, transition to CLOSE_WAIT
+- Passive close: peer FIN → ACK, CLOSE_WAIT → LAST_ACK → CLOSED
+- Active close: `tcp_close` → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED (and simultaneous close via CLOSING)
 - RST generation for invalid packets, unknown ports, and unpopulated FSA entries
 - Connection table with 16 slots, scanned on each incoming segment
 
-The FSA approach made adding data transfer and passive close trivial — each was a new handler function and a populated table entry, with no changes to the dispatch logic.
+The FSA approach made adding each new feature trivial — a new handler function and a populated table entry, with no changes to the dispatch logic.
 
 ## Fuzzing
 
@@ -241,10 +265,9 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
 - Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
 
-**Test coverage:** 143 unit tests (complete branch coverage) + 77 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
+**Test coverage:** 171 unit tests (complete branch coverage) + 77 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
 
 **Next:**
-- TCP active close (FIN from our side)
 - HTTP request parsing and response generation
 
 ## Future: Multi-Pi Architecture
