@@ -36,11 +36,12 @@ boot.S          Core 0 init, stack, BSS zero
         IPv4 →  ip.S     Validate header + checksum, dispatch by protocol
           ICMP → icmp.S  Swap MACs/IPs, recompute checksums, reply
           UDP  → udp.S   Checksum with pseudo-header, echo on port 7, NTP dispatch
+          TCP  → tcp.S   Table-driven FSA, connection tracking, data transfer
       timer_check        Fire expired software timers (NTP poll, etc.)
       cdc_ecm_send       Transmit reply via USB bulk-OUT
 ```
 
-The kernel image is under 6 KB.
+The kernel image is under 10 KB.
 
 ## Project Structure
 
@@ -48,14 +49,7 @@ The kernel image is under 6 KB.
 src/            Main kernel source
   boot.S          Entry point — park cores 1-3, stack, BSS, call main
   main.S          USB bring-up sequence and net_loop dispatcher
-lib/            Shared library code
-  uart.S          PL011 UART init at 115200, putc, puts
-  mailbox.S       VideoCore mailbox IPC (USB power-on)
-  dwc2.S          DWC2 USB host controller init and port reset
-  usb_enum.S      USB device enumeration via control transfers
-  usb_desc.S      Config descriptor reading and bulk endpoint parsing
-  usb_bulk.S      Bulk transfer execution with DATA toggle tracking
-  cdc_ecm.S       CDC-ECM device init, activate, send/recv
+lib/            Pure computation libraries
   eth.S           Ethernet frame utilities — EtherType, header builder, MAC compare
   net_cfg.S       Wire-format MAC and IP address data
   net.S           Receive dispatcher — routes by EtherType
@@ -63,12 +57,23 @@ lib/            Shared library code
   ip.S            RFC 1071 checksum, IPv4 header validation, protocol dispatch
   icmp.S          ICMP echo reply — swap addresses, recompute checksums
   udp.S           UDP checksum with pseudo-header, validation, echo service (port 7)
+  tcp.S           TCP — table-driven FSA, connection table, three-way handshake, data transfer
   ntp.S           SNTP client — request builder, response parser, timer-driven polling
-  timer.S         ARM generic timer access and software timer pool
+  timer_pool.S    Software timer pool — set, cancel, check expired
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
+drivers/        Hardware drivers
+  uart.S          PL011 UART init at 115200, putc, puts
+  mailbox.S       VideoCore mailbox IPC (USB power-on)
+  dwc2.S          DWC2 USB host controller init and port reset
+  usb_enum.S      USB device enumeration via control transfers
+  usb_desc.S      Config descriptor reading and bulk endpoint parsing
+  usb_bulk.S      Bulk transfer execution with DATA toggle tracking
+  cdc_ecm.S       CDC-ECM device init, activate, send/recv
+  timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 109 tests across 20 files
+tests/          Test sources — 143 tests across 22 files
+fuzz/           Fuzz harness for network packet parsers
 scripts/        Build and test automation
 hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
@@ -101,24 +106,46 @@ make clean
 
 ## Testing
 
-109 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to NTP client logic and timer infrastructure.
+143 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP data transfer and passive close.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
+
+Branch coverage is audited after each feature: every conditional branch in production code has at least one test that exercises it. Two dedicated coverage-gap tests (`test_tcp_fsa_null_handler`, `test_tcp_scan_lport_miss`) exist solely to cover edge-case branches that no behavioral test would naturally hit.
 
 The TDD workflow:
 
 1. Write a test in `tests/` — call `test_pass` or `test_fail` with a test name string
 2. Register it with `bl test_xxx` in `tests/test_main.S`
 3. `make test` — verify it fails (red)
-4. Implement in `lib/` or `src/`
+4. Implement in `lib/`, `drivers/`, or `src/`
 5. `make test` — verify it passes (green)
 6. Commit
 
 The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the background, polls serial output for pass/fail markers, and kills QEMU cleanly to ensure output is flushed.
 
+## TCP: Table-Driven Finite State Automaton
+
+The TCP implementation uses a table-driven FSA instead of a hand-coded `cmp`/`b.eq` dispatch chain. The transition table IS the state machine — 9 states x 5 events = 45 entries, stored as 720 bytes in `.rodata`.
+
+Each entry is 16 bytes: a next-state word and a handler function pointer (reusing the vmio transition table layout). Dispatch is a single indexed load — `state * 5 + event` — followed by `blr`. Unpopulated entries (handler = NULL) fall through to RST generation.
+
+Event classification maps TCP flags to 5 event codes in priority order: RST > SYN > FIN > ACK. This collapses the flag-combination space into a small, well-defined set that the table can address directly.
+
+**Implemented states:** LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, CLOSED.
+
+**What works:**
+- Three-way handshake (passive open): SYN → SYN-ACK → ACK → ESTABLISHED
+- Data transfer: ACK+PSH with payload → ACK reply, RCV_NXT tracking
+- Out-of-order detection: segments with wrong SEQ are silently dropped
+- Passive close: FIN → ACK, transition to CLOSE_WAIT
+- RST generation for invalid packets, unknown ports, and unpopulated FSA entries
+- Connection table with 16 slots, scanned on each incoming segment
+
+The FSA approach made adding data transfer and passive close trivial — each was a new handler function and a populated table entry, with no changes to the dispatch logic.
+
 ## Fuzzing
 
-Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `udp_handle`, `net_recv_one`). All functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
+Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `udp_handle`, `tcp_handle`, `net_recv_one`). All functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
 
 ### Prerequisites
 
@@ -172,13 +199,14 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - ARP request/reply with passive gateway MAC learning
 - ICMP echo request/reply (ping)
 - UDP with echo service (port 7)
+- TCP with table-driven FSA — three-way handshake, data transfer, passive close, RST generation
 - Timer infrastructure (ARM generic timer, software timer pool)
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
 - Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
 
 **Next:**
-- TCP
-- HTTP
+- TCP active close (FIN from our side)
+- HTTP request parsing and response generation
 
 ## Future: Multi-Pi Architecture
 
