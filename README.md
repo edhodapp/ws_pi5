@@ -41,7 +41,7 @@ boot.S          Core 0 init, stack, BSS zero
       cdc_ecm_send       Transmit reply via USB bulk-OUT
 ```
 
-The kernel image is under 10 KB.
+The kernel image is under 12 KB.
 
 ## Project Structure
 
@@ -191,7 +191,7 @@ python3 scripts/tcp_oracle.py --generate > build/tcp_vectors.bin
 
 ## TCP: Table-Driven Finite State Automaton
 
-The TCP implementation uses a table-driven FSA instead of a hand-coded `cmp`/`b.eq` dispatch chain. The transition table IS the state machine — 9 states x 5 events = 45 entries, stored as 720 bytes in `.rodata`.
+The TCP implementation uses a table-driven FSA instead of a hand-coded `cmp`/`b.eq` dispatch chain. The transition table IS the state machine — 10 states x 5 events = 50 entries, stored as 800 bytes in `.rodata`.
 
 Each entry is 16 bytes: a next-state word and a handler function pointer (reusing the vmio transition table layout). Dispatch is a single indexed load — `state * 5 + event` — followed by `blr`. Unpopulated entries (handler = NULL) fall through to RST generation.
 
@@ -208,6 +208,9 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 - Out-of-order detection: segments with wrong SEQ are silently dropped
 - Passive close: peer FIN → ACK, CLOSE_WAIT → LAST_ACK → CLOSED
 - Active close: `tcp_close` → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED (and simultaneous close via CLOSING)
+- Send window tracking: SND_WND captured from handshake, updated from incoming ACKs, `tcp_send` guards against exceeding peer's window
+- `tcp_send_ready`: query available send window before sending
+- `tcp_window_update`: explicit window update frame generation
 - RST generation for invalid packets, unknown ports, and unpopulated FSA entries
 - Connection table with 16 slots, scanned on each incoming segment
 
@@ -220,7 +223,7 @@ Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`,
 ### Prerequisites
 
 ```
-sudo apt install gcc-aarch64-linux-gnu
+sudo apt install gcc-aarch64-linux-gnu qemu-user-static
 ```
 
 ### Build and run
@@ -304,7 +307,7 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - ARP request/reply with passive gateway MAC learning
 - ICMP echo request/reply (ping)
 - UDP with echo service (port 7)
-- TCP with table-driven FSA — three-way handshake, data transfer, passive close, RST generation
+- TCP with table-driven FSA — three-way handshake, data transfer, send window tracking, active/passive close, RST generation
 - Timer infrastructure (ARM generic timer, software timer pool)
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
 - Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
