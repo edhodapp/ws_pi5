@@ -3,6 +3,7 @@
 .include "net.inc"
 .include "timer.inc"
 .include "ntp.inc"
+.include "tcp.inc"
 
 .section .text
 
@@ -58,6 +59,13 @@ main:
     /* Give TCP a handle to the timer pool */
     ldr     x0, =timer_pool
     bl      tcp_set_timer_pool
+
+    /* Set up TCP retransmit send context */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =tcp_tx_buf
+    ldr     x3, =cdc_ecm_send
+    bl      tcp_set_send_ctx
 
     /* Initialize NTP (cache timer frequency) */
     bl      ntp_init
@@ -131,6 +139,10 @@ timer_pool:
 .balign 16
 ntp_tx_buf:
     .space  NTP_FRAME_LEN
+
+.balign 16
+tcp_tx_buf:
+    .space  ETH_FRAME_MAX
 
 .section .rodata
 msg_hello:      .asciz "Hello from bare-metal Pi 3!\r\n"
