@@ -32,6 +32,7 @@
 .global tcp_set_send_ctx
 .global tcp_retransmit_cb
 .global tcp_rtx_clear
+.global tcp_icmp_err
 .global tcp_rtxbuf_pool
 .global tcp_send_ctx
 
@@ -314,6 +315,77 @@ tcp_rtx_clear:
 
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tcp_icmp_err — Handle ICMP Destination Unreachable for TCP connections
+ *
+ * x0: frame pointer (full Ethernet frame with ICMP type 3)
+ * w1: frame length
+ * Returns: w0 = 0 (never generates a reply)
+ * Clobbers: x0-x6, x19-x22, x30
+ *
+ * Extracts the encapsulated TCP 4-tuple from the ICMP payload,
+ * scans the connection table for a match, and tears down the connection.
+ * Minimum frame: ETH(14) + IP(20) + ICMP(8) + encap_IP(20) + encap_TCP(8) = 70
+ */
+tcp_icmp_err:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    /* Minimum length check */
+    cmp     w1, #70
+    b.lt    .Licmpe_done
+
+    /* Encapsulated headers start at ETH(14) + IP(20) + ICMP_HDR(8) = 42 */
+    /* Encap IP src = our IP (we sent the original packet) */
+    /* Encap IP dst = peer IP */
+    /* Encap TCP sport = our port (offset 42+20=62) */
+    /* Encap TCP dport = peer port (offset 42+22=64) */
+    ldr     w19, [x0, #(42 + IP_SRC)]          /* encap IP src = our IP */
+    ldr     w20, [x0, #(42 + IP_DST)]          /* encap IP dst = peer IP */
+    ldrh    w21, [x0, #(42 + IP_HDR_MIN + TCP_SPORT)]  /* encap TCP sport = our port */
+    ldrh    w22, [x0, #(42 + IP_HDR_MIN + TCP_DPORT)]  /* encap TCP dport = peer port */
+
+    /* Scan connection table for match */
+    ldr     x2, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Licmpe_scan:
+    cbz     w3, .Licmpe_done
+    sub     w3, w3, #1
+    ldrb    w4, [x2, #TCONN_STATE]
+    cbz     w4, .Licmpe_next        /* CLOSED → skip */
+    cmp     w4, #TCPS_LISTEN
+    b.eq    .Licmpe_next            /* LISTEN → skip */
+
+    /* Match lport, rport, rip */
+    ldrh    w4, [x2, #TCONN_LPORT]
+    cmp     w4, w21
+    b.ne    .Licmpe_next
+    ldrh    w4, [x2, #TCONN_RPORT]
+    cmp     w4, w22
+    b.ne    .Licmpe_next
+    ldr     w4, [x2, #TCONN_RIP]
+    cmp     w4, w20
+    b.ne    .Licmpe_next
+
+    /* Match found — clear retransmit and close */
+    mov     x19, x2                 /* save conn ptr (x2 clobbered by rtx_clear) */
+    mov     x0, x2
+    bl      tcp_rtx_clear
+    strb    wzr, [x19, #TCONN_STATE]       /* CLOSED */
+    b       .Licmpe_done
+
+.Licmpe_next:
+    add     x2, x2, #TCONN_SIZE
+    b       .Licmpe_scan
+
+.Licmpe_done:
+    mov     w0, #0
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
     ret
 
 /*

@@ -32,8 +32,10 @@ icmp_handle:
     cmp     w21, #ICMP_HDR_LEN
     b.lt    .Licmp_ignore
 
-    /* Check ICMP type == echo request (8) */
+    /* Check ICMP type */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cmp     w0, #ICMP_DEST_UNREACHABLE
+    b.eq    .Licmp_dest_unreach
     cmp     w0, #ICMP_ECHO_REQUEST
     b.ne    .Licmp_ignore
 
@@ -78,6 +80,13 @@ icmp_handle:
 
     /* Return frame length */
     mov     w0, w20
+    b       .Licmp_done
+
+.Licmp_dest_unreach:
+    mov     x0, x19                 /* frame */
+    mov     w1, w20                 /* frame_len */
+    bl      tcp_icmp_err
+    /* tcp_icmp_err returns 0 */
     b       .Licmp_done
 
 .Licmp_ignore:

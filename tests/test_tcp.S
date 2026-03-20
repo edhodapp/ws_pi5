@@ -166,6 +166,10 @@ test_tcp:
     bl      test_tcp_isn_different_tuples
     bl      test_tcp_isn_same_tuple
     bl      test_tcp_isn_nonzero
+    bl      test_tcp_icmp_err_match
+    bl      test_tcp_icmp_err_no_match
+    bl      test_tcp_icmp_err_rtx_clear
+    bl      test_tcp_icmp_err_short
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7397,6 +7401,232 @@ test_tcp_isn_nonzero:
     ret
 
 /* ========================================================================
+ * ttcp_build_icmp_err — Build ICMP Destination Unreachable (type 3) frame
+ *
+ * Encapsulates a fake TCP segment from (our_ip:our_port → peer_ip:peer_port).
+ * Frame layout: ETH(14) + IP(20) + ICMP(8) + encap_IP(20) + encap_TCP(8) = 70 bytes
+ *
+ * x0: buffer (must have 70+ bytes)
+ * w1: our_port (NBO)
+ * w2: peer_port (NBO)
+ * w3: peer_ip (NBO)
+ * Clobbers: x0-x5
+ * ======================================================================== */
+ttcp_build_icmp_err:
+    /* Zero first 70 bytes */
+    mov     x4, x0
+    mov     w5, #70
+.Lbie_zero:
+    strb    wzr, [x4], #1
+    subs    w5, w5, #1
+    b.ne    .Lbie_zero
+
+    /* ETH type = IPv4 */
+    mov     w4, #0x0008             /* 0x0800 big-endian as LE halfword */
+    strh    w4, [x0, #ETH_TYPE]
+
+    /* IP: ver/ihl=0x45, proto=ICMP(1), totlen=56 (0x0038 BE) */
+    mov     w4, #0x45
+    strb    w4, [x0, #ETH_PAYLOAD]
+    mov     w4, #0x3800             /* 56 in NBO as LE halfword */
+    strh    w4, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    mov     w4, #IP_PROTO_ICMP
+    strb    w4, [x0, #(ETH_PAYLOAD + IP_PROTO)]
+    /* IP src = peer (the router sending the ICMP error) */
+    str     w3, [x0, #(ETH_PAYLOAD + IP_SRC)]
+    /* IP dst = us */
+    ldr     w4, =NET_IP_NBO
+    str     w4, [x0, #(ETH_PAYLOAD + IP_DST)]
+
+    /* ICMP: type=3 (dest unreachable), code=1 (host unreachable) */
+    mov     w4, #ICMP_DEST_UNREACHABLE
+    strb    w4, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    mov     w4, #1
+    strb    w4, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+    /* ICMP checksum = 0 (not verified by tcp_icmp_err) */
+    /* 4 bytes unused/zero at offset 38..41 */
+
+    /* Encapsulated IP header at offset 42 */
+    mov     w4, #0x45
+    strb    w4, [x0, #42]
+    mov     w4, #6                  /* proto = TCP */
+    strb    w4, [x0, #(42 + IP_PROTO)]
+    /* Encap IP src = our IP (we sent the original) */
+    ldr     w4, =NET_IP_NBO
+    str     w4, [x0, #(42 + IP_SRC)]
+    /* Encap IP dst = peer IP */
+    str     w3, [x0, #(42 + IP_DST)]
+
+    /* Encapsulated TCP header at offset 62: sport=our_port, dport=peer_port */
+    strh    w1, [x0, #(62 + TCP_SPORT)]
+    strh    w2, [x0, #(62 + TCP_DPORT)]
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_match — ICMP type 3 matching ESTABLISHED conn → CLOSED
+ * ======================================================================== */
+test_tcp_icmp_err_match:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* Perform handshake to get an ESTABLISHED connection */
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_iem
+    mov     x19, x0                 /* conn ptr */
+
+    /* Build ICMP dest unreachable matching this connection */
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]    /* our port NBO */
+    ldrh    w2, [x19, #TCONN_RPORT]    /* peer port NBO */
+    ldr     w3, [x19, #TCONN_RIP]      /* peer IP NBO */
+    bl      ttcp_build_icmp_err
+
+    /* Call tcp_icmp_err directly */
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* Verify return value = 0 */
+    cbnz    w0, .Lfail_tcp_iem
+
+    /* Verify connection is now CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_iem
+
+    ldr     x0, =name_tcp_iem
+    bl      test_pass
+    b       .Ldone_tcp_iem
+.Lfail_tcp_iem:
+    ldr     x0, =name_tcp_iem
+    bl      test_fail
+.Ldone_tcp_iem:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_no_match — ICMP type 3 with non-matching tuple → no change
+ * ======================================================================== */
+test_tcp_icmp_err_no_match:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ienm
+    mov     x19, x0
+
+    /* Build ICMP with wrong peer port (0x9999) */
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    mov     w2, #0x9999             /* wrong rport */
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* Connection should still be ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_ienm
+
+    ldr     x0, =name_tcp_ienm
+    bl      test_pass
+    b       .Ldone_tcp_ienm
+.Lfail_tcp_ienm:
+    ldr     x0, =name_tcp_ienm
+    bl      test_fail
+.Ldone_tcp_ienm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_rtx_clear — ICMP error clears retransmit state
+ * ======================================================================== */
+test_tcp_icmp_err_rtx_clear:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ierc
+    mov     x19, x0
+
+    /* Seed some fake retransmit state */
+    mov     w0, #100
+    strh    w0, [x19, #TCONN_RTXLEN]
+    mov     w0, #3
+    strb    w0, [x19, #TCONN_RTXCOUNT]
+
+    /* Build matching ICMP error */
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* Verify retransmit state cleared */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_ierc
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_ierc
+
+    ldr     x0, =name_tcp_ierc
+    bl      test_pass
+    b       .Ldone_tcp_ierc
+.Lfail_tcp_ierc:
+    ldr     x0, =name_tcp_ierc
+    bl      test_fail
+.Ldone_tcp_ierc:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_short — ICMP frame too short → silently ignored
+ * ======================================================================== */
+test_tcp_icmp_err_short:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ies
+    mov     x19, x0
+
+    /* Build matching ICMP error but pass short length */
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    /* Call with frame_len = 60 (less than minimum 70) */
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #60
+    bl      tcp_icmp_err
+
+    /* Connection should still be ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_ies
+
+    ldr     x0, =name_tcp_ies
+    bl      test_pass
+    b       .Ldone_tcp_ies
+.Lfail_tcp_ies:
+    ldr     x0, =name_tcp_ies
+    bl      test_fail
+.Ldone_tcp_ies:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -7948,6 +8178,10 @@ name_tcp_lf:        .asciz "tcp_listen_full"
 name_tcp_idt:       .asciz "tcp_isn_different_tuples"
 name_tcp_ist:       .asciz "tcp_isn_same_tuple"
 name_tcp_inz:       .asciz "tcp_isn_nonzero"
+name_tcp_iem:       .asciz "tcp_icmp_err_match"
+name_tcp_ienm:      .asciz "tcp_icmp_err_no_match"
+name_tcp_ierc:      .asciz "tcp_icmp_err_rtx_clear"
+name_tcp_ies:       .asciz "tcp_icmp_err_short"
 
 tcp_send_payload:
     .ascii  "World"
