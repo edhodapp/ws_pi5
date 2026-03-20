@@ -187,6 +187,7 @@ test_tcp:
     bl      test_tcp_tsopt_skip
     bl      test_tcp_tsopt_wrong_tslen
     bl      test_tcp_paws_no_tsopt
+    bl      test_tcp_tsopt_trunc_ts
     ldp     x29, x30, [sp], #16
     ret
 
@@ -8615,6 +8616,56 @@ test_tcp_paws_no_tsopt:
     ret
 
 /* ========================================================================
+ * test_tcp_tsopt_trunc_ts — Kind=8 Len=10 but not enough bytes remaining
+ *
+ * doff=0x70 (28 bytes = 8 option bytes). Options start with Kind=8 Len=10,
+ * but only 8 bytes of option space exist. ptr+10 > end triggers line 1914.
+ * This is distinct from tsopt_trunc which tests ptr+1 >= end (line 1898).
+ * ======================================================================== */
+test_tcp_tsopt_trunc_ts:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x70 (28 bytes = 8 option bytes) */
+    mov     w1, #0x70
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options: Kind=8 Len=10 + 6 zero-fill bytes */
+    mov     w1, #0x08
+    strb    w1, [x0, #54]          /* Kind = Timestamps */
+    mov     w1, #0x0A
+    strb    w1, [x0, #55]          /* Length = 10 */
+    strb    wzr, [x0, #56]
+    strb    wzr, [x0, #57]
+    strb    wzr, [x0, #58]
+    strb    wzr, [x0, #59]
+    strb    wzr, [x0, #60]
+    strb    wzr, [x0, #61]
+
+    /* Call tcp_parse_tsopt(frame, 28) — 8 option bytes, TSopt needs 10 */
+    mov     w1, #28
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (truncated TSopt) */
+    cbnz    w1, .Lfail_tcp_tstt
+
+    ldr     x0, =name_tcp_tstt
+    bl      test_pass
+    b       .Ldone_tcp_tstt
+.Lfail_tcp_tstt:
+    ldr     x0, =name_tcp_tstt
+    bl      test_fail
+.Ldone_tcp_tstt:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -9187,6 +9238,7 @@ name_tcp_tsbl:      .asciz "tcp_tsopt_badlen"
 name_tcp_tssk:      .asciz "tcp_tsopt_skip"
 name_tcp_tswt:      .asciz "tcp_tsopt_wrong_tslen"
 name_tcp_pnt:       .asciz "tcp_paws_no_tsopt"
+name_tcp_tstt:      .asciz "tcp_tsopt_trunc_ts"
 
 tcp_send_payload:
     .ascii  "World"
