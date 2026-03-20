@@ -72,7 +72,7 @@ drivers/        Hardware drivers
   cdc_ecm.S       CDC-ECM device init, activate, send/recv
   timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 171 unit tests across 22 files
+tests/          Test sources — 186 unit tests across 22 files
 tests/func/     PICT-based functional test models
 fuzz/           Fuzz harness for network packet parsers
 scripts/        Build and test automation (including Python oracle)
@@ -121,7 +121,7 @@ make clean
 
 ### Unit Tests
 
-171 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP connection lifecycle, data transfer, and active/passive close.
+186 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP connection lifecycle, data transfer, and active/passive close.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -140,7 +140,7 @@ The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the backgr
 
 ### Scenario Tests — Windowing and Buffer Contents
 
-Seven multi-step protocol-level tests verify correctness properties across sequences of TCP operations. These go beyond single-call unit tests to exercise the interaction between receive buffering, window advertisement, data sending, and buffer management.
+Thirteen multi-step protocol-level tests verify correctness properties across sequences of TCP operations. These go beyond single-call unit tests to exercise the interaction between receive buffering, window advertisement, data sending, send window tracking, and buffer management.
 
 **Window tests (S1-S3):**
 
@@ -158,11 +158,20 @@ Seven multi-step protocol-level tests verify correctness properties across seque
 - **`test_tcp_send_frame_fields`** (S6) — Exhaustive field-level verification of a `tcp_send` output frame. Receives 100 bytes first (so the window isn't full-size), then sends "World". Checks: ETH dst matches RMAC, IP total length = 45 (NBO), TCP sport=80, dport=12345, SEQ = `rev(SND_NXT_before)`, ACK = `rev(RCV_NXT)`, flags = PSH+ACK, window = `rev16(2048-100)`, TCP checksum validates to 0, and payload bytes at offset 54 are 'W' and 'd'. This is the only test that verifies `tcp_build_frame` produces a wire-correct frame from `tcp_send`'s perspective.
 - **`test_tcp_send_rx_independent`** (S7) — Verifies send and receive paths don't interfere. Receives 50 bytes of 'X', then sends "World". Checks three things: rx peek still returns 50 bytes with 'X' at offset 0, send returned 59 (54+5), and SND_NXT advanced by exactly 5. This catches any accidental clobbering of RXLEN or the rx buffer pointer during the send path.
 
+**Send window scenario tests (S8-S13):**
+
+- **`test_tcp_send_window_exhaustion`** (S8) — Full send-window lifecycle: drain, block, reopen, resume. Sets SND_WND=15, sends three 5-byte segments (SND_WND drains 15→10→5→0), verifies a fourth send is rejected and `tcp_send_ready` returns 0. Then injects a pure ACK with window=1000, verifies SND_WND reopens to 1000, `tcp_send_ready` returns 1000, and a subsequent send succeeds with SND_WND=995. This is the most important scenario — it proves the complete flow that motivated the feature.
+- **`test_tcp_window_update_partial`** (S9) — Window update with non-empty receive buffer. Handshakes, receives 500 bytes, then calls `tcp_window_update`. Verifies the returned frame advertises window = `rev16(2048-500)` = `rev16(1548)`. The existing window update tests only check empty buffer (window=2048) or invalid state — this verifies `tcp_build_frame`'s dynamic window computation when RXLEN > 0 via the explicit window-update path.
+- **`test_tcp_send_boundary`** (S10) — Payload length exactly equals SND_WND. Sets SND_WND=5, sends 5 bytes. Verifies ret=59 (succeeds) and SND_WND=0. Tests the `cmp`/`b.hi` guard at the exact boundary — a `b.hs` bug would reject this case.
+- **`test_tcp_send_ready_zero`** (S11) — SND_WND=0 returns 0. The existing `tcp_send_ready` tests check SND_WND=500 and SND_WND=2000; this tests the zero case — the caller's signal to stop sending and wait for a window update.
+- **`test_tcp_snd_wnd_pure_ack`** (S12) — Pure ACK (no data) updates SND_WND. Sets SND_WND=0, injects a pure ACK with window=4096. Verifies `tcp_handle` returns 0 (pure ACK drop) and SND_WND=4096. This exercises the SND_WND update through the `cbz w4, .Leak_pure_ack` code path, which the existing data-carrying ACK test doesn't reach.
+- **`test_tcp_snd_wnd_data_ack`** (S13) — Data ACK updates both rx buffer and SND_WND. Sets SND_WND=100, sends a 5-byte data frame with window=8192. Verifies ret=54 (ACK reply), RXLEN=5 (data accepted), and SND_WND=8192. Proves the SND_WND write at the handler top isn't clobbered by the data-copy or ACK-reply logic that follows.
+
 ### Functional Tests (PICT-Based Exhaustive Testing)
 
 Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
 
-Six independent parameters — connection state, TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 77 test vectors. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, reply flags, and post-state. This gives two independent specifications of TCP correctness written in different languages — if both agree on all cases, confidence is very high.
+Six independent parameters — connection state, TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 137 test vectors. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, reply flags, and post-state. This gives two independent specifications of TCP correctness written in different languages — if both agree on all cases, confidence is very high.
 
 The pipeline:
 
@@ -265,7 +274,7 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
 - Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
 
-**Test coverage:** 171 unit tests (complete branch coverage) + 77 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
+**Test coverage:** 186 unit tests (complete branch coverage) + 137 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
 
 **Next:**
 - HTTP request parsing and response generation

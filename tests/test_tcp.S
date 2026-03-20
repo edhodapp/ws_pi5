@@ -132,6 +132,12 @@ test_tcp:
     bl      test_tcp_send_decrements_window
     bl      test_tcp_send_ready
     bl      test_tcp_send_ready_invalid
+    bl      test_tcp_send_window_exhaustion
+    bl      test_tcp_window_update_partial
+    bl      test_tcp_send_boundary
+    bl      test_tcp_send_ready_zero
+    bl      test_tcp_snd_wnd_pure_ack
+    bl      test_tcp_snd_wnd_data_ack
     ldp     x29, x30, [sp], #16
     ret
 
@@ -5332,6 +5338,404 @@ test_tcp_send_ready_invalid:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_send_window_exhaustion (S8) — Full lifecycle: drain → block →
+ * reopen → resume.  Handshake → SND_WND=15 → send 5+5+5 (drain) →
+ * send 5 (rejected) → send_ready=0 → pure ACK window=1000 →
+ * send_ready=1000 → send 5 (succeeds, SND_WND=995)
+ * ======================================================================== */
+test_tcp_send_window_exhaustion:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_swe
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Set SND_WND=15 */
+    mov     w0, #15
+    strh    w0, [x21, #TCONN_SND_WND]
+
+    /* Step 1: tcp_send 5 bytes → ret=59, SND_WND=10 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_swe
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cmp     w0, #10
+    b.ne    .Lfail_tcp_swe
+
+    /* Step 2: tcp_send 5 bytes → ret=59, SND_WND=5 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_swe
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_swe
+
+    /* Step 3: tcp_send 5 bytes → ret=59, SND_WND=0 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_swe
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cbnz    w0, .Lfail_tcp_swe
+
+    /* Step 4: tcp_send 5 bytes → rejected (ret=0), SND_WND still 0 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_swe
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cbnz    w0, .Lfail_tcp_swe
+
+    /* Step 5: tcp_send_ready → returns 0 */
+    mov     x0, x21
+    bl      tcp_send_ready
+    cbnz    w0, .Lfail_tcp_swe
+
+    /* Step 6: Inject pure ACK with window=1000 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    /* Patch ACK = rev(ISN+1) */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Patch window = 1000 NBO */
+    mov     w0, #1000
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20                 /* TCP header only, no data */
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    /* tcp_handle → pure ACK dropped (ret=0) */
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_swe
+    /* SND_WND should be 1000 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #1000
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swe
+
+    /* Step 7: tcp_send_ready → returns 1000 */
+    mov     x0, x21
+    bl      tcp_send_ready
+    cmp     w0, #1000
+    b.ne    .Lfail_tcp_swe
+
+    /* Step 8: tcp_send 5 bytes → ret=59, SND_WND=995 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_swe
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #995
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swe
+
+    ldr     x0, =name_tcp_swe
+    bl      test_pass
+    b       .Ldone_tcp_swe
+.Lfail_tcp_swe:
+    ldr     x0, =name_tcp_swe
+    bl      test_fail
+.Ldone_tcp_swe:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_window_update_partial (S9) — Window update with non-empty buffer
+ * Handshake → receive 500 bytes → tcp_window_update → window=(2048-500)
+ * ======================================================================== */
+test_tcp_window_update_partial:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_wup
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Receive 500 bytes, SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #500
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #554                /* 54 + 500 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_wup
+
+    /* Call tcp_window_update */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_window_update
+
+    /* Verify ret=54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_wup
+
+    /* Verify window = (2048-500) = 1548 NBO */
+    ldr     x19, =tcp_send_test_buf
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #1548
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_wup
+
+    ldr     x0, =name_tcp_wup
+    bl      test_pass
+    b       .Ldone_tcp_wup
+.Lfail_tcp_wup:
+    ldr     x0, =name_tcp_wup
+    bl      test_fail
+.Ldone_tcp_wup:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_boundary (S10) — payload_len exactly equals SND_WND
+ * Handshake → SND_WND=5 → send 5 → ret=59, SND_WND=0
+ * ======================================================================== */
+test_tcp_send_boundary:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sb
+    mov     x21, x0
+
+    /* Set SND_WND=5 */
+    mov     w0, #5
+    strh    w0, [x21, #TCONN_SND_WND]
+
+    /* tcp_send 5 bytes (exactly equals SND_WND) */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_sb
+
+    /* SND_WND should be 0 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cbnz    w0, .Lfail_tcp_sb
+
+    ldr     x0, =name_tcp_sb
+    bl      test_pass
+    b       .Ldone_tcp_sb
+.Lfail_tcp_sb:
+    ldr     x0, =name_tcp_sb
+    bl      test_fail
+.Ldone_tcp_sb:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_ready_zero (S11) — SND_WND=0 returns 0
+ * ======================================================================== */
+test_tcp_send_ready_zero:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_srz
+    mov     x21, x0
+
+    /* Set SND_WND=0 */
+    strh    wzr, [x21, #TCONN_SND_WND]
+
+    mov     x0, x21
+    bl      tcp_send_ready
+    cbnz    w0, .Lfail_tcp_srz
+
+    ldr     x0, =name_tcp_srz
+    bl      test_pass
+    b       .Ldone_tcp_srz
+.Lfail_tcp_srz:
+    ldr     x0, =name_tcp_srz
+    bl      test_fail
+.Ldone_tcp_srz:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_snd_wnd_pure_ack (S12) — Pure ACK (no data) updates SND_WND
+ * Handshake → SND_WND=0 → pure ACK window=4096 → SND_WND=4096
+ * ======================================================================== */
+test_tcp_snd_wnd_pure_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_swpa
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Set SND_WND=0 */
+    strh    wzr, [x21, #TCONN_SND_WND]
+
+    /* Build pure ACK from tcp_handshake_ack_template */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    /* Patch ACK = rev(ISN+1) */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Patch window = 4096 NBO */
+    mov     w0, #4096
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    /* tcp_handle → pure ACK dropped (ret=0) */
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_swpa
+    /* SND_WND should be 4096 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #4096
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swpa
+
+    ldr     x0, =name_tcp_swpa
+    bl      test_pass
+    b       .Ldone_tcp_swpa
+.Lfail_tcp_swpa:
+    ldr     x0, =name_tcp_swpa
+    bl      test_fail
+.Ldone_tcp_swpa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_snd_wnd_data_ack (S13) — Data ACK updates both rx buffer and
+ * SND_WND.  Handshake → SND_WND=100 → 5-byte data with window=8192 →
+ * ret=54, RXLEN=5, SND_WND=8192
+ * ======================================================================== */
+test_tcp_snd_wnd_data_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_swda
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Set SND_WND=100 */
+    mov     w0, #100
+    strh    w0, [x21, #TCONN_SND_WND]
+
+    /* Build 5-byte data frame, SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #5
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+
+    /* Patch window to 8192 NBO */
+    ldr     x19, =tcp_test_buf3
+    mov     w0, #8192
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25                 /* TCP header 20 + 5 bytes data */
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* tcp_handle */
+    mov     x0, x19
+    mov     w1, #59                 /* 54 + 5 */
+    bl      tcp_handle
+
+    /* Verify ret=54 (ACK reply) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_swda
+
+    /* Verify RXLEN=5 */
+    ldrh    w0, [x21, #TCONN_RXLEN]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_swda
+
+    /* Verify SND_WND=8192 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #8192
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swda
+
+    ldr     x0, =name_tcp_swda
+    bl      test_pass
+    b       .Ldone_tcp_swda
+.Lfail_tcp_swda:
+    ldr     x0, =name_tcp_swda
+    bl      test_fail
+.Ldone_tcp_swda:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -5849,6 +6253,12 @@ name_tcp_sew:       .asciz "tcp_send_exceeds_window"
 name_tcp_sdw:       .asciz "tcp_send_decrements_window"
 name_tcp_tsr:       .asciz "tcp_send_ready"
 name_tcp_tsri:      .asciz "tcp_send_ready_invalid"
+name_tcp_swe:       .asciz "tcp_send_window_exhaustion"
+name_tcp_wup:       .asciz "tcp_window_update_partial"
+name_tcp_sb:        .asciz "tcp_send_boundary"
+name_tcp_srz:       .asciz "tcp_send_ready_zero"
+name_tcp_swpa:      .asciz "tcp_snd_wnd_pure_ack"
+name_tcp_swda:      .asciz "tcp_snd_wnd_data_ack"
 
 tcp_send_payload:
     .ascii  "World"
