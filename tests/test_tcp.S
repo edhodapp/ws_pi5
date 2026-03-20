@@ -108,6 +108,19 @@ test_tcp:
     bl      test_tcp_lastack_ack_bad
     bl      test_tcp_finwait1_ack_bad
     bl      test_tcp_closing_ack_bad
+    bl      test_tcp_rx_buffer
+    bl      test_tcp_rx_buffer_multi
+    bl      test_tcp_rx_flush
+    bl      test_tcp_rx_overflow
+    bl      test_tcp_send
+    bl      test_tcp_send_invalid
+    bl      test_tcp_window_tracks_fill
+    bl      test_tcp_window_after_flush
+    bl      test_tcp_window_zero
+    bl      test_tcp_buffer_contents
+    bl      test_tcp_buffer_survives_flush
+    bl      test_tcp_send_frame_fields
+    bl      test_tcp_send_rx_independent
     ldp     x29, x30, [sp], #16
     ret
 
@@ -844,11 +857,11 @@ test_tcp_syn_ack:
     cmp     w1, w2
     b.ne    .Lfail_tcp_synack
 
-    /* TCP window = 1460 (NBO) */
+    /* TCP window = TCP_RXBUF_SIZE (2048) NBO */
     ldrh    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
     rev16   w1, w1
     uxth    w1, w1
-    mov     w2, #1460
+    mov     w2, #TCP_RXBUF_SIZE
     cmp     w1, w2
     b.ne    .Lfail_tcp_synack
 
@@ -3701,6 +3714,1085 @@ test_tcp_closing_ack_bad:
     ret
 
 /* ========================================================================
+ * Helper: ttcp_do_handshake — tcp_init + full three-way handshake
+ *
+ * Returns: x0 = ESTABLISHED connection pointer, w1 = ISN (host order)
+ *          or x0 = 0 on failure
+ * Uses: tcp_test_buf, tcp_test_buf2
+ * Clobbers: x0-x6, x19-x22, x30
+ * ======================================================================== */
+ttcp_do_handshake:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Step 1: SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lths_fail
+
+    /* Extract ISN from SYN-ACK SEQ field */
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* w20 = ISN (host order) */
+
+    /* Step 2: ACK → ESTABLISHED */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lths_fail
+
+    /* Find ESTABLISHED connection */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lths_find:
+    cbz     w3, .Lths_fail
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lths_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lths_find
+
+.Lths_found:
+    mov     w1, w20
+    b       .Lths_done
+.Lths_fail:
+    mov     x0, #0
+    mov     w1, #0
+.Lths_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * Helper: ttcp_build_data_frame — Build a data frame with arbitrary payload
+ *
+ * x0: dest buffer
+ * w1: payload length (1..1460)
+ * w2: payload fill byte (e.g. 'A')
+ * w3: SEQ number (host order)
+ * w4: ACK number (host order)
+ * Returns: w0 = frame length (54 + payload_len)
+ * Clobbers: x0-x6, x19-x24, x30
+ * ======================================================================== */
+ttcp_build_data_frame:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0                 /* dest buf */
+    mov     w20, w1                 /* payload len */
+    mov     w21, w2                 /* fill byte */
+    mov     w22, w3                 /* SEQ host */
+    mov     w23, w4                 /* ACK host */
+
+    /* Copy 54-byte template */
+    ldr     x0, =tcp_handshake_ack_template
+    mov     x1, x19
+    mov     w2, #54
+.Ltbdf_copy:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Ltbdf_copy
+
+    /* Set flags = PSH+ACK */
+    mov     w0, #TCP_PSH_ACK
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+
+    /* Set SEQ = rev(seq_host) */
+    rev     w0, w22
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* Set ACK = rev(ack_host) */
+    rev     w0, w23
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* IP TotalLength = 40 + payload_len (NBO) */
+    add     w0, w20, #40
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Fill payload at offset 54 */
+    add     x0, x19, #54
+    mov     w1, w20
+.Ltbdf_fill:
+    cbz     w1, .Ltbdf_fill_done
+    strb    w21, [x0], #1
+    sub     w1, w1, #1
+    b       .Ltbdf_fill
+.Ltbdf_fill_done:
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    add     w1, w20, #TCP_HDR_MIN
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Return 54 + payload_len */
+    add     w0, w20, #54
+
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rx_buffer — Receive 5 bytes, peek returns "Hello"
+ * ======================================================================== */
+test_tcp_rx_buffer:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rxb
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send data: 5 bytes "Hello" */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rxb
+
+    /* tcp_rx_peek */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    /* x0 = buf ptr, w1 = byte count */
+    cmp     w1, #5
+    b.ne    .Lfail_tcp_rxb
+
+    /* Verify bytes = "Hello" */
+    ldrb    w2, [x0]
+    cmp     w2, #0x48               /* 'H' */
+    b.ne    .Lfail_tcp_rxb
+    ldrb    w2, [x0, #1]
+    cmp     w2, #0x65               /* 'e' */
+    b.ne    .Lfail_tcp_rxb
+    ldrb    w2, [x0, #2]
+    cmp     w2, #0x6C               /* 'l' */
+    b.ne    .Lfail_tcp_rxb
+    ldrb    w2, [x0, #3]
+    cmp     w2, #0x6C               /* 'l' */
+    b.ne    .Lfail_tcp_rxb
+    ldrb    w2, [x0, #4]
+    cmp     w2, #0x6F               /* 'o' */
+    b.ne    .Lfail_tcp_rxb
+
+    ldr     x0, =name_tcp_rxb
+    bl      test_pass
+    b       .Ldone_tcp_rxb
+.Lfail_tcp_rxb:
+    ldr     x0, =name_tcp_rxb
+    bl      test_fail
+.Ldone_tcp_rxb:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_rx_buffer_multi — Two 5-byte segments, peek returns 10 bytes
+ * ======================================================================== */
+test_tcp_rx_buffer_multi:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rxm
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send first data: 5 bytes "Hello", SEQ=2 */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rxm
+
+    /* Send second data: 5 bytes "Hello", SEQ=7 (2+5) */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    /* SEQ = 7 (host order) */
+    mov     w0, #7
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* ACK = ISN+1 */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rxm
+
+    /* tcp_rx_peek */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    cmp     w1, #10
+    b.ne    .Lfail_tcp_rxm
+
+    /* First 5 bytes = "Hello" */
+    ldrb    w2, [x0]
+    cmp     w2, #0x48
+    b.ne    .Lfail_tcp_rxm
+    ldrb    w2, [x0, #4]
+    cmp     w2, #0x6F
+    b.ne    .Lfail_tcp_rxm
+    /* Second 5 bytes also = "Hello" */
+    ldrb    w2, [x0, #5]
+    cmp     w2, #0x48
+    b.ne    .Lfail_tcp_rxm
+    ldrb    w2, [x0, #9]
+    cmp     w2, #0x6F
+    b.ne    .Lfail_tcp_rxm
+
+    ldr     x0, =name_tcp_rxm
+    bl      test_pass
+    b       .Ldone_tcp_rxm
+.Lfail_tcp_rxm:
+    ldr     x0, =name_tcp_rxm
+    bl      test_fail
+.Ldone_tcp_rxm:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_rx_flush — Send data, flush, peek returns 0
+ * ======================================================================== */
+test_tcp_rx_flush:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rxfl
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Send data: 5 bytes */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rxfl
+
+    /* Flush */
+    mov     x0, x21
+    bl      tcp_rx_flush
+
+    /* Peek — should return 0 bytes */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    cbnz    w1, .Lfail_tcp_rxfl
+
+    ldr     x0, =name_tcp_rxfl
+    bl      test_pass
+    b       .Ldone_tcp_rxfl
+.Lfail_tcp_rxfl:
+    ldr     x0, =name_tcp_rxfl
+    bl      test_fail
+.Ldone_tcp_rxfl:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_rx_overflow — Pre-set RXLEN=2045, send 5 bytes → drop
+ * ======================================================================== */
+test_tcp_rx_overflow:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rxov
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Pre-set RXLEN = 2045 (overflow: 2045 + 5 = 2050 > 2048) */
+    mov     w0, #2045
+    strh    w0, [x21, #TCONN_RXLEN]
+
+    /* Save RCV_NXT */
+    ldr     w19, [x21, #TCONN_RCV_NXT]
+
+    /* Send data: 5 bytes */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x20, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Verify return = 0 (dropped) */
+    cbnz    w0, .Lfail_tcp_rxov
+
+    /* Verify RXLEN unchanged = 2045 */
+    ldrh    w0, [x21, #TCONN_RXLEN]
+    cmp     w0, #2045
+    b.ne    .Lfail_tcp_rxov
+
+    /* Verify RCV_NXT unchanged */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, w19
+    b.ne    .Lfail_tcp_rxov
+
+    ldr     x0, =name_tcp_rxov
+    bl      test_pass
+    b       .Ldone_tcp_rxov
+.Lfail_tcp_rxov:
+    ldr     x0, =name_tcp_rxov
+    bl      test_fail
+.Ldone_tcp_rxov:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_send — tcp_send 5 bytes, verify frame and SND_NXT
+ * ======================================================================== */
+test_tcp_send:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ts
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Save SND_NXT before send */
+    ldr     w19, [x21, #TCONN_SND_NXT]
+
+    /* tcp_send(conn, buf, "World", 5) */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+
+    /* Verify return = 59 (54 + 5) */
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_ts
+
+    /* Verify flags = PSH+ACK */
+    ldr     x20, =tcp_send_test_buf
+    ldrb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_PSH_ACK
+    b.ne    .Lfail_tcp_ts
+
+    /* Verify SND_NXT += 5 */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w19, #5
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_ts
+
+    /* Verify payload at offset 54 = "World" */
+    ldrb    w0, [x20, #54]
+    cmp     w0, #0x57               /* 'W' */
+    b.ne    .Lfail_tcp_ts
+    ldrb    w0, [x20, #55]
+    cmp     w0, #0x6F               /* 'o' */
+    b.ne    .Lfail_tcp_ts
+    ldrb    w0, [x20, #56]
+    cmp     w0, #0x72               /* 'r' */
+    b.ne    .Lfail_tcp_ts
+    ldrb    w0, [x20, #57]
+    cmp     w0, #0x6C               /* 'l' */
+    b.ne    .Lfail_tcp_ts
+    ldrb    w0, [x20, #58]
+    cmp     w0, #0x64               /* 'd' */
+    b.ne    .Lfail_tcp_ts
+
+    ldr     x0, =name_tcp_ts
+    bl      test_pass
+    b       .Ldone_tcp_ts
+.Lfail_tcp_ts:
+    ldr     x0, =name_tcp_ts
+    bl      test_fail
+.Ldone_tcp_ts:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_invalid — tcp_send from CLOSE_WAIT returns 0
+ * ======================================================================== */
+test_tcp_send_invalid:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tsi
+    mov     x21, x0
+
+    /* Force state to CLOSE_WAIT */
+    mov     w0, #TCPS_CLOSE_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+
+    /* tcp_send should fail */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_tsi
+
+    ldr     x0, =name_tcp_tsi
+    bl      test_pass
+    b       .Ldone_tcp_tsi
+.Lfail_tcp_tsi:
+    ldr     x0, =name_tcp_tsi
+    bl      test_fail
+.Ldone_tcp_tsi:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_window_tracks_fill (S1) — Window shrinks as buffer fills
+ * Handshake → send 100 bytes → verify ACK window = (2048-100) NBO
+ * → send 200 bytes → verify ACK window = (2048-300) NBO
+ * ======================================================================== */
+test_tcp_window_tracks_fill:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_wtf
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 100-byte data, SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #100
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2                  /* SEQ */
+    add     w4, w22, #1             /* ACK = ISN+1 */
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #154                /* 54 + 100 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_wtf
+
+    /* Check window in reply: should be (2048-100)=1948 NBO */
+    ldr     x0, =tcp_test_buf3
+    ldrh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #1948
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_wtf
+
+    /* Send 200-byte data, SEQ=102 (2+100) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #200
+    mov     w2, #0x42               /* 'B' */
+    mov     w3, #102                /* SEQ = 2+100 */
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #254                /* 54 + 200 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_wtf
+
+    /* Check window: should be (2048-300)=1748 NBO */
+    ldr     x0, =tcp_test_buf3
+    ldrh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #1748
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_wtf
+
+    ldr     x0, =name_tcp_wtf
+    bl      test_pass
+    b       .Ldone_tcp_wtf
+.Lfail_tcp_wtf:
+    ldr     x0, =name_tcp_wtf
+    bl      test_fail
+.Ldone_tcp_wtf:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_window_after_flush (S2) — Flush restores window space
+ * Handshake → send 100 bytes → flush → send 50 bytes
+ * → verify ACK window = (2048-50) NBO
+ * ======================================================================== */
+test_tcp_window_after_flush:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_waf
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Send 100-byte data, SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #100
+    mov     w2, #0x41
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #154
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_waf
+
+    /* Flush */
+    mov     x0, x21
+    bl      tcp_rx_flush
+
+    /* Send 50-byte data, SEQ=102 (RCV_NXT after 100 bytes) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #50
+    mov     w2, #0x43               /* 'C' */
+    mov     w3, #102
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #104                /* 54 + 50 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_waf
+
+    /* Check window: should be (2048-50)=1998 NBO */
+    ldr     x0, =tcp_test_buf3
+    ldrh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #1998
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_waf
+
+    ldr     x0, =name_tcp_waf
+    bl      test_pass
+    b       .Ldone_tcp_waf
+.Lfail_tcp_waf:
+    ldr     x0, =name_tcp_waf
+    bl      test_fail
+.Ldone_tcp_waf:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_window_zero (S3) — Buffer full → window = 0
+ * Handshake → pre-set RXLEN=2043 → send 5 bytes → window = 0 NBO
+ * ======================================================================== */
+test_tcp_window_zero:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_wz
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Pre-set RXLEN=2043 (2043+5=2048 exactly) */
+    mov     w0, #2043
+    strh    w0, [x21, #TCONN_RXLEN]
+
+    /* Send 5-byte data, SEQ=2 */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_wz
+
+    /* Check window = 0 in reply */
+    ldr     x0, =tcp_test_buf
+    ldrh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    cbnz    w0, .Lfail_tcp_wz
+
+    ldr     x0, =name_tcp_wz
+    bl      test_pass
+    b       .Ldone_tcp_wz
+.Lfail_tcp_wz:
+    ldr     x0, =name_tcp_wz
+    bl      test_fail
+.Ldone_tcp_wz:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_buffer_contents (S4) — "AAAA" + "BBBB" → peek = "AAAABBBB"
+ * ======================================================================== */
+test_tcp_buffer_contents:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_bc
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Send "AAAA" (4 bytes), SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #4
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #58                 /* 54 + 4 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_bc
+
+    /* Send "BBBB" (4 bytes), SEQ=6 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #4
+    mov     w2, #0x42               /* 'B' */
+    mov     w3, #6                  /* 2+4 */
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_bc
+
+    /* Peek and verify 8 bytes = "AAAABBBB" */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    cmp     w1, #8
+    b.ne    .Lfail_tcp_bc
+    mov     x19, x0
+
+    ldrb    w0, [x19]
+    cmp     w0, #0x41
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #1]
+    cmp     w0, #0x41
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #2]
+    cmp     w0, #0x41
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #3]
+    cmp     w0, #0x41
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #4]
+    cmp     w0, #0x42
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #5]
+    cmp     w0, #0x42
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #6]
+    cmp     w0, #0x42
+    b.ne    .Lfail_tcp_bc
+    ldrb    w0, [x19, #7]
+    cmp     w0, #0x42
+    b.ne    .Lfail_tcp_bc
+
+    ldr     x0, =name_tcp_bc
+    bl      test_pass
+    b       .Ldone_tcp_bc
+.Lfail_tcp_bc:
+    ldr     x0, =name_tcp_bc
+    bl      test_fail
+.Ldone_tcp_bc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_buffer_survives_flush (S5) — "AAAA" → flush → "CCCC" → peek = "CCCC"
+ * ======================================================================== */
+test_tcp_buffer_survives_flush:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_bsf
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Send "AAAA" (4 bytes), SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #4
+    mov     w2, #0x41
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_bsf
+
+    /* Flush */
+    mov     x0, x21
+    bl      tcp_rx_flush
+
+    /* Send "CCCC" (4 bytes), SEQ=6 (RCV_NXT after "AAAA") */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #4
+    mov     w2, #0x43               /* 'C' */
+    mov     w3, #6
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_bsf
+
+    /* Peek: should have 4 bytes = "CCCC" */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    cmp     w1, #4
+    b.ne    .Lfail_tcp_bsf
+
+    ldrb    w2, [x0]
+    cmp     w2, #0x43
+    b.ne    .Lfail_tcp_bsf
+    ldrb    w2, [x0, #3]
+    cmp     w2, #0x43
+    b.ne    .Lfail_tcp_bsf
+
+    ldr     x0, =name_tcp_bsf
+    bl      test_pass
+    b       .Ldone_tcp_bsf
+.Lfail_tcp_bsf:
+    ldr     x0, =name_tcp_bsf
+    bl      test_fail
+.Ldone_tcp_bsf:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_send_frame_fields (S6) — Verify tcp_send frame contents in detail
+ * Handshake → receive 100 bytes → tcp_send "World" → verify all fields
+ * ======================================================================== */
+test_tcp_send_frame_fields:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sff
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Receive 100 bytes to fill buffer (affects window) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #100
+    mov     w2, #0x41
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #154
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_sff
+
+    /* Save SND_NXT and RCV_NXT before send */
+    ldr     w23, [x21, #TCONN_SND_NXT]
+    ldr     w24, [x21, #TCONN_RCV_NXT]
+
+    /* tcp_send "World" */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_sff
+
+    ldr     x19, =tcp_send_test_buf
+
+    /* Verify ETH dst = RMAC (AA:BB:CC:DD:EE:FF) */
+    ldrb    w0, [x19, #ETH_DST]
+    cmp     w0, #0xAA
+    b.ne    .Lfail_tcp_sff
+    ldrb    w0, [x19, #(ETH_DST + 5)]
+    cmp     w0, #0xFF
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify IP totlen = 45 (0x002D NBO) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+    mov     w1, #45
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify TCP sport = 80 (0x0050 NBO) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
+    mov     w1, #0x5000             /* port 80 as NBO LE halfword */
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify TCP dport = 12345 (0x3039 NBO) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]
+    /* 12345 = 0x3039, NBO halfword stored as LE = 0x3930 */
+    mov     w1, #0x3930
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify TCP SEQ = rev(SND_NXT before send) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w23
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify TCP ACK = rev(RCV_NXT) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w1, w24
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify flags = PSH+ACK */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_PSH_ACK
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify window = (2048-100) = 1948 NBO */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #1948
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sff
+
+    /* Verify TCP checksum is valid */
+    mov     x0, x19
+    mov     w1, #25                 /* 20 + 5 */
+    bl      tcp_checksum
+    cbnz    w0, .Lfail_tcp_sff
+
+    /* Verify payload = "World" */
+    ldrb    w0, [x19, #54]
+    cmp     w0, #0x57
+    b.ne    .Lfail_tcp_sff
+    ldrb    w0, [x19, #58]
+    cmp     w0, #0x64
+    b.ne    .Lfail_tcp_sff
+
+    ldr     x0, =name_tcp_sff
+    bl      test_pass
+    b       .Ldone_tcp_sff
+.Lfail_tcp_sff:
+    ldr     x0, =name_tcp_sff
+    bl      test_fail
+.Ldone_tcp_sff:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_send_rx_independent (S7) — tcp_send doesn't disturb rx buffer
+ * Handshake → receive 50 bytes → tcp_send 5 bytes → rx buffer still has 50
+ * ======================================================================== */
+test_tcp_send_rx_independent:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sri
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Receive 50 bytes, SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #50
+    mov     w2, #0x58               /* 'X' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #104                /* 54 + 50 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_sri
+
+    /* Save SND_NXT */
+    ldr     w19, [x21, #TCONN_SND_NXT]
+
+    /* tcp_send "World" */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_sri
+
+    /* Verify rx buffer still has 50 bytes */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    cmp     w1, #50
+    b.ne    .Lfail_tcp_sri
+
+    /* Verify first byte of rx buffer is 'X' */
+    ldrb    w2, [x0]
+    cmp     w2, #0x58
+    b.ne    .Lfail_tcp_sri
+
+    /* Verify SND_NXT advanced by 5 */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w19, #5
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sri
+
+    ldr     x0, =name_tcp_sri
+    bl      test_pass
+    b       .Ldone_tcp_sri
+.Lfail_tcp_sri:
+    ldr     x0, =name_tcp_sri
+    bl      test_fail
+.Ldone_tcp_sri:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -4194,15 +5286,39 @@ name_tcp_twto:      .asciz "tcp_timewait_timeout"
 name_tcp_laab:      .asciz "tcp_lastack_ack_bad"
 name_tcp_fw1ab:     .asciz "tcp_finwait1_ack_bad"
 name_tcp_clab:      .asciz "tcp_closing_ack_bad"
+name_tcp_rxb:       .asciz "tcp_rx_buffer"
+name_tcp_rxm:       .asciz "tcp_rx_buffer_multi"
+name_tcp_rxfl:      .asciz "tcp_rx_flush"
+name_tcp_rxov:      .asciz "tcp_rx_overflow"
+name_tcp_ts:        .asciz "tcp_send"
+name_tcp_tsi:       .asciz "tcp_send_invalid"
+name_tcp_wtf:       .asciz "tcp_window_tracks_fill"
+name_tcp_waf:       .asciz "tcp_window_after_flush"
+name_tcp_wz:        .asciz "tcp_window_zero"
+name_tcp_bc:        .asciz "tcp_buffer_contents"
+name_tcp_bsf:       .asciz "tcp_buffer_survives_flush"
+name_tcp_sff:       .asciz "tcp_send_frame_fields"
+name_tcp_sri:       .asciz "tcp_send_rx_independent"
+
+tcp_send_payload:
+    .ascii  "World"
 
 .section .data
 .balign 4
 tcp_test_buf:
-    .space  128
+    .space  512
 
 .balign 4
 tcp_test_buf2:
-    .space  128
+    .space  512
+
+.balign 4
+tcp_test_buf3:
+    .space  512
+
+.balign 4
+tcp_send_test_buf:
+    .space  1536
 
 .balign 8
 test_tcp_timer_pool:

@@ -45,6 +45,7 @@
 
 /* Pre-combined flag values (additions) */
 .equ TCP_FIN_ACK,      0x11    /* FIN + ACK */
+.equ TCP_PSH_ACK,      0x18    /* PSH + ACK */
 
 /* Connection struct (64 bytes, Phase 2+) */
 .equ TCONN_STATE,      0       /* u8  */
@@ -55,6 +56,7 @@
 .equ TCONN_RIP,        8       /* u32 — network byte order */
 .equ TCONN_PAD3,       12
 .equ TCONN_SND_UNA,    16      /* u32 — oldest unACKed seq */
+.equ TCONN_RXLEN,      20      /* u16 — rx buffer fill */
 .equ TCONN_SND_NXT,    24      /* u32 — next seq to send */
 .equ TCONN_RCV_NXT,    32      /* u32 — next expected seq from peer */
 .equ TCONN_SND_WND,    40      /* u16 — peer's advertised window */
@@ -67,6 +69,11 @@
 /* Connection table */
 .equ TCP_MAX_CONNS,    16
 .equ TCP_CONN_TABLE_SIZE, 1024 /* 16 * 64 */
+
+/* Receive buffer pool */
+.equ TCP_RXBUF_SIZE,      2048   /* bytes per connection, power of 2 */
+.equ TCP_RXBUF_SHIFT,     11     /* log2(2048) */
+.equ TCP_RXBUF_POOL_SIZE, 32768  /* 16 * 2048 */
 
 /* FSA event codes (priority: RST > SYN > FIN > ACK) */
 .equ TCP_EVT_RST,      0

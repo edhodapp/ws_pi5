@@ -20,8 +20,12 @@
 .global tcp_init
 .global tcp_conn_table
 .global tcp_close
+.global tcp_send
+.global tcp_rx_peek
+.global tcp_rx_flush
 .global tcp_set_timer_pool
 .global tcp_timewait_cb
+.global tcp_rxbuf_pool
 
 .section .text
 
@@ -475,6 +479,7 @@ tcp_listen_syn_handler:
     /* Populate new connection */
     mov     w0, #TCPS_SYN_RCVD
     strb    w0, [x21, #TCONN_STATE]
+    strh    wzr, [x21, #TCONN_RXLEN]
 
     ldrh    w0, [x20, #TCONN_LPORT]
     strh    w0, [x21, #TCONN_LPORT]
@@ -507,7 +512,12 @@ tcp_listen_syn_handler:
     ldr     w2, [x21, #TCONN_RCV_NXT]
     rev     w2, w2                  /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_SYN_ACK
-    mov     w4, #0xB405             /* window 1460 NBO */
+    /* Dynamic window from TCONN_RXLEN (just zeroed → window = TCP_RXBUF_SIZE) */
+    ldrh    w4, [x21, #TCONN_RXLEN]
+    mov     w5, #TCP_RXBUF_SIZE
+    sub     w4, w5, w4
+    rev16   w4, w4
+    uxth    w4, w4
     bl      tcp_build_reply
 
 .Llsyn_done:
@@ -562,7 +572,8 @@ tcp_drop_handler:
  * data_len = section_len - header_len
  * If data_len == 0 → pure ACK, return 0
  * If SEG.SEQ != RCV_NXT → out of order, drop (return 0)
- * Otherwise: RCV_NXT += data_len, build ACK reply, return 54
+ * If rx buffer would overflow → drop (return 0, peer retransmits)
+ * Otherwise: copy data to rx buffer, RCV_NXT += data_len, build ACK reply
  */
 tcp_estab_ack_handler:
     sub     w4, w2, w3              /* w4 = data_len */
@@ -575,26 +586,76 @@ tcp_estab_ack_handler:
     cmp     w5, w6
     b.ne    .Leak_pure_ack          /* out of order → drop */
 
-    /* Accept data: RCV_NXT += data_len */
-    add     w6, w6, w4
-    str     w6, [x0, #TCONN_RCV_NXT]
+    /* Check rx buffer overflow */
+    ldrh    w5, [x0, #TCONN_RXLEN]
+    add     w7, w5, w4              /* new_rxlen = rxlen + data_len */
+    cmp     w7, #TCP_RXBUF_SIZE
+    b.hi    .Leak_pure_ack          /* would overflow → drop */
+
+    /* Accept data: copy to rx buffer */
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+    mov     x20, x1                 /* x20 = frame */
+    mov     w21, w4                 /* w21 = data_len */
+
+    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    ldr     x2, =tcp_conn_table
+    sub     x2, x19, x2
+    lsr     x2, x2, #6             /* slot index */
+
+    /* Dest = tcp_rxbuf_pool + (slot << 11) + rxlen */
+    ldr     x0, =tcp_rxbuf_pool
+    add     x0, x0, x2, lsl #TCP_RXBUF_SHIFT
+    add     x0, x0, x5             /* + rxlen (w5 from above) */
+
+    /* Src = frame + ETH_PAYLOAD + IP_HDR_MIN + header_len */
+    add     x1, x20, #(ETH_PAYLOAD + IP_HDR_MIN)
+    /* Need tcp_header_len — w3 was clobbered? No, w3 is still header_len */
+    /* Actually w3 was the 4th arg, untouched so far */
+    add     x1, x1, x3             /* skip TCP header (w3=header_len still in x3) */
+
+    /* Byte-copy data_len bytes */
+    mov     w2, w21
+.Leak_rxcopy:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Leak_rxcopy
+
+    /* Update RXLEN */
+    ldrh    w0, [x19, #TCONN_RXLEN]
+    add     w0, w0, w21
+    strh    w0, [x19, #TCONN_RXLEN]
+    mov     w22, w0                 /* w22 = new RXLEN for window calc */
+
+    /* RCV_NXT += data_len */
+    ldr     w6, [x19, #TCONN_RCV_NXT]
+    add     w6, w6, w21
+    str     w6, [x19, #TCONN_RCV_NXT]
 
     /* Build ACK reply: SEQ=SND_NXT(NBO), ACK=new_RCV_NXT(NBO) */
-    stp     x29, x30, [sp, #-32]!
-    stp     x19, x20, [sp, #16]
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    rev     w1, w0                      /* SEQ NBO */
+    rev     w2, w6                      /* ACK NBO */
 
-    ldr     w19, [x0, #TCONN_SND_NXT]  /* SND_NXT (host order) */
-    rev     w20, w6                     /* new RCV_NXT → NBO */
+    /* Dynamic window from new RXLEN */
+    mov     w4, #TCP_RXBUF_SIZE
+    sub     w4, w4, w22             /* available = size - used */
+    rev16   w4, w4
+    uxth    w4, w4                  /* NBO halfword */
 
-    mov     x0, x1                  /* frame */
-    rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
-    mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
+    mov     x0, x20                 /* frame */
+    /* w1 = SEQ, w2 = ACK already set */
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
-    mov     w4, #0xB405            /* window 1460 NBO */
+    /* w4 = window already set */
     bl      tcp_build_reply
 
+    ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
 
 .Leak_pure_ack:
@@ -609,8 +670,11 @@ tcp_estab_ack_handler:
  * Build ACK reply: SEQ=SND_NXT(NBO), ACK=new_RCV_NXT(NBO)
  */
 tcp_estab_fin_handler:
-    stp     x29, x30, [sp, #-32]!
+    stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x21, x0                 /* x21 = conn (save for window) */
 
     /* RCV_NXT += 1 (FIN consumes one seq) */
     ldr     w5, [x0, #TCONN_RCV_NXT]
@@ -620,49 +684,49 @@ tcp_estab_fin_handler:
     ldr     w19, [x0, #TCONN_SND_NXT]  /* SND_NXT (host order) */
     rev     w20, w5                     /* new RCV_NXT → NBO */
 
+    /* Dynamic window */
+    ldrh    w4, [x21, #TCONN_RXLEN]
+    mov     w5, #TCP_RXBUF_SIZE
+    sub     w4, w5, w4
+    rev16   w4, w4
+    uxth    w4, w4
+
     mov     x0, x1                  /* frame */
     rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
-    mov     w4, #0xB405            /* window 1460 NBO */
+    /* w4 = window already set */
     bl      tcp_build_reply
 
+    ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
 
 /*
- * tcp_close — Initiate active close on a connection
+ * tcp_build_frame — Build ETH+IP+TCP frame from scratch using connection fields
  *
  * x0: connection pointer
- * x1: frame buffer (54 bytes written if successful)
- * Returns: w0 = 54 (FIN+ACK sent) or 0 (invalid state)
- * Clobbers: x0-x6, x19-x22, x30
+ * x1: frame buffer
+ * w2: TCP flags
+ * x3: payload pointer (0 = no payload)
+ * w4: payload length (0 = no payload)
+ * Returns: w0 = frame length (54 + payload_len)
+ * Clobbers: x0-x6, x19-x25, x30
  *
- * Valid from ESTABLISHED → FIN_WAIT_1, or CLOSE_WAIT → LAST_ACK.
- * Builds ETH+IP+TCP frame from scratch using connection fields.
+ * Does NOT update SND_NXT or change state — caller's responsibility.
  */
-tcp_close:
-    stp     x29, x30, [sp, #-48]!
+tcp_build_frame:
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
 
     mov     x19, x0                 /* x19 = conn */
     mov     x20, x1                 /* x20 = frame buf */
-
-    /* Check state: must be ESTABLISHED or CLOSE_WAIT */
-    ldrb    w0, [x19, #TCONN_STATE]
-    cmp     w0, #TCPS_ESTABLISHED
-    b.eq    .Ltc_valid
-    cmp     w0, #TCPS_CLOSE_WAIT
-    b.eq    .Ltc_valid
-
-    /* Invalid state */
-    mov     w0, #0
-    b       .Ltc_done
-
-.Ltc_valid:
-    mov     w21, w0                 /* w21 = old state */
+    mov     w21, w2                 /* w21 = flags */
+    mov     x22, x3                 /* x22 = payload ptr */
+    mov     w23, w4                 /* w23 = payload len */
 
     /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
     mov     x0, x20                 /* frame */
@@ -676,8 +740,10 @@ tcp_close:
     strb    w0, [x20, #ETH_PAYLOAD]
     strb    wzr, [x20, #(ETH_PAYLOAD + 1)]
 
-    /* totlen = 40 (0x0028 BE → 0x2800 LE) */
-    mov     w0, #0x2800
+    /* totlen = 40 + payload_len (NBO via rev16) */
+    add     w0, w23, #40
+    rev16   w0, w0
+    uxth    w0, w0
     strh    w0, [x20, #(ETH_PAYLOAD + IP_TOTLEN)]
 
     /* id = 0 */
@@ -716,8 +782,8 @@ tcp_close:
     strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]
 
     /* SEQ = rev(SND_NXT) (NBO) */
-    ldr     w22, [x19, #TCONN_SND_NXT]
-    rev     w0, w22
+    ldr     w24, [x19, #TCONN_SND_NXT]
+    rev     w0, w24
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
 
     /* ACK = rev(RCV_NXT) (NBO) */
@@ -725,31 +791,97 @@ tcp_close:
     rev     w0, w0
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
 
-    /* data offset=0x50, flags=FIN+ACK */
+    /* data offset=0x50, flags */
     mov     w0, #0x50
     strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
-    mov     w0, #TCP_FIN_ACK
-    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    strb    w21, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
-    /* window = 1460 NBO (0xB405 LE) */
-    mov     w0, #0xB405
+    /* Dynamic window from TCONN_RXLEN */
+    ldrh    w0, [x19, #TCONN_RXLEN]
+    mov     w1, #TCP_RXBUF_SIZE
+    sub     w0, w1, w0             /* available = size - used */
+    rev16   w0, w0
+    uxth    w0, w0
     strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
 
     /* urgent = 0 */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_URGENT)]
 
-    /* TCP checksum */
+    /* Copy payload if present */
+    cbz     w23, .Lbf_no_payload
+    add     x0, x20, #54           /* dest = frame + 54 */
+    mov     x1, x22                /* src = payload ptr */
+    mov     w2, w23
+.Lbf_copy:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lbf_copy
+
+.Lbf_no_payload:
+    /* TCP checksum over 20 + payload_len bytes */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x20
-    mov     w1, #TCP_HDR_MIN
+    add     w1, w23, #TCP_HDR_MIN
     bl      tcp_checksum
     strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
-    /* 4. SND_NXT += 1 (FIN consumes one seq) */
+    /* Return 54 + payload_len */
+    add     w0, w23, #54
+
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/*
+ * tcp_close — Initiate active close on a connection
+ *
+ * x0: connection pointer
+ * x1: frame buffer (54 bytes written if successful)
+ * Returns: w0 = 54 (FIN+ACK sent) or 0 (invalid state)
+ * Clobbers: x0-x6, x19-x25, x30
+ *
+ * Valid from ESTABLISHED → FIN_WAIT_1, or CLOSE_WAIT → LAST_ACK.
+ * Builds ETH+IP+TCP frame from scratch using connection fields.
+ */
+tcp_close:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+    mov     x20, x1                 /* x20 = frame buf */
+
+    /* Check state: must be ESTABLISHED or CLOSE_WAIT */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Ltc_valid
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.eq    .Ltc_valid
+
+    /* Invalid state */
+    mov     w0, #0
+    b       .Ltc_done
+
+.Ltc_valid:
+    mov     w21, w0                 /* w21 = old state */
+
+    /* Build FIN+ACK frame via tcp_build_frame */
+    mov     x0, x19                 /* conn */
+    mov     x1, x20                 /* frame */
+    mov     w2, #TCP_FIN_ACK        /* flags */
+    mov     x3, #0                  /* no payload */
+    mov     w4, #0                  /* payload_len = 0 */
+    bl      tcp_build_frame
+
+    /* SND_NXT += 1 (FIN consumes one seq) */
+    ldr     w22, [x19, #TCONN_SND_NXT]
     add     w22, w22, #1
     str     w22, [x19, #TCONN_SND_NXT]
 
-    /* 5. State transition */
+    /* State transition */
     cmp     w21, #TCPS_ESTABLISHED
     b.ne    .Ltc_closewait
     mov     w0, #TCPS_FIN_WAIT_1
@@ -765,6 +897,97 @@ tcp_close:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_send — Send application data on an ESTABLISHED connection
+ *
+ * x0: connection pointer
+ * x1: frame buffer (1514 bytes available)
+ * x2: payload pointer
+ * w3: payload length (1..1460)
+ * Returns: w0 = frame length (54 + payload_len), or 0 on error
+ * Clobbers: x0-x6, x19-x25, x30
+ */
+tcp_send:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+    mov     x20, x2                 /* x20 = payload ptr (save before clobber) */
+    mov     w21, w3                 /* w21 = payload_len */
+
+    /* Check state == ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lts_err
+
+    /* Check 1 <= payload_len <= 1460 */
+    cbz     w21, .Lts_err
+    cmp     w21, #1460
+    b.hi    .Lts_err
+
+    /* Build PSH+ACK frame via tcp_build_frame */
+    mov     x0, x19                 /* conn */
+    /* x1 = frame (untouched since entry) */
+    mov     w2, #TCP_PSH_ACK        /* flags */
+    mov     x3, x20                 /* payload */
+    mov     w4, w21                 /* payload_len */
+    bl      tcp_build_frame
+
+    mov     w22, w0                 /* save frame length */
+
+    /* SND_NXT += payload_len */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    add     w0, w0, w21
+    str     w0, [x19, #TCONN_SND_NXT]
+
+    mov     w0, w22                 /* return frame length */
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+.Lts_err:
+    mov     w0, #0
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_rx_peek — Get pointer and length of received data
+ *
+ * x0: connection pointer
+ * Returns: x0 = buffer pointer, w1 = byte count
+ * Leaf function, clobbers x0-x3
+ */
+tcp_rx_peek:
+    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    ldr     x1, =tcp_conn_table
+    sub     x1, x0, x1
+    lsr     x1, x1, #6             /* slot index */
+
+    /* Buffer = tcp_rxbuf_pool + (slot << 11) */
+    ldr     x2, =tcp_rxbuf_pool
+    add     x2, x2, x1, lsl #TCP_RXBUF_SHIFT
+
+    /* Length = TCONN_RXLEN */
+    ldrh    w1, [x0, #TCONN_RXLEN]
+    mov     x0, x2
+    ret
+
+/*
+ * tcp_rx_flush — Clear receive buffer
+ *
+ * x0: connection pointer
+ * Clears TCONN_RXLEN to 0.
+ * Leaf function, clobbers none.
+ */
+tcp_rx_flush:
+    strh    wzr, [x0, #TCONN_RXLEN]
     ret
 
 /*
@@ -816,8 +1039,11 @@ tcp_finwait1_ack_handler:
  * Same pattern as tcp_estab_fin_handler.
  */
 tcp_finwait1_fin_handler:
-    stp     x29, x30, [sp, #-32]!
+    stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x21, x0                 /* x21 = conn (save for window) */
 
     /* RCV_NXT += 1 (FIN consumes one seq) */
     ldr     w5, [x0, #TCONN_RCV_NXT]
@@ -827,15 +1053,23 @@ tcp_finwait1_fin_handler:
     ldr     w19, [x0, #TCONN_SND_NXT]
     rev     w20, w5                     /* new RCV_NXT → NBO */
 
+    /* Dynamic window */
+    ldrh    w4, [x21, #TCONN_RXLEN]
+    mov     w5, #TCP_RXBUF_SIZE
+    sub     w4, w5, w4
+    rev16   w4, w4
+    uxth    w4, w4
+
     mov     x0, x1                  /* frame */
     rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG
-    mov     w4, #0xB405            /* window 1460 NBO */
+    /* w4 = window already set */
     bl      tcp_build_reply
 
+    ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
 
 /*
@@ -863,7 +1097,12 @@ tcp_finwait2_fin_handler:
     rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG
-    mov     w4, #0xB405            /* window 1460 NBO */
+    /* Dynamic window */
+    ldrh    w4, [x21, #TCONN_RXLEN]
+    mov     w5, #TCP_RXBUF_SIZE
+    sub     w4, w5, w4
+    rev16   w4, w4
+    uxth    w4, w4
     bl      tcp_build_reply
     mov     w22, w0                 /* save return value (54) */
 
@@ -1062,3 +1301,7 @@ tcp_conn_table:
 .balign 8
 tcp_timer_pool_ptr:
     .space  8
+
+.balign 16
+tcp_rxbuf_pool:
+    .space  TCP_RXBUF_POOL_SIZE
