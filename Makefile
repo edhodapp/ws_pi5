@@ -23,7 +23,7 @@ FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
     $(BUILD)/arp.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/net_cfg.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
 
-.PHONY: all test test-functional fuzz fuzz-corpus clean
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq clean
 
 all: kernel8.img
 
@@ -209,6 +209,18 @@ $(BUILD)/fuzz_net: $(BUILD)/fuzz_net.o $(FUZZ_ASM_OBJS)
 
 fuzz-corpus: fuzz/gen_corpus.sh
 	bash fuzz/gen_corpus.sh
+
+# Multi-packet TCP sequence fuzz harness
+fuzz-seq: $(BUILD)/fuzz_tcp_seq
+
+$(BUILD)/fuzz_tcp_seq.o: fuzz/fuzz_tcp_seq.c | $(BUILD)
+	$(CC_AARCH64) -c -O2 -o $@ $<
+
+$(BUILD)/fuzz_tcp_seq: $(BUILD)/fuzz_tcp_seq.o $(FUZZ_ASM_OBJS)
+	$(CC_AARCH64) -static -o $@ $^
+
+fuzz-corpus-seq: fuzz/gen_corpus_seq.py
+	python3 fuzz/gen_corpus_seq.py
 
 $(BUILD):
 	mkdir -p $(BUILD)
