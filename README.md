@@ -72,9 +72,10 @@ drivers/        Hardware drivers
   cdc_ecm.S       CDC-ECM device init, activate, send/recv
   timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 143 tests across 22 files
+tests/          Test sources — 143 unit tests across 22 files
+tests/func/     PICT-based functional test models
 fuzz/           Fuzz harness for network packet parsers
-scripts/        Build and test automation
+scripts/        Build and test automation (including Python oracle)
 hw_test/        Hardware test scripts for Pi 4 test fixture
 ```
 
@@ -86,16 +87,28 @@ Requires the AArch64 cross-toolchain and QEMU:
 sudo apt install gcc-aarch64-linux-gnu qemu-system-aarch64
 ```
 
+For functional tests, install [PICT](https://github.com/microsoft/pict) (Microsoft's pairwise/combinatorial testing tool):
+
+```
+sudo apt install pict
+```
+
 Build the kernel image:
 
 ```
 make
 ```
 
-Run the test suite:
+Run the unit test suite:
 
 ```
 make test
+```
+
+Run exhaustive functional tests:
+
+```
+make test-functional
 ```
 
 Clean build artifacts:
@@ -105,6 +118,8 @@ make clean
 ```
 
 ## Testing
+
+### Unit Tests
 
 143 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP data transfer and passive close.
 
@@ -122,6 +137,28 @@ The TDD workflow:
 6. Commit
 
 The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the background, polls serial output for pass/fail markers, and kills QEMU cleanly to ensure output is flushed.
+
+### Functional Tests (PICT-Based Exhaustive Testing)
+
+Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
+
+Six independent parameters — connection state, TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 77 test vectors. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, reply flags, and post-state. This gives two independent specifications of TCP correctness written in different languages — if both agree on all cases, confidence is very high.
+
+The pipeline:
+
+```
+tcp_func.pict  →  pict /o:max  →  tcp_vectors.tsv  →  tcp_oracle.py  →  tcp_vectors.bin
+                                                                              ↓
+                                              test_tcp_func.S (.incbin)  →  QEMU  →  PASS/FAIL
+```
+
+The assembly harness (`tests/test_tcp_func.S`) loads the binary table via `.incbin`, loops over every entry, calls `tcp_init` and pre-seeds connection state, invokes `tcp_handle`, and verifies the result against the oracle's expectations. A strong `tcp_isn` symbol overrides the weak default to ensure deterministic ISN values.
+
+If PICT is unavailable, the oracle has a `--generate` fallback that enumerates the full cross-product directly in Python:
+
+```
+python3 scripts/tcp_oracle.py --generate > build/tcp_vectors.bin
+```
 
 ## TCP: Table-Driven Finite State Automaton
 
@@ -203,6 +240,8 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - Timer infrastructure (ARM generic timer, software timer pool)
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
 - Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
+
+**Test coverage:** 143 unit tests (complete branch coverage) + 77 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
 
 **Next:**
 - TCP active close (FIN from our side)
