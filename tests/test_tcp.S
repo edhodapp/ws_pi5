@@ -147,6 +147,13 @@ test_tcp:
     bl      test_tcp_send_ready_gate_rtx
     bl      test_tcp_rtx_cb_send
     bl      test_tcp_rtx_cb_max_retries
+    bl      test_tcp_synack_rtx_save
+    bl      test_tcp_synack_rtx_clear
+    bl      test_tcp_fin_rtx_save
+    bl      test_tcp_fin_rtx_clear_fw1
+    bl      test_tcp_fin_rtx_clear_lastack
+    bl      test_tcp_dup_data_ack
+    bl      test_tcp_rst_clears_rtx
     ldp     x29, x30, [sp], #16
     ret
 
@@ -6290,6 +6297,426 @@ test_tcp_rtx_cb_max_retries:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_synack_rtx_save — SYN → SYN-ACK saves frame in retransmit buffer
+ *
+ * tcp_init → SYN → verify new connection has RTXLEN == 54
+ * ======================================================================== */
+test_tcp_synack_rtx_save:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Send SYN */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_sars
+
+    /* Find SYN_RCVD connection */
+    ldr     x21, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lsars_find:
+    cbz     w3, .Lfail_tcp_sars
+    sub     w3, w3, #1
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Lsars_found
+    add     x21, x21, #TCONN_SIZE
+    b       .Lsars_find
+.Lsars_found:
+
+    /* Verify RTXLEN == 54 (SYN-ACK frame) */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_sars
+
+    /* Verify RTXCOUNT == 0 */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_sars
+
+    ldr     x0, =name_tcp_sars
+    bl      test_pass
+    b       .Ldone_tcp_sars
+.Lfail_tcp_sars:
+    ldr     x0, =name_tcp_sars
+    bl      test_fail
+.Ldone_tcp_sars:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_synack_rtx_clear — Handshake ACK clears SYN-ACK retransmit
+ *
+ * Full handshake → verify RTXLEN == 0
+ * ======================================================================== */
+test_tcp_synack_rtx_clear:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sarc
+    mov     x21, x0
+
+    /* After handshake, RTXLEN should be 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_sarc
+
+    ldr     x0, =name_tcp_sarc
+    bl      test_pass
+    b       .Ldone_tcp_sarc
+.Lfail_tcp_sarc:
+    ldr     x0, =name_tcp_sarc
+    bl      test_fail
+.Ldone_tcp_sarc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_fin_rtx_save — tcp_close saves FIN in retransmit buffer
+ *
+ * Handshake → tcp_close → verify RTXLEN == 54
+ * ======================================================================== */
+test_tcp_fin_rtx_save:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_frs
+    mov     x21, x0
+
+    /* tcp_close */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_close
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_frs
+
+    /* Verify RTXLEN == 54 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_frs
+
+    /* Verify state == FIN_WAIT_1 */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_FIN_WAIT_1
+    b.ne    .Lfail_tcp_frs
+
+    ldr     x0, =name_tcp_frs
+    bl      test_pass
+    b       .Ldone_tcp_frs
+.Lfail_tcp_frs:
+    ldr     x0, =name_tcp_frs
+    bl      test_fail
+.Ldone_tcp_frs:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_fin_rtx_clear_fw1 — FIN_WAIT_1 + ACK clears retransmit
+ *
+ * Handshake → tcp_close → FIN_WAIT_1 → ACK → FIN_WAIT_2, RTXLEN==0
+ * ======================================================================== */
+test_tcp_fin_rtx_clear_fw1:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_frcf
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* tcp_close → FIN_WAIT_1 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_close
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_frcf
+
+    /* Build ACK for the FIN: SEQ=2 (peer's seq), ACK=ISN+2 (FIN consumed 1) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #2
+    add     w4, w22, #2             /* ACK = ISN+2 (SND_NXT after FIN) */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify state == FIN_WAIT_2 */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_FIN_WAIT_2
+    b.ne    .Lfail_tcp_frcf
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_frcf
+
+    ldr     x0, =name_tcp_frcf
+    bl      test_pass
+    b       .Ldone_tcp_frcf
+.Lfail_tcp_frcf:
+    ldr     x0, =name_tcp_frcf
+    bl      test_fail
+.Ldone_tcp_frcf:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_fin_rtx_clear_lastack — LAST_ACK + ACK clears retransmit
+ *
+ * Handshake → recv FIN → CLOSE_WAIT → tcp_close → LAST_ACK → ACK → CLOSED
+ * ======================================================================== */
+test_tcp_fin_rtx_clear_lastack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_frcl
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* Inject FIN from peer: FIN+ACK, SEQ=2, ACK=ISN+1 → CLOSE_WAIT */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #2                  /* peer SEQ */
+    add     w4, w22, #1             /* ACK = ISN+1 */
+    bl      ttcp_build_data_frame
+    /* Patch flags to FIN+ACK */
+    ldr     x19, =tcp_test_buf3
+    mov     w0, #TCP_FIN_ACK
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify CLOSE_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_frcl
+
+    /* tcp_close → LAST_ACK */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_close
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_frcl
+
+    /* Verify RTXLEN == 54 (FIN saved) */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_frcl
+
+    /* ACK for the FIN: SEQ=3 (peer consumed FIN), ACK=ISN+2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #3                  /* peer SEQ (FIN consumed 1) */
+    add     w4, w22, #2             /* ACK = ISN+2 */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify CLOSED */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_frcl
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_frcl
+
+    ldr     x0, =name_tcp_frcl
+    bl      test_pass
+    b       .Ldone_tcp_frcl
+.Lfail_tcp_frcl:
+    ldr     x0, =name_tcp_frcl
+    bl      test_fail
+.Ldone_tcp_frcl:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_dup_data_ack — Duplicate data (SEQ < RCV_NXT) → re-ACK
+ *
+ * Handshake → receive 5 bytes (RCV_NXT advances) → inject same data
+ * again (SEQ < RCV_NXT) → should get ACK reply with current RCV_NXT
+ * ======================================================================== */
+test_tcp_dup_data_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_dda
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* Receive 5 bytes: SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #5
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #59
+    bl      tcp_handle
+    cmp     w0, #54                 /* ACK reply */
+    b.ne    .Lfail_tcp_dda
+
+    /* RCV_NXT should now be 7 (2 + 5) */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, #7
+    b.ne    .Lfail_tcp_dda
+
+    /* Inject duplicate: same SEQ=2, ACK=ISN+1 (SEQ < RCV_NXT) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #5
+    mov     w2, #0x41
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Should get ACK reply (54) with current RCV_NXT */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_dda
+
+    /* Verify ACK field = rev(RCV_NXT) = rev(7) */
+    ldr     x19, =tcp_test_buf3
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w0, w0
+    cmp     w0, #7
+    b.ne    .Lfail_tcp_dda
+
+    /* RCV_NXT should still be 7 (not advanced by duplicate) */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, #7
+    b.ne    .Lfail_tcp_dda
+
+    ldr     x0, =name_tcp_dda
+    bl      test_pass
+    b       .Ldone_tcp_dda
+.Lfail_tcp_dda:
+    ldr     x0, =name_tcp_dda
+    bl      test_fail
+.Ldone_tcp_dda:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rst_clears_rtx — RST clears retransmit state
+ *
+ * Handshake → tcp_send (RTXLEN set) → RST → CLOSED, RTXLEN == 0
+ * ======================================================================== */
+test_tcp_rst_clears_rtx:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rcr
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes to set RTXLEN */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rcr
+
+    /* Verify RTXLEN != 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbz     w0, .Lfail_tcp_rcr
+
+    /* Inject RST: flags=RST+ACK, SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    /* Patch flags to RST+ACK */
+    ldr     x19, =tcp_test_buf3
+    mov     w0, #TCP_RST_ACK
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify CLOSED */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rcr
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_rcr
+
+    ldr     x0, =name_tcp_rcr
+    bl      test_pass
+    b       .Ldone_tcp_rcr
+.Lfail_tcp_rcr:
+    ldr     x0, =name_tcp_rcr
+    bl      test_fail
+.Ldone_tcp_rcr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -6822,6 +7249,13 @@ name_tcp_sgate:     .asciz "tcp_send_gate_rtx"
 name_tcp_srgate:    .asciz "tcp_send_ready_gate_rtx"
 name_tcp_rcbs:      .asciz "tcp_rtx_cb_send"
 name_tcp_rcbm:      .asciz "tcp_rtx_cb_max_retries"
+name_tcp_sars:      .asciz "tcp_synack_rtx_save"
+name_tcp_sarc:      .asciz "tcp_synack_rtx_clear"
+name_tcp_frs:       .asciz "tcp_fin_rtx_save"
+name_tcp_frcf:      .asciz "tcp_fin_rtx_clear_fw1"
+name_tcp_frcl:      .asciz "tcp_fin_rtx_clear_lastack"
+name_tcp_dda:       .asciz "tcp_dup_data_ack"
+name_tcp_rcr:       .asciz "tcp_rst_clears_rtx"
 
 tcp_send_payload:
     .ascii  "World"

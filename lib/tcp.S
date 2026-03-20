@@ -768,6 +768,14 @@ tcp_listen_syn_handler:
     uxth    w4, w4
     bl      tcp_build_reply
 
+    /* Save SYN-ACK to retransmit buffer */
+    mov     x0, x21                 /* conn */
+    mov     x1, x19                 /* frame */
+    mov     w2, #54                 /* frame_len */
+    bl      tcp_rtx_save
+
+    mov     w0, #54                 /* restore return value */
+
 .Llsyn_done:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -783,19 +791,29 @@ tcp_listen_syn_handler:
  * Leaf function.
  */
 tcp_synrcvd_ack_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* conn */
+
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4
-    ldr     w5, [x0, #TCONN_SND_NXT]
+    ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
     b.ne    .Lsra_bad_ack
-    /* SYN-ACK is now ACKed: advance SND_UNA to SND_NXT */
-    str     w5, [x0, #TCONN_SND_UNA]
+    /* SYN-ACK is now ACKed: advance SND_UNA and clear retransmit */
+    str     w5, [x19, #TCONN_SND_UNA]
+    mov     x0, x19
+    bl      tcp_rtx_clear
     mov     w0, #0
-    ret
+    b       .Lsra_done
 .Lsra_bad_ack:
     mov     w4, #TCPS_SYN_RCVD
-    strb    w4, [x0, #TCONN_STATE]
+    strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1
+.Lsra_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /*
@@ -803,7 +821,10 @@ tcp_synrcvd_ack_handler:
  * Leaf function.
  */
 tcp_conn_close_handler:
+    stp     x29, x30, [sp, #-16]!
+    bl      tcp_rtx_clear
     mov     w0, #0
+    ldp     x29, x30, [sp], #16
     ret
 
 /*
@@ -866,7 +887,10 @@ tcp_estab_ack_handler:
     rev     w5, w5                  /* SEG.SEQ in host order */
     ldr     w6, [x19, #TCONN_RCV_NXT]
     cmp     w5, w6
-    b.ne    .Leak_pure_ack          /* out of order → drop */
+    b.eq    .Leak_seq_ok
+    b.lo    .Leak_dup_data          /* SEQ < RCV_NXT → duplicate, re-ACK */
+    b       .Leak_pure_ack          /* SEQ > RCV_NXT → future, drop */
+.Leak_seq_ok:
 
     /* Check rx buffer overflow */
     ldrh    w5, [x19, #TCONN_RXLEN]
@@ -925,6 +949,30 @@ tcp_estab_ack_handler:
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
     /* w4 = window already set */
     bl      tcp_build_reply
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+.Leak_dup_data:
+    /* Duplicate data: build ACK with current RCV_NXT (re-ACK for peer) */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    rev     w1, w0                      /* SEQ NBO */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    rev     w2, w0                      /* ACK NBO */
+
+    /* Dynamic window */
+    ldrh    w5, [x19, #TCONN_RXLEN]
+    mov     w4, #TCP_RXBUF_SIZE
+    sub     w4, w4, w5
+    rev16   w4, w4
+    uxth    w4, w4
+
+    mov     x0, x20                 /* frame */
+    mov     w3, #TCP_ACK_FLAG
+    bl      tcp_build_reply
+    /* Returns 54 */
 
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -1167,6 +1215,12 @@ tcp_close:
 .Ltc_set_state:
     strb    w0, [x19, #TCONN_STATE]
 
+    /* Save FIN frame to retransmit buffer */
+    mov     x0, x19                 /* conn */
+    mov     x1, x20                 /* frame */
+    mov     w2, #54                 /* frame_len */
+    bl      tcp_rtx_save
+
     mov     w0, #54
 
 .Ltc_done:
@@ -1343,17 +1397,28 @@ tcp_send_ready:
  * Leaf function.
  */
 tcp_lastack_ack_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* conn */
+
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4
-    ldr     w5, [x0, #TCONN_SND_NXT]
+    ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
     b.ne    .Llaa_bad
+    /* FIN ACKed: clear retransmit */
+    mov     x0, x19
+    bl      tcp_rtx_clear
     mov     w0, #0
-    ret
+    b       .Llaa_done
 .Llaa_bad:
     mov     w4, #TCPS_LAST_ACK
-    strb    w4, [x0, #TCONN_STATE]
+    strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1
+.Llaa_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /*
@@ -1364,17 +1429,28 @@ tcp_lastack_ack_handler:
  * Leaf function.
  */
 tcp_finwait1_ack_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* conn */
+
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4
-    ldr     w5, [x0, #TCONN_SND_NXT]
+    ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
     b.ne    .Lfw1a_bad
+    /* FIN ACKed: clear retransmit */
+    mov     x0, x19
+    bl      tcp_rtx_clear
     mov     w0, #0
-    ret
+    b       .Lfw1a_done
 .Lfw1a_bad:
     mov     w4, #TCPS_FIN_WAIT_1
-    strb    w4, [x0, #TCONN_STATE]
+    strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1
+.Lfw1a_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /*
