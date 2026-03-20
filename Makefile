@@ -17,7 +17,13 @@ TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_qu
 # Fuzz harness objects (net parser stack — pure computation + timer_hw for system counter)
 FUZZ_ASM_OBJS = $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net_cfg.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
 
-.PHONY: all test fuzz fuzz-corpus clean
+# Functional test kernel objects
+FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
+    $(BUILD)/uart.o $(BUILD)/tcp.o $(BUILD)/ip.o $(BUILD)/eth.o \
+    $(BUILD)/arp.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/net_cfg.o \
+    $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
+
+.PHONY: all test test-functional fuzz fuzz-corpus clean
 
 all: kernel8.img
 
@@ -169,6 +175,28 @@ $(BUILD)/ntp.o: lib/ntp.S include/ntp.inc include/net.inc include/timer.inc | $(
 
 $(BUILD)/test_ntp.o: tests/test_ntp.S include/ntp.inc include/net.inc include/timer.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
+
+# Functional test kernel
+test-functional: $(BUILD)/func_kernel8.img scripts/run_func_tests.sh
+	bash scripts/run_func_tests.sh
+
+$(BUILD)/tcp_vectors.tsv: tests/func/tcp_func.pict | $(BUILD)
+	timeout 120 pict $< /o:max > $@
+
+$(BUILD)/tcp_vectors.bin: $(BUILD)/tcp_vectors.tsv scripts/tcp_oracle.py
+	python3 scripts/tcp_oracle.py < $< > $@
+
+$(BUILD)/test_func_main.o: tests/test_func_main.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_tcp_func.o: tests/test_tcp_func.S $(BUILD)/tcp_vectors.bin include/tcp.inc include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/func_kernel8.elf: $(FUNC_TEST_OBJS) linker.ld
+	$(LD) $(LDFLAGS) $(FUNC_TEST_OBJS) -o $@
+
+$(BUILD)/func_kernel8.img: $(BUILD)/func_kernel8.elf
+	$(OBJCOPY) -O binary $< $@
 
 # Fuzz harness (static aarch64 Linux ELF)
 fuzz: $(BUILD)/fuzz_net
