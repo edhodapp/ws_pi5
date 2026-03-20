@@ -145,6 +145,224 @@ tcp_set_send_ctx:
     ret
 
 /*
+ * tcp_rtx_save — Save frame to retransmit buffer and arm timer
+ *
+ * x0: connection pointer
+ * x1: frame pointer
+ * w2: frame length
+ * Clobbers: x0-x6, x19-x22, x30
+ */
+tcp_rtx_save:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* conn */
+    mov     x20, x1                 /* frame src */
+    mov     w21, w2                 /* frame_len */
+
+    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    ldr     x3, =tcp_conn_table
+    sub     x3, x19, x3
+    lsr     x3, x3, #6
+
+    /* Dest = tcp_rtxbuf_pool + (slot << TCP_RXBUF_SHIFT) */
+    ldr     x4, =tcp_rtxbuf_pool
+    add     x4, x4, x3, lsl #TCP_RXBUF_SHIFT
+
+    /* Byte-copy frame → rtxbuf */
+    mov     x0, x4
+    mov     x1, x20
+    mov     w2, w21
+.Lrtxs_copy:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lrtxs_copy
+
+    /* Set RTXLEN, RTXCOUNT = 0 */
+    strh    w21, [x19, #TCONN_RTXLEN]
+    strb    wzr, [x19, #TCONN_RTXCOUNT]
+
+    /* Arm retransmit timer */
+    mov     x0, x19
+    bl      tcp_rtx_arm
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_rtx_arm — Arm retransmit timer with exponential backoff
+ *
+ * x0: connection pointer
+ * RTO = min(1 << min(RTXCOUNT, TCP_RTO_SHIFT_CAP), 60) seconds × CNTFRQ
+ * Guard: skip if tcp_timer_pool_ptr == 0 (tests without timer pool)
+ * Clobbers: x0-x6, x30
+ */
+tcp_rtx_arm:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* conn */
+
+    /* Guard: skip if no timer pool */
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lrtxa_done
+    mov     x20, x0                 /* x20 = timer pool */
+
+    /* Compute RTO: 1 << min(RTXCOUNT, 5) seconds, capped at 60 */
+    ldrb    w1, [x19, #TCONN_RTXCOUNT]
+    cmp     w1, #TCP_RTO_SHIFT_CAP
+    csel    w1, w1, w2, lo
+    mov     w2, #TCP_RTO_SHIFT_CAP
+    csel    w1, w1, w2, lo          /* w1 = min(count, 5) */
+    mov     w3, #1
+    lsl     w3, w3, w1              /* w3 = 1 << shift */
+    cmp     w3, #60
+    csel    w3, w3, w4, lo
+    mov     w4, #60
+    csel    w3, w3, w4, lo          /* w3 = min(shifted, 60) */
+
+    /* Convert to ticks: rto_ticks = rto_secs × CNTFRQ */
+    mrs     x0, CNTFRQ_EL0
+    mul     x1, x0, x3             /* x1 = rto_ticks */
+    mrs     x0, CNTPCT_EL0
+    add     x1, x0, x1             /* x1 = expiry tick */
+
+    /* timer_set(pool, expiry, callback, conn) */
+    mov     x0, x20
+    /* x1 = expiry */
+    ldr     x2, =tcp_retransmit_cb
+    mov     x3, x19
+    bl      timer_set
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+.Lrtxa_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tcp_rtx_clear — Cancel retransmit timer and clear state
+ *
+ * x0: connection pointer
+ * Clobbers: x0-x3, x19-x20, x30
+ */
+tcp_rtx_clear:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0
+
+    /* Cancel timer if armed */
+    ldr     w1, [x19, #TCONN_TIMER_SLOT]
+    cmn     w1, #1
+    b.eq    .Lrtxc_no_timer
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lrtxc_no_timer
+    /* w1 = slot index, x0 = pool */
+    bl      timer_cancel
+
+.Lrtxc_no_timer:
+    /* Clear retransmit state */
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    strb    wzr, [x19, #TCONN_RTXCOUNT]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tcp_retransmit_cb — Timer callback: retransmit saved frame
+ *
+ * x0: connection pointer (timer context)
+ * Loads send context, copies saved frame to tx_buf, calls send_fn,
+ * increments retry count, re-arms with backoff.
+ * Max retries → set CLOSED.
+ * Clobbers: x0-x6, x19-x24, x30
+ */
+tcp_retransmit_cb:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+
+    /* Guard: if state is CLOSED or LISTEN, stale timer — return */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbz     w0, .Lrtxcb_done        /* CLOSED */
+    cmp     w0, #TCPS_LISTEN
+    b.eq    .Lrtxcb_done
+
+    /* Check retry count */
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cmp     w0, #TCP_MAX_RETRIES
+    b.hs    .Lrtxcb_giveup
+
+    /* Load send context */
+    ldr     x20, =tcp_send_ctx
+    ldr     x1, [x20, #TSCTX_SEND_FN]
+    cbz     x1, .Lrtxcb_done       /* send_fn not set up → return */
+
+    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    ldr     x2, =tcp_conn_table
+    sub     x2, x19, x2
+    lsr     x2, x2, #6
+
+    /* Copy rtxbuf → tx_buf (RTXLEN bytes) */
+    ldr     x3, =tcp_rtxbuf_pool
+    add     x3, x3, x2, lsl #TCP_RXBUF_SHIFT   /* src */
+    ldr     x4, [x20, #TSCTX_TX_BUF]            /* dst */
+    ldrh    w21, [x19, #TCONN_RTXLEN]
+    mov     w5, w21
+.Lrtxcb_copy:
+    cbz     w5, .Lrtxcb_send
+    ldrb    w6, [x3], #1
+    strb    w6, [x4], #1
+    sub     w5, w5, #1
+    b       .Lrtxcb_copy
+
+.Lrtxcb_send:
+    /* Call send_fn(dwc2_base, ecm_state, tx_buf, frame_len) */
+    ldr     x0, [x20, #TSCTX_DWC2_BASE]
+    ldr     x1, [x20, #TSCTX_ECM_STATE]
+    ldr     x2, [x20, #TSCTX_TX_BUF]
+    mov     w3, w21
+    ldr     x4, [x20, #TSCTX_SEND_FN]
+    blr     x4
+
+    /* Increment RTXCOUNT */
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    add     w0, w0, #1
+    strb    w0, [x19, #TCONN_RTXCOUNT]
+
+    /* Re-arm timer with backoff */
+    mov     x0, x19
+    bl      tcp_rtx_arm
+
+    b       .Lrtxcb_done
+
+.Lrtxcb_giveup:
+    /* Max retries exceeded → close connection */
+    strb    wzr, [x19, #TCONN_STATE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+.Lrtxcb_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
  * tcp_build_reply — Build a TCP reply by swapping addresses and setting fields
  *
  * x0: frame buffer pointer
@@ -500,6 +718,10 @@ tcp_listen_syn_handler:
     mov     w0, #TCPS_SYN_RCVD
     strb    w0, [x21, #TCONN_STATE]
     strh    wzr, [x21, #TCONN_RXLEN]
+    strh    wzr, [x21, #TCONN_RTXLEN]
+    strb    wzr, [x21, #TCONN_RTXCOUNT]
+    mov     w0, #-1
+    str     w0, [x21, #TCONN_TIMER_SLOT]
 
     ldrh    w0, [x20, #TCONN_LPORT]
     strh    w0, [x21, #TCONN_LPORT]
@@ -604,48 +826,55 @@ tcp_drop_handler:
  * Otherwise: copy data to rx buffer, RCV_NXT += data_len, build ACK reply
  */
 tcp_estab_ack_handler:
-    /* Update SND_WND from incoming ACK */
-    ldrh    w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
-    rev16   w4, w4
-    uxth    w4, w4
-    strh    w4, [x0, #TCONN_SND_WND]
-
-    /* Advance SND_UNA: if SND_UNA < seg_ack <= SND_NXT, set SND_UNA = seg_ack */
-    ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
-    rev     w4, w4                  /* w4 = seg_ack (host order) */
-    ldr     w5, [x0, #TCONN_SND_UNA]
-    ldr     w6, [x0, #TCONN_SND_NXT]
-    cmp     w4, w5
-    b.ls    .Leak_una_done          /* seg_ack <= SND_UNA → no advance */
-    cmp     w4, w6
-    b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
-    str     w4, [x0, #TCONN_SND_UNA]
-.Leak_una_done:
-
-    sub     w4, w2, w3              /* w4 = data_len */
-    cbz     w4, .Leak_pure_ack
-
-    /* Verify SEQ == RCV_NXT */
-    ldr     w5, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
-    rev     w5, w5                  /* SEG.SEQ in host order */
-    ldr     w6, [x0, #TCONN_RCV_NXT]
-    cmp     w5, w6
-    b.ne    .Leak_pure_ack          /* out of order → drop */
-
-    /* Check rx buffer overflow */
-    ldrh    w5, [x0, #TCONN_RXLEN]
-    add     w7, w5, w4              /* new_rxlen = rxlen + data_len */
-    cmp     w7, #TCP_RXBUF_SIZE
-    b.hi    .Leak_pure_ack          /* would overflow → drop */
-
-    /* Accept data: copy to rx buffer */
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
 
     mov     x19, x0                 /* x19 = conn */
     mov     x20, x1                 /* x20 = frame */
-    mov     w21, w4                 /* w21 = data_len */
+    mov     w21, w2                 /* w21 = tcp_section_len */
+    mov     w22, w3                 /* w22 = tcp_header_len */
+
+    /* Update SND_WND from incoming ACK */
+    ldrh    w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    rev16   w4, w4
+    uxth    w4, w4
+    strh    w4, [x19, #TCONN_SND_WND]
+
+    /* Advance SND_UNA: if SND_UNA < seg_ack <= SND_NXT, set SND_UNA = seg_ack */
+    ldr     w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4                  /* w4 = seg_ack (host order) */
+    ldr     w5, [x19, #TCONN_SND_UNA]
+    ldr     w6, [x19, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ls    .Leak_una_done          /* seg_ack <= SND_UNA → no advance */
+    cmp     w4, w6
+    b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
+    str     w4, [x19, #TCONN_SND_UNA]
+    /* If SND_UNA == SND_NXT, all data ACKed → clear retransmit */
+    cmp     w4, w6
+    b.ne    .Leak_una_done
+    mov     x0, x19
+    bl      tcp_rtx_clear
+.Leak_una_done:
+
+    sub     w4, w21, w22            /* w4 = data_len */
+    cbz     w4, .Leak_pure_ack
+
+    /* Verify SEQ == RCV_NXT */
+    ldr     w5, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w5, w5                  /* SEG.SEQ in host order */
+    ldr     w6, [x19, #TCONN_RCV_NXT]
+    cmp     w5, w6
+    b.ne    .Leak_pure_ack          /* out of order → drop */
+
+    /* Check rx buffer overflow */
+    ldrh    w5, [x19, #TCONN_RXLEN]
+    add     w7, w5, w4              /* new_rxlen = rxlen + data_len */
+    cmp     w7, #TCP_RXBUF_SIZE
+    b.hi    .Leak_pure_ack          /* would overflow → drop */
+
+    /* Accept data: copy to rx buffer */
 
     /* Compute slot index: (conn - tcp_conn_table) >> 6 */
     ldr     x2, =tcp_conn_table
@@ -659,12 +888,10 @@ tcp_estab_ack_handler:
 
     /* Src = frame + ETH_PAYLOAD + IP_HDR_MIN + header_len */
     add     x1, x20, #(ETH_PAYLOAD + IP_HDR_MIN)
-    /* Need tcp_header_len — w3 was clobbered? No, w3 is still header_len */
-    /* Actually w3 was the 4th arg, untouched so far */
-    add     x1, x1, x3             /* skip TCP header (w3=header_len still in x3) */
+    add     x1, x1, x22            /* skip TCP header */
 
     /* Byte-copy data_len bytes */
-    mov     w2, w21
+    mov     w2, w4
 .Leak_rxcopy:
     ldrb    w3, [x1], #1
     strb    w3, [x0], #1
@@ -673,13 +900,13 @@ tcp_estab_ack_handler:
 
     /* Update RXLEN */
     ldrh    w0, [x19, #TCONN_RXLEN]
-    add     w0, w0, w21
+    add     w0, w0, w4
     strh    w0, [x19, #TCONN_RXLEN]
-    mov     w22, w0                 /* w22 = new RXLEN for window calc */
+    mov     w5, w0                  /* w5 = new RXLEN for window calc */
 
     /* RCV_NXT += data_len */
     ldr     w6, [x19, #TCONN_RCV_NXT]
-    add     w6, w6, w21
+    add     w6, w6, w4
     str     w6, [x19, #TCONN_RCV_NXT]
 
     /* Build ACK reply: SEQ=SND_NXT(NBO), ACK=new_RCV_NXT(NBO) */
@@ -689,7 +916,7 @@ tcp_estab_ack_handler:
 
     /* Dynamic window from new RXLEN */
     mov     w4, #TCP_RXBUF_SIZE
-    sub     w4, w4, w22             /* available = size - used */
+    sub     w4, w4, w5             /* available = size - used */
     rev16   w4, w4
     uxth    w4, w4                  /* NBO halfword */
 
@@ -706,6 +933,9 @@ tcp_estab_ack_handler:
 
 .Leak_pure_ack:
     mov     w0, #0
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
     ret
 
 /*
@@ -956,11 +1186,13 @@ tcp_close:
  * Clobbers: x0-x6, x19-x25, x30
  */
 tcp_send:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
 
     mov     x19, x0                 /* x19 = conn */
+    mov     x23, x1                 /* x23 = frame buf */
     mov     x20, x2                 /* x20 = payload ptr (save before clobber) */
     mov     w21, w3                 /* w21 = payload_len */
 
@@ -981,7 +1213,7 @@ tcp_send:
 
     /* Build PSH+ACK frame via tcp_build_frame */
     mov     x0, x19                 /* conn */
-    /* x1 = frame (untouched since entry) */
+    mov     x1, x23                 /* frame */
     mov     w2, #TCP_PSH_ACK        /* flags */
     mov     x3, x20                 /* payload */
     mov     w4, w21                 /* payload_len */
@@ -999,18 +1231,26 @@ tcp_send:
     sub     w0, w0, w21
     strh    w0, [x19, #TCONN_SND_WND]
 
+    /* Save frame to retransmit buffer */
+    mov     x0, x19                 /* conn */
+    mov     x1, x23                 /* frame */
+    mov     w2, w22                 /* frame_len */
+    bl      tcp_rtx_save
+
     mov     w0, w22                 /* return frame length */
 
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 .Lts_err:
     mov     w0, #0
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 /*

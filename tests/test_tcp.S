@@ -141,6 +141,8 @@ test_tcp:
     bl      test_tcp_snd_una_handshake
     bl      test_tcp_snd_una_data_ack
     bl      test_tcp_snd_una_pure_ack
+    bl      test_tcp_rtx_save_on_send
+    bl      test_tcp_rtx_clear_on_ack
     ldp     x29, x30, [sp], #16
     ret
 
@@ -5909,6 +5911,129 @@ test_tcp_snd_una_pure_ack:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_rtx_save_on_send — tcp_send saves frame to retransmit buffer
+ *
+ * Handshake → tcp_send 5 bytes → verify RTXLEN == frame_len (59),
+ * first byte of rtxbuf matches first byte of sent frame
+ * ======================================================================== */
+test_tcp_rtx_save_on_send:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rtxs
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Verify RTXLEN starts at 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_rtxs
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rtxs
+
+    /* Verify RTXLEN == 59 (54 + 5) */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_rtxs
+
+    /* Verify RTXCOUNT == 0 */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_rtxs
+
+    /* Verify first byte of rtxbuf matches send_test_buf */
+    ldr     x0, =tcp_conn_table
+    sub     x0, x21, x0
+    lsr     x0, x0, #6             /* slot index */
+    ldr     x1, =tcp_rtxbuf_pool
+    add     x1, x1, x0, lsl #TCP_RXBUF_SHIFT
+    ldrb    w2, [x1]
+    ldr     x3, =tcp_send_test_buf
+    ldrb    w4, [x3]
+    cmp     w2, w4
+    b.ne    .Lfail_tcp_rtxs
+
+    ldr     x0, =name_tcp_rtxs
+    bl      test_pass
+    b       .Ldone_tcp_rtxs
+.Lfail_tcp_rtxs:
+    ldr     x0, =name_tcp_rtxs
+    bl      test_fail
+.Ldone_tcp_rtxs:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_rtx_clear_on_ack — ACK that advances SND_UNA == SND_NXT clears
+ * retransmit state
+ *
+ * Handshake → tcp_send 5 bytes → ACK all → verify RTXLEN == 0
+ * ======================================================================== */
+test_tcp_rtx_clear_on_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rtxc
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_rtxc
+
+    /* Verify RTXLEN != 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbz     w0, .Lfail_tcp_rtxc
+
+    /* Peer ACKs all: ACK = ISN+6 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #2                  /* SEQ = peer's seq */
+    add     w4, w22, #6             /* ACK = ISN+6 = SND_NXT */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify RTXLEN == 0 */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_rtxc
+
+    /* Verify RTXCOUNT == 0 */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_rtxc
+
+    ldr     x0, =name_tcp_rtxc
+    bl      test_pass
+    b       .Ldone_tcp_rtxc
+.Lfail_tcp_rtxc:
+    ldr     x0, =name_tcp_rtxc
+    bl      test_fail
+.Ldone_tcp_rtxc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -6435,6 +6560,8 @@ name_tcp_swda:      .asciz "tcp_snd_wnd_data_ack"
 name_tcp_suah:      .asciz "tcp_snd_una_handshake"
 name_tcp_suada:     .asciz "tcp_snd_una_data_ack"
 name_tcp_suapa:     .asciz "tcp_snd_una_pure_ack"
+name_tcp_rtxs:      .asciz "tcp_rtx_save_on_send"
+name_tcp_rtxc:      .asciz "tcp_rtx_clear_on_ack"
 
 tcp_send_payload:
     .ascii  "World"
