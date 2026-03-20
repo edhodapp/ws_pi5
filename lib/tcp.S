@@ -26,6 +26,8 @@
 .global tcp_set_timer_pool
 .global tcp_timewait_cb
 .global tcp_rxbuf_pool
+.global tcp_window_update
+.global tcp_send_ready
 
 .section .text
 
@@ -496,6 +498,12 @@ tcp_listen_syn_handler:
     ldrh    w0, [x19, #(ETH_SRC + 4)]
     strh    w0, [x21, #(TCONN_RMAC + 4)]
 
+    /* Capture peer's window → SND_WND */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x21, #TCONN_SND_WND]
+
     str     w22, [x21, #TCONN_SND_UNA]
 
     add     w0, w22, #1
@@ -576,6 +584,12 @@ tcp_drop_handler:
  * Otherwise: copy data to rx buffer, RCV_NXT += data_len, build ACK reply
  */
 tcp_estab_ack_handler:
+    /* Update SND_WND from incoming ACK */
+    ldrh    w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    rev16   w4, w4
+    uxth    w4, w4
+    strh    w4, [x0, #TCONN_SND_WND]
+
     sub     w4, w2, w3              /* w4 = data_len */
     cbz     w4, .Leak_pure_ack
 
@@ -928,6 +942,11 @@ tcp_send:
     cmp     w21, #1460
     b.hi    .Lts_err
 
+    /* Check payload_len <= SND_WND */
+    ldrh    w0, [x19, #TCONN_SND_WND]
+    cmp     w21, w0
+    b.hi    .Lts_err
+
     /* Build PSH+ACK frame via tcp_build_frame */
     mov     x0, x19                 /* conn */
     /* x1 = frame (untouched since entry) */
@@ -942,6 +961,11 @@ tcp_send:
     ldr     w0, [x19, #TCONN_SND_NXT]
     add     w0, w0, w21
     str     w0, [x19, #TCONN_SND_NXT]
+
+    /* SND_WND -= payload_len */
+    ldrh    w0, [x19, #TCONN_SND_WND]
+    sub     w0, w0, w21
+    strh    w0, [x19, #TCONN_SND_WND]
 
     mov     w0, w22                 /* return frame length */
 
@@ -988,6 +1012,48 @@ tcp_rx_peek:
  */
 tcp_rx_flush:
     strh    wzr, [x0, #TCONN_RXLEN]
+    ret
+
+/*
+ * tcp_window_update — Send a bare ACK to advertise current window
+ *
+ * x0: connection pointer
+ * x1: frame buffer (>= 54 bytes)
+ * Returns: w0 = 54 (frame length), or 0 if state invalid
+ * Valid in ESTABLISHED or CLOSE_WAIT.
+ */
+tcp_window_update:
+    ldrb    w2, [x0, #TCONN_STATE]
+    cmp     w2, #TCPS_ESTABLISHED
+    b.eq    .Ltwu_valid
+    cmp     w2, #TCPS_CLOSE_WAIT
+    b.eq    .Ltwu_valid
+    mov     w0, #0
+    ret
+.Ltwu_valid:
+    mov     w2, #TCP_ACK_FLAG
+    mov     x3, #0
+    mov     w4, #0
+    b       tcp_build_frame         /* tail call, returns 54 */
+
+/*
+ * tcp_send_ready — Query available send window
+ *
+ * x0: connection pointer
+ * Returns: w0 = min(SND_WND, 1460), or 0 if state != ESTABLISHED
+ * Leaf function, clobbers w0-w2
+ */
+tcp_send_ready:
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.ne    .Ltsr_zero
+    ldrh    w0, [x0, #TCONN_SND_WND]
+    mov     w1, #1460
+    cmp     w0, w1
+    csel    w0, w0, w1, lo          /* min(SND_WND, 1460) */
+    ret
+.Ltsr_zero:
+    mov     w0, #0
     ret
 
 /*

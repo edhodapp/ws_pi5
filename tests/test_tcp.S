@@ -123,6 +123,15 @@ test_tcp:
     bl      test_tcp_buffer_survives_flush
     bl      test_tcp_send_frame_fields
     bl      test_tcp_send_rx_independent
+    bl      test_tcp_window_update
+    bl      test_tcp_window_update_invalid
+    bl      test_tcp_window_update_closewait
+    bl      test_tcp_snd_wnd_capture
+    bl      test_tcp_snd_wnd_update
+    bl      test_tcp_send_exceeds_window
+    bl      test_tcp_send_decrements_window
+    bl      test_tcp_send_ready
+    bl      test_tcp_send_ready_invalid
     ldp     x29, x30, [sp], #16
     ret
 
@@ -4877,6 +4886,452 @@ test_tcp_send_rx_independent:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_window_update — Flush rx → window update sends ACK with window=2048
+ * ======================================================================== */
+test_tcp_window_update:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twu
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Receive 100 bytes, SEQ=2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #100
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #154                /* 54 + 100 */
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_twu
+
+    /* Flush rx buffer */
+    mov     x0, x21
+    bl      tcp_rx_flush
+
+    /* Call tcp_window_update */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_window_update
+
+    /* Verify ret=54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_twu
+
+    /* Verify window = 2048 NBO */
+    ldr     x19, =tcp_send_test_buf
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #2048
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_twu
+
+    /* Verify flags = ACK */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_ACK_FLAG
+    b.ne    .Lfail_tcp_twu
+
+    /* Verify SEQ = rev(SND_NXT) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    ldr     w1, [x21, #TCONN_SND_NXT]
+    rev     w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_twu
+
+    /* Verify ACK = rev(RCV_NXT) */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_twu
+
+    /* Verify TCP checksum */
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    cbnz    w0, .Lfail_tcp_twu
+
+    ldr     x0, =name_tcp_twu
+    bl      test_pass
+    b       .Ldone_tcp_twu
+.Lfail_tcp_twu:
+    ldr     x0, =name_tcp_twu
+    bl      test_fail
+.Ldone_tcp_twu:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_window_update_invalid — FIN_WAIT_1 → returns 0
+ * ======================================================================== */
+test_tcp_window_update_invalid:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twui
+    mov     x21, x0
+
+    /* Force state = FIN_WAIT_1 */
+    mov     w0, #TCPS_FIN_WAIT_1
+    strb    w0, [x21, #TCONN_STATE]
+
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_window_update
+    cbnz    w0, .Lfail_tcp_twui
+
+    ldr     x0, =name_tcp_twui
+    bl      test_pass
+    b       .Ldone_tcp_twui
+.Lfail_tcp_twui:
+    ldr     x0, =name_tcp_twui
+    bl      test_fail
+.Ldone_tcp_twui:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_window_update_closewait — CLOSE_WAIT → returns 54, window=2048
+ * ======================================================================== */
+test_tcp_window_update_closewait:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twuc
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* Send FIN+ACK to get CLOSE_WAIT */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54                 /* ACK reply */
+    b.ne    .Lfail_tcp_twuc
+
+    /* Verify state = CLOSE_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_twuc
+
+    /* Flush rx buffer */
+    mov     x0, x21
+    bl      tcp_rx_flush
+
+    /* Call tcp_window_update */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    bl      tcp_window_update
+
+    /* Verify ret=54 */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_twuc
+
+    /* Verify window = 2048 NBO */
+    ldr     x19, =tcp_send_test_buf
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    mov     w1, #2048
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_twuc
+
+    ldr     x0, =name_tcp_twuc
+    bl      test_pass
+    b       .Ldone_tcp_twuc
+.Lfail_tcp_twuc:
+    ldr     x0, =name_tcp_twuc
+    bl      test_fail
+.Ldone_tcp_twuc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_snd_wnd_capture — SYN template window=65535 → SND_WND=65535
+ * ======================================================================== */
+test_tcp_snd_wnd_capture:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_swc
+    mov     x21, x0
+
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #0xFFFF
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swc
+
+    ldr     x0, =name_tcp_swc
+    bl      test_pass
+    b       .Ldone_tcp_swc
+.Lfail_tcp_swc:
+    ldr     x0, =name_tcp_swc
+    bl      test_fail
+.Ldone_tcp_swc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_snd_wnd_update — ACK with window=8192 → SND_WND updated
+ * ======================================================================== */
+test_tcp_snd_wnd_update:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_swu
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Build 5-byte data frame, SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #5
+    mov     w2, #0x41               /* 'A' */
+    mov     w3, #2
+    add     w4, w22, #1
+    bl      ttcp_build_data_frame
+
+    /* Patch window to 8192 NBO */
+    ldr     x19, =tcp_test_buf3
+    mov     w0, #8192
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25                 /* TCP header 20 + 5 bytes data */
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Send the frame */
+    mov     x0, x19
+    mov     w1, #59                 /* 54 + 5 */
+    bl      tcp_handle
+
+    /* Verify SND_WND = 8192 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #8192
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_swu
+
+    ldr     x0, =name_tcp_swu
+    bl      test_pass
+    b       .Ldone_tcp_swu
+.Lfail_tcp_swu:
+    ldr     x0, =name_tcp_swu
+    bl      test_fail
+.Ldone_tcp_swu:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_exceeds_window — payload > SND_WND → rejected
+ * ======================================================================== */
+test_tcp_send_exceeds_window:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sew
+    mov     x21, x0
+
+    /* Set SND_WND=100 */
+    mov     w0, #100
+    strh    w0, [x21, #TCONN_SND_WND]
+
+    /* Save SND_NXT */
+    ldr     w19, [x21, #TCONN_SND_NXT]
+
+    /* tcp_send 200 bytes (exceeds window of 100) */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #200
+    bl      tcp_send
+
+    /* Should return 0 */
+    cbnz    w0, .Lfail_tcp_sew
+
+    /* SND_NXT unchanged */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    cmp     w0, w19
+    b.ne    .Lfail_tcp_sew
+
+    /* SND_WND unchanged */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cmp     w0, #100
+    b.ne    .Lfail_tcp_sew
+
+    ldr     x0, =name_tcp_sew
+    bl      test_pass
+    b       .Ldone_tcp_sew
+.Lfail_tcp_sew:
+    ldr     x0, =name_tcp_sew
+    bl      test_fail
+.Ldone_tcp_sew:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_decrements_window — SND_WND=1000 → send 5 → SND_WND=995
+ * ======================================================================== */
+test_tcp_send_decrements_window:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sdw
+    mov     x21, x0
+
+    /* Set SND_WND=1000 */
+    mov     w0, #1000
+    strh    w0, [x21, #TCONN_SND_WND]
+
+    /* tcp_send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+
+    /* Should return 59 */
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_sdw
+
+    /* SND_WND = 995 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    mov     w1, #995
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sdw
+
+    ldr     x0, =name_tcp_sdw
+    bl      test_pass
+    b       .Ldone_tcp_sdw
+.Lfail_tcp_sdw:
+    ldr     x0, =name_tcp_sdw
+    bl      test_fail
+.Ldone_tcp_sdw:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_ready — min(SND_WND, 1460) when ESTABLISHED
+ * ======================================================================== */
+test_tcp_send_ready:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tsr
+    mov     x21, x0
+
+    /* Set SND_WND=500 → tcp_send_ready returns 500 */
+    mov     w0, #500
+    strh    w0, [x21, #TCONN_SND_WND]
+    mov     x0, x21
+    bl      tcp_send_ready
+    cmp     w0, #500
+    b.ne    .Lfail_tcp_tsr
+
+    /* Set SND_WND=2000 → tcp_send_ready returns 1460 (clamped) */
+    mov     w0, #2000
+    strh    w0, [x21, #TCONN_SND_WND]
+    mov     x0, x21
+    bl      tcp_send_ready
+    cmp     w0, #1460
+    b.ne    .Lfail_tcp_tsr
+
+    ldr     x0, =name_tcp_tsr
+    bl      test_pass
+    b       .Ldone_tcp_tsr
+.Lfail_tcp_tsr:
+    ldr     x0, =name_tcp_tsr
+    bl      test_fail
+.Ldone_tcp_tsr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_send_ready_invalid — CLOSE_WAIT → returns 0
+ * ======================================================================== */
+test_tcp_send_ready_invalid:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tsri
+    mov     x21, x0
+
+    /* Force state = CLOSE_WAIT */
+    mov     w0, #TCPS_CLOSE_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+
+    mov     x0, x21
+    bl      tcp_send_ready
+    cbnz    w0, .Lfail_tcp_tsri
+
+    ldr     x0, =name_tcp_tsri
+    bl      test_pass
+    b       .Ldone_tcp_tsri
+.Lfail_tcp_tsri:
+    ldr     x0, =name_tcp_tsri
+    bl      test_fail
+.Ldone_tcp_tsri:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -5385,6 +5840,15 @@ name_tcp_bc:        .asciz "tcp_buffer_contents"
 name_tcp_bsf:       .asciz "tcp_buffer_survives_flush"
 name_tcp_sff:       .asciz "tcp_send_frame_fields"
 name_tcp_sri:       .asciz "tcp_send_rx_independent"
+name_tcp_twu:       .asciz "tcp_window_update"
+name_tcp_twui:      .asciz "tcp_window_update_invalid"
+name_tcp_twuc:      .asciz "tcp_window_update_closewait"
+name_tcp_swc:       .asciz "tcp_snd_wnd_capture"
+name_tcp_swu:       .asciz "tcp_snd_wnd_update"
+name_tcp_sew:       .asciz "tcp_send_exceeds_window"
+name_tcp_sdw:       .asciz "tcp_send_decrements_window"
+name_tcp_tsr:       .asciz "tcp_send_ready"
+name_tcp_tsri:      .asciz "tcp_send_ready_invalid"
 
 tcp_send_payload:
     .ascii  "World"
