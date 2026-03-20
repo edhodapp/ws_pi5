@@ -159,6 +159,41 @@ def main():
     seeds['tcp_handshake_multi.bin'] = pack_sequence([
         syn, handshake_ack, seg1, seg2, seg3])
 
+    # 6. tcp_dup_data.bin — Handshake + data + duplicate data (same SEQ)
+    #    Exercises duplicate-data re-ACK path (SEQ < RCV_NXT after first accept)
+    dup_frame = build_frame(PEER_PORT, LISTEN_PORT,
+                            seq=peer_seq + 1, ack_num=SERVER_ISN + 1,
+                            flags=PSH | ACK, window=65535,
+                            payload=b'Hello')
+    seeds['tcp_dup_data.bin'] = pack_sequence([
+        syn, handshake_ack, data_frame, dup_frame])
+
+    # 7. tcp_dup_syn.bin — SYN + duplicate SYN (second should get RST)
+    #    First SYN allocates conn, second finds exact match in SYN_RCVD
+    seeds['tcp_dup_syn.bin'] = pack_sequence([syn, syn])
+
+    # 8. tcp_full_close.bin — Handshake + peer FIN → CLOSE_WAIT + ACK of FIN
+    #    Exercises passive close: ESTABLISHED → CLOSE_WAIT via estab_fin_handler
+    seeds['tcp_full_close.bin'] = pack_sequence([
+        syn, handshake_ack, fin_frame])
+
+    # 9. tcp_data_then_rst.bin — Handshake + data + RST
+    #    Exercises conn_close_handler with tcp_rtx_clear (RST clears retransmit)
+    rst_estab = build_frame(PEER_PORT, LISTEN_PORT,
+                            seq=peer_seq + 1 + 5, ack_num=SERVER_ISN + 1,
+                            flags=RST, window=0)
+    seeds['tcp_data_then_rst.bin'] = pack_sequence([
+        syn, handshake_ack, data_frame, rst_estab])
+
+    # 10. tcp_bad_seq_data.bin — Handshake + data with future SEQ (> RCV_NXT)
+    #     Exercises out-of-order drop path in estab_ack_handler
+    bad_seq_frame = build_frame(PEER_PORT, LISTEN_PORT,
+                                seq=peer_seq + 1 + 999, ack_num=SERVER_ISN + 1,
+                                flags=PSH | ACK, window=65535,
+                                payload=b'Future')
+    seeds['tcp_bad_seq_data.bin'] = pack_sequence([
+        syn, handshake_ack, bad_seq_frame])
+
     for name, data in seeds.items():
         path = os.path.join(outdir, name)
         with open(path, 'wb') as f:
