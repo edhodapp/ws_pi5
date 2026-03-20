@@ -20,6 +20,7 @@
 .global tcp_init
 .global tcp_conn_table
 .global tcp_close
+.global tcp_listen
 .global tcp_send
 .global tcp_rx_peek
 .global tcp_rx_flush
@@ -98,7 +99,7 @@ tcp_checksum:
     ret
 
 /*
- * tcp_init — Initialize connection table, set slot 0 to LISTEN on port 80
+ * tcp_init — Zero connection table and initialize ISN secret
  *
  * No parameters, no return value.
  * Clobbers: x0-x2
@@ -112,12 +113,47 @@ tcp_init:
     subs    w1, w1, #1
     b.ne    .Ltcp_init_zero
 
-    /* Set slot 0: state = LISTEN, lport = 80 (NBO) */
+    /* Initialize ISN secret from hardware counter */
+    mrs     x0, CNTPCT_EL0
+    ldr     x1, =tcp_isn_secret
+    str     x0, [x1]
+    ret
+
+/*
+ * tcp_listen — Start listening on a port
+ *
+ * w0: port number (host byte order)
+ * Returns: w0 = slot index (0..15), or -1 if no free slots
+ * Clobbers: x0-x3
+ */
+tcp_listen:
+    rev16   w2, w0                  /* port → NBO */
+    uxth    w2, w2
+
+    /* Scan table for free slot (state == CLOSED) */
+    ldr     x1, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Ltl_scan:
+    cbz     w3, .Ltl_full
+    sub     w3, w3, #1
+    ldrb    w0, [x1, #TCONN_STATE]
+    cbz     w0, .Ltl_found
+    add     x1, x1, #TCONN_SIZE
+    b       .Ltl_scan
+
+.Ltl_found:
+    mov     w0, #TCPS_LISTEN
+    strb    w0, [x1, #TCONN_STATE]
+    strh    w2, [x1, #TCONN_LPORT]
+
+    /* Return slot index: (addr - table_base) >> 6 */
     ldr     x0, =tcp_conn_table
-    mov     w1, #TCPS_LISTEN
-    strb    w1, [x0, #TCONN_STATE]
-    mov     w1, #0x5000             /* port 80 NBO as LE halfword */
-    strh    w1, [x0, #TCONN_LPORT]
+    sub     x0, x1, x0
+    lsr     w0, w0, #6
+    ret
+
+.Ltl_full:
+    mov     w0, #-1
     ret
 
 /*
@@ -1735,3 +1771,7 @@ tcp_rtxbuf_pool:
 .balign 8
 tcp_send_ctx:
     .space  TSCTX_SIZE
+
+.balign 8
+tcp_isn_secret:
+    .space  TCP_ISN_SECRET_SIZE

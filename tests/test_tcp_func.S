@@ -146,6 +146,8 @@ test_tcp_functional:
 
     /* --- 1. tcp_init() + timer pool setup --- */
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
     ldr     x0, =func_timer_pool
     mov     w1, #TPOOL_DEFAULT_CAP
     bl      timer_pool_init

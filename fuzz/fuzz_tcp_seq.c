@@ -18,6 +18,7 @@
 /* Assembled from lib/ — pure computation, no MMIO */
 extern int net_recv_one(void *buf, int len);
 extern void tcp_init(void);
+extern int tcp_listen(int port);
 
 /* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
    under QEMU user mode, so provide a simple counter instead. */
@@ -47,6 +48,7 @@ int main(void)
        We just reset tcp state which is sufficient for determinism
        across AFL persistent-mode iterations. */
     tcp_init();
+    tcp_listen(80);
 
     int total = read(0, input, sizeof(input));
     if (total <= 0)

@@ -59,6 +59,7 @@
 .equ ICMP_HDR_LEN,     8
 .equ ICMP_ECHO_REQUEST, 8
 .equ ICMP_ECHO_REPLY,  0
+.equ ICMP_DEST_UNREACHABLE, 3
 
 /* UDP offsets (relative to IP payload, i.e., ETH_PAYLOAD + IP_HDR_MIN) */
 .equ UDP_SPORT,        0

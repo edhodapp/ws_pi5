@@ -55,6 +55,8 @@ main:
 
     /* Initialize TCP connection table */
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Give TCP a handle to the timer pool */
     ldr     x0, =timer_pool

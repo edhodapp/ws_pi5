@@ -160,6 +160,9 @@ test_tcp:
     bl      test_tcp_rtx_cb_stale_listen
     bl      test_tcp_rtx_cb_no_send_fn
     bl      test_tcp_snd_una_future_ack
+    bl      test_tcp_listen_port
+    bl      test_tcp_listen_multi
+    bl      test_tcp_listen_full
     ldp     x29, x30, [sp], #16
     ret
 
@@ -804,6 +807,8 @@ test_tcp_init_test:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     ldr     x0, =tcp_conn_table
 
@@ -852,6 +857,8 @@ test_tcp_syn_ack:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Build valid SYN frame */
     ldr     x0, =tcp_syn_template
@@ -971,6 +978,8 @@ test_tcp_handshake:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Step 1: Send SYN */
     ldr     x0, =tcp_syn_template
@@ -1057,6 +1066,8 @@ test_tcp_syn_no_listen:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Build SYN to wrong port */
     ldr     x0, =tcp_syn_wrongport_template
@@ -1098,6 +1109,8 @@ test_tcp_syn_rcvd_rst:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -1157,6 +1170,8 @@ test_tcp_syn_rcvd_bad_ack:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -1211,6 +1226,8 @@ test_tcp_table_full:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Fill slots 1-15 with state=SYN_RCVD (non-CLOSED) */
     ldr     x0, =tcp_conn_table
@@ -1271,6 +1288,8 @@ test_tcp_scan_rport_miss:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Create SYN_RCVD connection from 10.0.2.2:12345→:80 */
     ldr     x0, =tcp_syn_template
@@ -1326,6 +1345,8 @@ test_tcp_scan_rip_miss:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Create SYN_RCVD connection from 10.0.2.2:12345→:80 */
     ldr     x0, =tcp_syn_template
@@ -1381,6 +1402,8 @@ test_tcp_listen_synack_reject:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Send SYN+ACK to port 80 */
     ldr     x0, =tcp_synack_to80_template
@@ -1426,6 +1449,8 @@ test_tcp_unknown_state:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Create SYN_RCVD connection */
     ldr     x0, =tcp_syn_template
@@ -1497,6 +1522,8 @@ test_tcp_syn_rcvd_no_ack:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Create SYN_RCVD connection */
     ldr     x0, =tcp_syn_template
@@ -1552,6 +1579,8 @@ test_tcp_established_rst:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Step 1: SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -1645,6 +1674,8 @@ test_tcp_listen_ack_reject:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Build valid ACK to port 80 */
     ldr     x0, =tcp_ack_template
@@ -1690,6 +1721,8 @@ test_tcp_established_data_drop:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Step 1: SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -1801,6 +1834,8 @@ test_tcp_estab_data:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Step 1: SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -1906,6 +1941,8 @@ test_tcp_estab_data_bad_seq:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake (same as above) */
     ldr     x0, =tcp_syn_template
@@ -2002,6 +2039,8 @@ test_tcp_estab_fin:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake */
     ldr     x0, =tcp_syn_template
@@ -2098,6 +2137,8 @@ test_tcp_close_wait_rst:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake */
     ldr     x0, =tcp_syn_template
@@ -2198,6 +2239,8 @@ test_tcp_estab_data_multi:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake */
     ldr     x0, =tcp_syn_template
@@ -2325,6 +2368,8 @@ test_tcp_fsa_null_handler:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -2415,6 +2460,8 @@ test_tcp_scan_lport_miss:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* SYN → SYN-ACK (creates SYN_RCVD in slot 1) */
     ldr     x0, =tcp_syn_template
@@ -2486,6 +2533,8 @@ test_tcp_close_estab:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -2582,6 +2631,8 @@ test_tcp_close_closewait:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -2703,6 +2754,8 @@ test_tcp_close_invalid:
     stp     x29, x30, [sp, #-16]!
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Attempt close on LISTEN slot */
     ldr     x0, =tcp_conn_table
@@ -2737,6 +2790,8 @@ test_tcp_finwait1_ack:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -2836,6 +2891,8 @@ test_tcp_finwait1_fin:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -2941,6 +2998,8 @@ test_tcp_finwait2_fin:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Init test timer pool */
     ldr     x0, =test_tcp_timer_pool
@@ -3051,6 +3110,8 @@ test_tcp_closing_ack:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Init test timer pool */
     ldr     x0, =test_tcp_timer_pool
@@ -3162,6 +3223,8 @@ test_tcp_lastack_ack:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -3259,6 +3322,8 @@ test_tcp_timewait_rst:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -3341,6 +3406,8 @@ test_tcp_timewait_timeout:
     stp     x19, x20, [sp, #16]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Init test timer pool */
     ldr     x0, =test_tcp_timer_pool
@@ -3440,6 +3507,8 @@ test_tcp_lastack_ack_bad:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -3547,6 +3616,8 @@ test_tcp_finwait1_ack_bad:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -3654,6 +3725,8 @@ test_tcp_closing_ack_bad:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Handshake → ESTABLISHED */
     ldr     x0, =tcp_syn_template
@@ -3766,6 +3839,8 @@ ttcp_do_handshake:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Step 1: SYN → SYN-ACK */
     ldr     x0, =tcp_syn_template
@@ -6313,6 +6388,8 @@ test_tcp_synack_rtx_save:
     stp     x21, x22, [sp, #32]
 
     bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Send SYN */
     ldr     x0, =tcp_syn_template
@@ -7087,6 +7164,127 @@ test_tcp_snd_una_future_ack:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_listen_port — tcp_listen(80) sets slot to LISTEN with correct port
+ * ======================================================================== */
+test_tcp_listen_port:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Return value should be slot 0 */
+    cmp     w0, #0
+    b.ne    .Lfail_tcp_lp
+
+    /* Verify slot 0 state = LISTEN */
+    ldr     x0, =tcp_conn_table
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfail_tcp_lp
+
+    /* Verify slot 0 lport = 0x5000 (port 80 NBO) */
+    ldrh    w1, [x0, #TCONN_LPORT]
+    mov     w2, #0x5000
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_lp
+
+    ldr     x0, =name_tcp_lp
+    bl      test_pass
+    b       .Ldone_tcp_lp
+.Lfail_tcp_lp:
+    ldr     x0, =name_tcp_lp
+    bl      test_fail
+.Ldone_tcp_lp:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_listen_multi — tcp_listen on two ports uses distinct slots
+ * ======================================================================== */
+test_tcp_listen_multi:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+    mov     w19, w0                 /* w19 = slot for port 80 */
+
+    mov     w0, #8080
+    bl      tcp_listen
+    mov     w20, w0                 /* w20 = slot for port 8080 */
+
+    /* Both should succeed (>= 0) */
+    cmn     w19, #1
+    b.eq    .Lfail_tcp_lm
+    cmn     w20, #1
+    b.eq    .Lfail_tcp_lm
+
+    /* Slots must be different */
+    cmp     w19, w20
+    b.eq    .Lfail_tcp_lm
+
+    /* Verify port 8080 slot: state=LISTEN, lport=0x901F (8080 NBO) */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, x20, lsl #6    /* slot * 64 */
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfail_tcp_lm
+    ldrh    w1, [x0, #TCONN_LPORT]
+    mov     w2, #0x901F             /* 8080 = 0x1F90, NBO as LE = 0x901F */
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_lm
+
+    ldr     x0, =name_tcp_lm
+    bl      test_pass
+    b       .Ldone_tcp_lm
+.Lfail_tcp_lm:
+    ldr     x0, =name_tcp_lm
+    bl      test_fail
+.Ldone_tcp_lm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_listen_full — Fill all 16 slots, verify tcp_listen returns -1
+ * ======================================================================== */
+test_tcp_listen_full:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Fill all 16 slots with LISTEN on ports 1..16 */
+    mov     w19, #1
+.Ltlf_fill:
+    mov     w0, w19
+    bl      tcp_listen
+    cmn     w0, #1
+    b.eq    .Lfail_tcp_lf           /* shouldn't fail yet */
+    add     w19, w19, #1
+    cmp     w19, #17
+    b.lt    .Ltlf_fill
+
+    /* Now table is full — next listen should return -1 */
+    mov     w0, #9999
+    bl      tcp_listen
+    cmn     w0, #1
+    b.ne    .Lfail_tcp_lf
+
+    ldr     x0, =name_tcp_lf
+    bl      test_pass
+    b       .Ldone_tcp_lf
+.Lfail_tcp_lf:
+    ldr     x0, =name_tcp_lf
+    bl      test_fail
+.Ldone_tcp_lf:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -7632,6 +7830,9 @@ name_tcp_rcsc:      .asciz "tcp_rtx_cb_stale_closed"
 name_tcp_rcsl:      .asciz "tcp_rtx_cb_stale_listen"
 name_tcp_rcnsf:     .asciz "tcp_rtx_cb_no_send_fn"
 name_tcp_sufa:      .asciz "tcp_snd_una_future_ack"
+name_tcp_lp:        .asciz "tcp_listen_port"
+name_tcp_lm:        .asciz "tcp_listen_multi"
+name_tcp_lf:        .asciz "tcp_listen_full"
 
 tcp_send_payload:
     .ascii  "World"

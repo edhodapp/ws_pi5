@@ -66,7 +66,8 @@
 .equ TCONN_PAD4,       54
 .equ TCONN_RTXLEN,     56      /* u16 — retransmit frame length (0 = no pending) */
 .equ TCONN_RTXCOUNT,   58      /* u8  — retry count (incremented each timeout) */
-.equ TCONN_PAD5,       59      /* u8  — padding */
+.equ TCONN_TS_ENABLED, 59      /* u8  — 0=disabled, 1=enabled (negotiated from SYN) */
+.equ TCONN_TS_RECENT,  60      /* u32 — last received TSval from peer (host order) */
 .equ TCONN_SIZE,       64      /* power of 2 → lsl #6 for indexing */
 
 /* Connection table */
@@ -98,3 +99,12 @@
 .equ TSCTX_TX_BUF,     16      /* u64 */
 .equ TSCTX_SEND_FN,    24      /* u64 */
 .equ TSCTX_SIZE,        32
+
+/* TCP option constants */
+.equ TCP_OPT_EOL,         0
+.equ TCP_OPT_NOP,         1
+.equ TCP_OPT_TIMESTAMPS,  8
+.equ TCP_OPT_TS_LEN,      10      /* Kind=8, Length=10 */
+.equ TCP_TSOPT_SIZE,       12      /* NOP NOP Kind Len TSval(4) TSecr(4) */
+.equ TCP_TS_FRAME_LEN,    66      /* ETH(14) + IP(20) + TCP(32) */
+.equ TCP_ISN_SECRET_SIZE,  8
