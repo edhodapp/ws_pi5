@@ -1201,6 +1201,10 @@ tcp_send:
     cmp     w0, #TCPS_ESTABLISHED
     b.ne    .Lts_err
 
+    /* Gate: retransmit pending → can't send new data */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbnz    w0, .Lts_err
+
     /* Check 1 <= payload_len <= 1460 */
     cbz     w21, .Lts_err
     cmp     w21, #1460
@@ -1319,6 +1323,9 @@ tcp_send_ready:
     ldrb    w1, [x0, #TCONN_STATE]
     cmp     w1, #TCPS_ESTABLISHED
     b.ne    .Ltsr_zero
+    /* Gate: retransmit pending → not ready */
+    ldrh    w1, [x0, #TCONN_RTXLEN]
+    cbnz    w1, .Ltsr_zero
     ldrh    w0, [x0, #TCONN_SND_WND]
     mov     w1, #1460
     cmp     w0, w1

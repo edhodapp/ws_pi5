@@ -143,6 +143,8 @@ test_tcp:
     bl      test_tcp_snd_una_pure_ack
     bl      test_tcp_rtx_save_on_send
     bl      test_tcp_rtx_clear_on_ack
+    bl      test_tcp_send_gate_rtx
+    bl      test_tcp_send_ready_gate_rtx
     ldp     x29, x30, [sp], #16
     ret
 
@@ -5373,6 +5375,8 @@ test_tcp_send_window_exhaustion:
     ldrh    w0, [x21, #TCONN_SND_WND]
     cmp     w0, #10
     b.ne    .Lfail_tcp_swe
+    /* Clear retransmit state to allow next send (simulates ACK) */
+    strh    wzr, [x21, #TCONN_RTXLEN]
 
     /* Step 2: tcp_send 5 bytes → ret=59, SND_WND=5 */
     mov     x0, x21
@@ -5385,6 +5389,8 @@ test_tcp_send_window_exhaustion:
     ldrh    w0, [x21, #TCONN_SND_WND]
     cmp     w0, #5
     b.ne    .Lfail_tcp_swe
+    /* Clear retransmit state to allow next send */
+    strh    wzr, [x21, #TCONN_RTXLEN]
 
     /* Step 3: tcp_send 5 bytes → ret=59, SND_WND=0 */
     mov     x0, x21
@@ -5397,6 +5403,9 @@ test_tcp_send_window_exhaustion:
     ldrh    w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_swe
 
+    /* Clear retransmit gate so step 4 tests window exhaustion specifically */
+    strh    wzr, [x21, #TCONN_RTXLEN]
+
     /* Step 4: tcp_send 5 bytes → rejected (ret=0), SND_WND still 0 */
     mov     x0, x21
     ldr     x1, =tcp_send_test_buf
@@ -5407,7 +5416,7 @@ test_tcp_send_window_exhaustion:
     ldrh    w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_swe
 
-    /* Step 5: tcp_send_ready → returns 0 */
+    /* Step 5: tcp_send_ready → returns 0 (SND_WND=0) */
     mov     x0, x21
     bl      tcp_send_ready
     cbnz    w0, .Lfail_tcp_swe
@@ -6034,6 +6043,93 @@ test_tcp_rtx_clear_on_ack:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_send_gate_rtx — tcp_send returns 0 when RTXLEN != 0
+ *
+ * Handshake → tcp_send 5 bytes (RTXLEN set) → second tcp_send → returns 0
+ * ======================================================================== */
+test_tcp_send_gate_rtx:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sgate
+    mov     x21, x0                 /* conn */
+
+    /* First send succeeds */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sgate
+
+    /* RTXLEN should be non-zero */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbz     w0, .Lfail_tcp_sgate
+
+    /* Second send should return 0 (gated) */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_sgate
+
+    ldr     x0, =name_tcp_sgate
+    bl      test_pass
+    b       .Ldone_tcp_sgate
+.Lfail_tcp_sgate:
+    ldr     x0, =name_tcp_sgate
+    bl      test_fail
+.Ldone_tcp_sgate:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_send_ready_gate_rtx — tcp_send_ready returns 0 when RTXLEN != 0
+ *
+ * Handshake → tcp_send 5 bytes → tcp_send_ready → returns 0
+ * ======================================================================== */
+test_tcp_send_ready_gate_rtx:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_srgate
+    mov     x21, x0                 /* conn */
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_srgate
+
+    /* tcp_send_ready should return 0 */
+    mov     x0, x21
+    bl      tcp_send_ready
+    cbnz    w0, .Lfail_tcp_srgate
+
+    ldr     x0, =name_tcp_srgate
+    bl      test_pass
+    b       .Ldone_tcp_srgate
+.Lfail_tcp_srgate:
+    ldr     x0, =name_tcp_srgate
+    bl      test_fail
+.Ldone_tcp_srgate:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -6562,6 +6658,8 @@ name_tcp_suada:     .asciz "tcp_snd_una_data_ack"
 name_tcp_suapa:     .asciz "tcp_snd_una_pure_ack"
 name_tcp_rtxs:      .asciz "tcp_rtx_save_on_send"
 name_tcp_rtxc:      .asciz "tcp_rtx_clear_on_ack"
+name_tcp_sgate:     .asciz "tcp_send_gate_rtx"
+name_tcp_srgate:    .asciz "tcp_send_ready_gate_rtx"
 
 tcp_send_payload:
     .ascii  "World"
