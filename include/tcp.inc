@@ -62,3 +62,12 @@
 /* Connection table */
 .equ TCP_MAX_CONNS,    16
 .equ TCP_CONN_TABLE_SIZE, 1024 /* 16 * 64 */
+
+/* FSA event codes (priority: RST > SYN > FIN > ACK) */
+.equ TCP_EVT_RST,      0
+.equ TCP_EVT_SYN,      1       /* SYN set, ACK not set */
+.equ TCP_EVT_SYNACK,   2       /* SYN + ACK both set */
+.equ TCP_EVT_FIN,      3       /* FIN set (may have ACK) */
+.equ TCP_EVT_ACK,      4       /* ACK set, no SYN/FIN/RST */
+.equ TCP_N_EVENTS,     5
+.equ TCP_N_STATES,     9       /* CLOSED(0) through TIME_WAIT(8) */

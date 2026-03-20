@@ -143,7 +143,7 @@ $(BUILD)/test_icmp.o: tests/test_icmp.S include/net.inc | $(BUILD)
 $(BUILD)/test_udp.o: tests/test_udp.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/tcp.o: lib/tcp.S include/tcp.inc include/net.inc | $(BUILD)
+$(BUILD)/tcp.o: lib/tcp.S include/tcp.inc include/net.inc include/vmio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_tcp.o: tests/test_tcp.S include/tcp.inc include/net.inc | $(BUILD)
