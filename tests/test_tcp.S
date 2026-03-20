@@ -88,6 +88,8 @@ test_tcp:
     bl      test_tcp_estab_fin
     bl      test_tcp_close_wait_rst
     bl      test_tcp_estab_data_multi
+    bl      test_tcp_fsa_null_handler
+    bl      test_tcp_scan_lport_miss
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2242,6 +2244,179 @@ test_tcp_estab_data_multi:
     ret
 
 /* ========================================================================
+ * test_tcp_fsa_null_handler — FSA dispatch with NULL handler entry → RST
+ *
+ * Handshake → ESTABLISHED, overwrite state to LAST_ACK (state 5, all-zero
+ * FSA row). Send matching ACK → exact match → FSA lookup → handler=0 →
+ * cbz x16 taken → .Ltcp_no_conn → RST.
+ * ======================================================================== */
+test_tcp_fsa_null_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Handshake → ESTABLISHED */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fnh
+
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_fnh
+
+    /* Find ESTABLISHED slot, overwrite state to LAST_ACK */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfnh_find:
+    cbz     w3, .Lfail_tcp_fnh
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lfnh_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lfnh_find
+.Lfnh_found:
+    mov     w1, #TCPS_LAST_ACK
+    strb    w1, [x0, #TCONN_STATE]
+
+    /* Send matching ACK → exact match → LAST_ACK → FSA handler=NULL → RST */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Should get RST (return 54). Incoming had ACK → RST only (SEQ=SEG.ACK) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_fnh
+
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST
+    b.ne    .Lfail_tcp_fnh
+
+    ldr     x0, =name_tcp_fnh
+    bl      test_pass
+    b       .Ldone_tcp_fnh
+.Lfail_tcp_fnh:
+    ldr     x0, =name_tcp_fnh
+    bl      test_fail
+.Ldone_tcp_fnh:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_scan_lport_miss — Exact-match scan lport mismatch → skip entry
+ *
+ * Handshake → SYN_RCVD, change SYN_RCVD slot's lport to 8080.
+ * Send SYN to port 80 → scan hits SYN_RCVD (not LISTEN, not CLOSED) →
+ * lport=8080 ≠ dport=80 → scan_next. LISTEN fallback → SYN-ACK (new conn).
+ * ======================================================================== */
+test_tcp_scan_lport_miss:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* SYN → SYN-ACK (creates SYN_RCVD in slot 1) */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_slm
+
+    /* Find SYN_RCVD slot and change lport to 8080 (NBO = 0x901F) */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lslm_find:
+    cbz     w3, .Lfail_tcp_slm
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.eq    .Lslm_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lslm_find
+.Lslm_found:
+    mov     x19, x0                 /* save SYN_RCVD slot ptr */
+    mov     w1, #0x901F             /* 8080 NBO as LE halfword */
+    strh    w1, [x0, #TCONN_LPORT]
+
+    /* Send another SYN to port 80 — should skip the SYN_RCVD entry
+     * (lport mismatch), use LISTEN fallback, allocate a new SYN_RCVD */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Should get SYN-ACK (return 54) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_slm
+
+    /* Verify the original SYN_RCVD slot is untouched (still SYN_RCVD, lport=8080) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.ne    .Lfail_tcp_slm
+    ldrh    w0, [x19, #TCONN_LPORT]
+    mov     w1, #0x901F
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_slm
+
+    ldr     x0, =name_tcp_slm
+    bl      test_pass
+    b       .Ldone_tcp_slm
+.Lfail_tcp_slm:
+    ldr     x0, =name_tcp_slm
+    bl      test_fail
+.Ldone_tcp_slm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -2720,6 +2895,8 @@ name_tcp_edb:       .asciz "tcp_estab_data_bad_seq"
 name_tcp_ef:        .asciz "tcp_estab_fin"
 name_tcp_cwr:       .asciz "tcp_close_wait_rst"
 name_tcp_edm:       .asciz "tcp_estab_data_multi"
+name_tcp_fnh:       .asciz "tcp_fsa_null_handler"
+name_tcp_slm:       .asciz "tcp_scan_lport_miss"
 
 .section .data
 .balign 4
