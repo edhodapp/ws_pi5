@@ -40,10 +40,12 @@ Bare-metal ARM assembly project targeting Raspberry Pi 3 (AArch64). No OS — ru
 - Build: `make` (GNU Make 4.3)
 
 ## Project Structure
-- `src/` — Main kernel source (boot.S, future app code)
-- `lib/` — Shared library code (uart.S, reusable by app and tests)
+- `src/` — Main kernel source (boot.S, main.S)
+- `lib/` — Pure computation libraries (networking stack, data structures)
+- `drivers/` — Hardware drivers (UART, USB, timers, mailbox)
 - `include/` — Shared constants and macros (.inc files)
 - `tests/` — Test sources (test_main.S runner + individual test files)
+- `fuzz/` — Fuzz harness for networking stack
 - `scripts/` — Build/test automation scripts
 - `build/` — Build artifacts (gitignored)
 
@@ -56,7 +58,7 @@ Bare-metal ARM assembly project targeting Raspberry Pi 3 (AArch64). No OS — ru
 1. Write test in `tests/` — call `test_pass`/`test_fail` with a test name string
 2. Register test by adding `bl test_xxx` in `tests/test_main.S`
 3. `make test` → verify it fails (red)
-4. Implement in `src/` or `lib/`
+4. Implement in `src/`, `lib/`, or `drivers/`
 5. `make test` → verify it passes (green)
 6. Commit
 

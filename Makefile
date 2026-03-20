@@ -9,13 +9,13 @@ LDFLAGS = -T linker.ld -nostdlib
 BUILD   = build
 
 # Main kernel objects
-KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net.o $(BUILD)/timer.o $(BUILD)/ntp.o
+KERNEL_OBJS = $(BUILD)/boot.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
 
 # Test kernel objects
-TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/test_cdc_ecm.o $(BUILD)/test_usb_bulk.o $(BUILD)/test_cdc_ecm_data.o $(BUILD)/test_boot_main.o $(BUILD)/test_eth.o $(BUILD)/test_arp.o $(BUILD)/test_ip.o $(BUILD)/test_icmp.o $(BUILD)/test_udp.o $(BUILD)/test_tcp.o $(BUILD)/test_net.o $(BUILD)/test_timer.o $(BUILD)/test_ntp.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net.o $(BUILD)/timer.o $(BUILD)/ntp.o
+TEST_OBJS   = $(BUILD)/test_main.o $(BUILD)/test_example.o $(BUILD)/test_vmio_queue.o $(BUILD)/test_vmio_engine.o $(BUILD)/test_mailbox.o $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o $(BUILD)/test_cdc_ecm.o $(BUILD)/test_usb_bulk.o $(BUILD)/test_cdc_ecm_data.o $(BUILD)/test_boot_main.o $(BUILD)/test_eth.o $(BUILD)/test_arp.o $(BUILD)/test_ip.o $(BUILD)/test_icmp.o $(BUILD)/test_udp.o $(BUILD)/test_tcp.o $(BUILD)/test_net.o $(BUILD)/test_timer.o $(BUILD)/test_ntp.o $(BUILD)/main.o $(BUILD)/uart.o $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o $(BUILD)/mailbox.o $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
 
-# Fuzz harness objects (net parser stack — pure computation, no MMIO)
-FUZZ_ASM_OBJS = $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net_cfg.o $(BUILD)/timer.o $(BUILD)/ntp.o
+# Fuzz harness objects (net parser stack — pure computation + timer_hw for system counter)
+FUZZ_ASM_OBJS = $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/net_cfg.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
 
 .PHONY: all test fuzz fuzz-corpus clean
 
@@ -44,7 +44,7 @@ $(BUILD)/boot.o: src/boot.S | $(BUILD)
 $(BUILD)/main.o: src/main.S include/dwc2.inc include/cdc_ecm.inc include/net.inc include/timer.inc include/ntp.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/uart.o: lib/uart.S include/uart.inc | $(BUILD)
+$(BUILD)/uart.o: drivers/uart.S include/uart.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_main.o: tests/test_main.S | $(BUILD)
@@ -65,19 +65,19 @@ $(BUILD)/test_vmio_queue.o: tests/test_vmio_queue.S include/vmio.inc | $(BUILD)
 $(BUILD)/test_vmio_engine.o: tests/test_vmio_engine.S include/vmio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/mailbox.o: lib/mailbox.S include/mailbox.inc | $(BUILD)
+$(BUILD)/mailbox.o: drivers/mailbox.S include/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_mailbox.o: tests/test_mailbox.S include/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/dwc2.o: lib/dwc2.S include/dwc2.inc include/mailbox.inc | $(BUILD)
+$(BUILD)/dwc2.o: drivers/dwc2.S include/dwc2.inc include/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_dwc2.o: tests/test_dwc2.S include/dwc2.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/usb_enum.o: lib/usb_enum.S include/dwc2.inc include/usb.inc | $(BUILD)
+$(BUILD)/usb_enum.o: drivers/usb_enum.S include/dwc2.inc include/usb.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_usb_enum.o: tests/test_usb_enum.S include/dwc2.inc include/usb.inc | $(BUILD)
@@ -86,19 +86,19 @@ $(BUILD)/test_usb_enum.o: tests/test_usb_enum.S include/dwc2.inc include/usb.inc
 $(BUILD)/test_usb_fail.o: tests/test_usb_fail.S include/dwc2.inc include/usb.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/usb_desc.o: lib/usb_desc.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
+$(BUILD)/usb_desc.o: drivers/usb_desc.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_usb_desc.o: tests/test_usb_desc.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/cdc_ecm.o: lib/cdc_ecm.S include/dwc2.inc include/usb.inc include/usb_desc.inc include/cdc_ecm.inc | $(BUILD)
+$(BUILD)/cdc_ecm.o: drivers/cdc_ecm.S include/dwc2.inc include/usb.inc include/usb_desc.inc include/cdc_ecm.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_cdc_ecm.o: tests/test_cdc_ecm.S include/dwc2.inc include/usb.inc include/usb_desc.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/usb_bulk.o: lib/usb_bulk.S include/dwc2.inc | $(BUILD)
+$(BUILD)/usb_bulk.o: drivers/usb_bulk.S include/dwc2.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_usb_bulk.o: tests/test_usb_bulk.S include/dwc2.inc | $(BUILD)
@@ -155,7 +155,10 @@ $(BUILD)/net.o: lib/net.S include/net.inc | $(BUILD)
 $(BUILD)/test_net.o: tests/test_net.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/timer.o: lib/timer.S include/timer.inc | $(BUILD)
+$(BUILD)/timer_hw.o: drivers/timer_hw.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/timer_pool.o: lib/timer_pool.S include/timer.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_timer.o: tests/test_timer.S include/timer.inc | $(BUILD)
