@@ -259,8 +259,8 @@ tcp_handle:
 .Ltcp_alloc_found:
     /* x23 = free slot, x24 = LISTEN slot */
 
-    /* ISN from hardware counter */
-    mrs     x0, CNTPCT_EL0
+    /* ISN from tcp_isn (weak — overridable for fuzz/test) */
+    bl      tcp_isn
     mov     w7, w0                  /* w7 = ISN (lower 32 bits, host order) */
 
     /* Populate new connection */
@@ -418,6 +418,19 @@ tcp_handle:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #64
+    ret
+
+/*
+ * tcp_isn — Generate initial sequence number (weak, overridable)
+ *
+ * Returns: w0 = 32-bit ISN
+ * Clobbers: x0
+ *
+ * Default: hardware counter. Override in fuzz harness for user-mode QEMU.
+ */
+.weak tcp_isn
+tcp_isn:
+    mrs     x0, CNTPCT_EL0
     ret
 
 /* --- Connection table (BSS) --- */

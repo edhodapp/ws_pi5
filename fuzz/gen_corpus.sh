@@ -82,5 +82,58 @@ printf '\x40\x01\x50\xA5'             >> "$DIR/icmp_short.bin"       # proto=ICM
 printf '\x0A\x00\x02\x02'             >> "$DIR/icmp_short.bin"
 printf '\x0A\x00\x02\x0F'             >> "$DIR/icmp_short.bin"
 
+# --- TCP seeds (valid IP + TCP checksums, exercises tcp_handle paths) ---
+
+# 8. TCP SYN to port 80 — valid checksums, exercises LISTEN → SYN-ACK
+#    sport=12345, dport=80, SEQ=1, flags=SYN
+#    IP cksum=508C, TCP cksum=4867
+printf '\x02\x00\x00\x00\x00\x01'     > "$DIR/tcp_syn_80.bin"
+printf '\xAA\xBB\xCC\xDD\xEE\xFF'    >> "$DIR/tcp_syn_80.bin"
+printf '\x08\x00'                      >> "$DIR/tcp_syn_80.bin"
+printf '\x45\x00\x00\x28'             >> "$DIR/tcp_syn_80.bin"
+printf '\x12\x34\x00\x00'             >> "$DIR/tcp_syn_80.bin"
+printf '\x40\x06\x50\x8C'             >> "$DIR/tcp_syn_80.bin"
+printf '\x0A\x00\x02\x02'             >> "$DIR/tcp_syn_80.bin"
+printf '\x0A\x00\x02\x0F'             >> "$DIR/tcp_syn_80.bin"
+printf '\x30\x39\x00\x50'             >> "$DIR/tcp_syn_80.bin"       # sport:12345 dport:80
+printf '\x00\x00\x00\x01'             >> "$DIR/tcp_syn_80.bin"       # seq: 1
+printf '\x00\x00\x00\x00'             >> "$DIR/tcp_syn_80.bin"       # ack: 0
+printf '\x50\x02\xFF\xFF'             >> "$DIR/tcp_syn_80.bin"       # doff=5, SYN, win=65535
+printf '\x67\x48\x00\x00'             >> "$DIR/tcp_syn_80.bin"       # TCP cksum, urgent=0
+
+# 9. TCP ACK to port 80 — no matching connection → RST
+#    sport=12345, dport=80, SEQ=100, ACK=200, flags=ACK
+#    IP cksum=508C, TCP cksum=0F66
+printf '\x02\x00\x00\x00\x00\x01'     > "$DIR/tcp_ack_80.bin"
+printf '\xAA\xBB\xCC\xDD\xEE\xFF'    >> "$DIR/tcp_ack_80.bin"
+printf '\x08\x00'                      >> "$DIR/tcp_ack_80.bin"
+printf '\x45\x00\x00\x28'             >> "$DIR/tcp_ack_80.bin"
+printf '\x12\x34\x00\x00'             >> "$DIR/tcp_ack_80.bin"
+printf '\x40\x06\x50\x8C'             >> "$DIR/tcp_ack_80.bin"
+printf '\x0A\x00\x02\x02'             >> "$DIR/tcp_ack_80.bin"
+printf '\x0A\x00\x02\x0F'             >> "$DIR/tcp_ack_80.bin"
+printf '\x30\x39\x00\x50'             >> "$DIR/tcp_ack_80.bin"       # sport:12345 dport:80
+printf '\x00\x00\x00\x64'             >> "$DIR/tcp_ack_80.bin"       # seq: 100
+printf '\x00\x00\x00\xC8'             >> "$DIR/tcp_ack_80.bin"       # ack: 200
+printf '\x50\x10\xFF\xFF'             >> "$DIR/tcp_ack_80.bin"       # doff=5, ACK, win=65535
+printf '\x66\x0F\x00\x00'             >> "$DIR/tcp_ack_80.bin"       # TCP cksum, urgent=0
+
+# 10. TCP SYN to port 12345 — no LISTEN match → RST
+#     sport=54321, dport=12345, SEQ=1, flags=SYN
+#     IP cksum=508C, TCP cksum=6693
+printf '\x02\x00\x00\x00\x00\x01'     > "$DIR/tcp_syn_wrong_port.bin"
+printf '\xAA\xBB\xCC\xDD\xEE\xFF'    >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x08\x00'                      >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x45\x00\x00\x28'             >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x12\x34\x00\x00'             >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x40\x06\x50\x8C'             >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x0A\x00\x02\x02'             >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\x0A\x00\x02\x0F'             >> "$DIR/tcp_syn_wrong_port.bin"
+printf '\xD4\x31\x30\x39'             >> "$DIR/tcp_syn_wrong_port.bin" # sport:54321 dport:12345
+printf '\x00\x00\x00\x01'             >> "$DIR/tcp_syn_wrong_port.bin" # seq: 1
+printf '\x00\x00\x00\x00'             >> "$DIR/tcp_syn_wrong_port.bin" # ack: 0
+printf '\x50\x02\xFF\xFF'             >> "$DIR/tcp_syn_wrong_port.bin" # doff=5, SYN, win=65535
+printf '\x93\x66\x00\x00'             >> "$DIR/tcp_syn_wrong_port.bin" # TCP cksum, urgent=0
+
 echo "Generated $(ls "$DIR"/*.bin | wc -l) seed files in $DIR/"
 ls -la "$DIR"/*.bin

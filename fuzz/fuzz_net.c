@@ -13,8 +13,17 @@
 
 #include <unistd.h>
 
-/* Assembled from lib/net.S — pure computation, no MMIO */
+/* Assembled from lib/ — pure computation, no MMIO */
 extern int net_recv_one(void *buf, int len);
+extern void tcp_init(void);
+
+/* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
+   under QEMU user mode, so provide a simple counter instead. */
+unsigned long tcp_isn(void)
+{
+    static unsigned int n = 0x12345678;
+    return n++;
+}
 
 /* Max Ethernet frame: 14-byte header + 1500-byte payload */
 #define ETH_FRAME_MAX 1514
@@ -28,6 +37,7 @@ int main(void)
     while (__AFL_LOOP(10000)) {
 #endif
 
+    tcp_init();
     int n = read(0, buf, sizeof(buf));
     if (n > 0)
         net_recv_one(buf, n);
