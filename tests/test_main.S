@@ -85,6 +85,7 @@ _start:
     bl      test_icmp_short
     bl      test_icmp_echo_payload
     bl      test_icmp_echo_payload_odd
+    bl      test_icmp_unknown_type
     bl      test_ip_handle_icmp
     bl      test_ip_handle_short
     bl      test_ip_handle_bad_cksum

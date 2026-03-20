@@ -14,6 +14,7 @@
 .global test_icmp_short
 .global test_icmp_echo_payload
 .global test_icmp_echo_payload_odd
+.global test_icmp_unknown_type
 
 .section .text
 
@@ -314,6 +315,52 @@ test_icmp_echo_payload_odd:
     ret
 
 /* ========================================================================
+ * test_icmp_unknown_type — ICMP type=11 (Time Exceeded), not 3 or 8 → returns 0
+ *
+ * Exercises the "unknown type" fall-through in icmp_handle after the
+ * dest-unreachable (type 3) check was added. Type 11 is neither 3 nor 8,
+ * so icmp_handle should ignore it and return 0.
+ * ======================================================================== */
+test_icmp_unknown_type:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy echo template to mutable buffer (reuse icmp_echo_buf) */
+    ldr     x0, =icmp_echo_template
+    ldr     x1, =icmp_echo_buf
+    ldp     x2, x3, [x0]
+    stp     x2, x3, [x1]
+    ldp     x2, x3, [x0, #16]
+    stp     x2, x3, [x1, #16]
+    ldr     x2, [x0, #32]
+    str     x2, [x1, #32]
+    ldrh    w2, [x0, #40]
+    strh    w2, [x1, #40]
+
+    /* Overwrite ICMP type to 11 (Time Exceeded) */
+    ldr     x0, =icmp_echo_buf
+    mov     w1, #11
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+
+    /* Call icmp_handle(buf, 42) */
+    mov     w1, #42
+    bl      icmp_handle
+
+    /* Should return 0 (ignored) */
+    cbnz    w0, .Lfail_icmp_unk
+
+    ldr     x0, =name_icmp_unknown
+    bl      test_pass
+    b       .Ldone_icmp_unk
+
+.Lfail_icmp_unk:
+    ldr     x0, =name_icmp_unknown
+    bl      test_fail
+
+.Ldone_icmp_unk:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -370,6 +417,7 @@ name_icmp_not_echo:   .asciz "icmp_not_echo"
 name_icmp_short:      .asciz "icmp_short"
 name_icmp_payload:    .asciz "icmp_echo_payload"
 name_icmp_payload_odd: .asciz "icmp_echo_payload_odd"
+name_icmp_unknown:    .asciz "icmp_unknown_type"
 
 /*
  * 74-byte ICMP echo request with 32-byte payload

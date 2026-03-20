@@ -178,6 +178,15 @@ test_tcp:
     bl      test_tcp_ts_paws_accept
     bl      test_tcp_ts_paws_reject
     bl      test_tcp_ts_recent_update
+    bl      test_tcp_icmp_err_lport
+    bl      test_tcp_icmp_err_rip
+    bl      test_tcp_tsopt_exhaust
+    bl      test_tcp_tsopt_eol
+    bl      test_tcp_tsopt_trunc
+    bl      test_tcp_tsopt_badlen
+    bl      test_tcp_tsopt_skip
+    bl      test_tcp_tsopt_wrong_tslen
+    bl      test_tcp_paws_no_tsopt
     ldp     x29, x30, [sp], #16
     ret
 
@@ -8153,6 +8162,459 @@ test_tcp_ts_recent_update:
     ret
 
 /* ========================================================================
+ * test_tcp_icmp_err_lport — ICMP type 3 with wrong lport → no state change
+ * ======================================================================== */
+test_tcp_icmp_err_lport:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ielp
+    mov     x19, x0
+
+    /* Build ICMP with wrong lport (0x8888) but correct rport and rip */
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #0x8888             /* wrong lport */
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* Connection should still be ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_ielp
+
+    ldr     x0, =name_tcp_ielp
+    bl      test_pass
+    b       .Ldone_tcp_ielp
+.Lfail_tcp_ielp:
+    ldr     x0, =name_tcp_ielp
+    bl      test_fail
+.Ldone_tcp_ielp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_rip — ICMP type 3 with wrong peer IP → no state change
+ * ======================================================================== */
+test_tcp_icmp_err_rip:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ierip
+    mov     x19, x0
+
+    /* Build ICMP with correct lport/rport but wrong peer IP */
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, =0xC0A80101         /* 192.168.1.1 NBO — wrong */
+    bl      ttcp_build_icmp_err
+
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* Connection should still be ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_ierip
+
+    ldr     x0, =name_tcp_ierip
+    bl      test_pass
+    b       .Ldone_tcp_ierip
+.Lfail_tcp_ierip:
+    ldr     x0, =name_tcp_ierip
+    bl      test_fail
+.Ldone_tcp_ierip:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_exhaust — Options without Kind=8 → not found (loop exhaustion)
+ *
+ * Build a 66-byte SYN with doff=0x80 (32 bytes TCP header).
+ * Options: MSS(Kind=2, Len=4, val=0x05B4) + 8 bytes NOP padding.
+ * tcp_parse_tsopt should return w1=0.
+ * ======================================================================== */
+test_tcp_tsopt_exhaust:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Build frame in tcp_test_buf: copy 54-byte SYN, then add options */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x80 (32 bytes) */
+    mov     w1, #0x80
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options at frame offset 54: MSS(02 04 05 B4) + NOP(01) x8 */
+    mov     w1, #0x02
+    strb    w1, [x0, #54]          /* Kind = MSS */
+    mov     w1, #0x04
+    strb    w1, [x0, #55]          /* Length = 4 */
+    mov     w1, #0x05
+    strb    w1, [x0, #56]          /* MSS high byte */
+    mov     w1, #0xB4
+    strb    w1, [x0, #57]          /* MSS low byte */
+    /* Fill remaining 8 bytes with NOP */
+    mov     w1, #0x01
+    strb    w1, [x0, #58]
+    strb    w1, [x0, #59]
+    strb    w1, [x0, #60]
+    strb    w1, [x0, #61]
+    strb    w1, [x0, #62]
+    strb    w1, [x0, #63]
+    strb    w1, [x0, #64]
+    strb    w1, [x0, #65]
+
+    /* Call tcp_parse_tsopt(frame, 32) */
+    mov     w1, #32
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (not found) */
+    cbnz    w1, .Lfail_tcp_tse
+
+    ldr     x0, =name_tcp_tse
+    bl      test_pass
+    b       .Ldone_tcp_tse
+.Lfail_tcp_tse:
+    ldr     x0, =name_tcp_tse
+    bl      test_fail
+.Ldone_tcp_tse:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_eol — Options with EOL (Kind=0) before TSopt → not found
+ *
+ * Options: NOP(01) EOL(00) — parser hits EOL, stops, returns not-found.
+ * ======================================================================== */
+test_tcp_tsopt_eol:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x60 (24 bytes = 4 bytes of options) */
+    mov     w1, #0x60
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options: NOP(01) EOL(00) NOP(01) NOP(01) */
+    mov     w1, #0x01
+    strb    w1, [x0, #54]          /* NOP */
+    strb    wzr, [x0, #55]         /* EOL */
+    strb    w1, [x0, #56]          /* NOP (after EOL, should not be reached) */
+    strb    w1, [x0, #57]          /* NOP */
+
+    /* Call tcp_parse_tsopt(frame, 24) */
+    mov     w1, #24
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (not found due to EOL) */
+    cbnz    w1, .Lfail_tcp_tseol
+
+    ldr     x0, =name_tcp_tseol
+    bl      test_pass
+    b       .Ldone_tcp_tseol
+.Lfail_tcp_tseol:
+    ldr     x0, =name_tcp_tseol
+    bl      test_fail
+.Ldone_tcp_tseol:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_trunc — Kind byte at last option position, no room for length
+ *
+ * doff=0x60 (24 bytes = 4 option bytes). Options: NOP NOP NOP Kind=8
+ * Kind=8 is at position 3 of 4, no room for length byte → not found.
+ * ======================================================================== */
+test_tcp_tsopt_trunc:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x60 (24 bytes) */
+    mov     w1, #0x60
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options: NOP NOP NOP Kind=8 */
+    mov     w1, #0x01
+    strb    w1, [x0, #54]
+    strb    w1, [x0, #55]
+    strb    w1, [x0, #56]
+    mov     w1, #0x08
+    strb    w1, [x0, #57]          /* Kind=8 at last position */
+
+    /* Call tcp_parse_tsopt(frame, 24) */
+    mov     w1, #24
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (truncated) */
+    cbnz    w1, .Lfail_tcp_tstr
+
+    ldr     x0, =name_tcp_tstr
+    bl      test_pass
+    b       .Ldone_tcp_tstr
+.Lfail_tcp_tstr:
+    ldr     x0, =name_tcp_tstr
+    bl      test_fail
+.Ldone_tcp_tstr:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_badlen — Option with length < 2 → not found (malformed)
+ *
+ * Options: Kind=8 Len=1 — length < 2 triggers malformed check.
+ * ======================================================================== */
+test_tcp_tsopt_badlen:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x60 (24 bytes = 4 option bytes) */
+    mov     w1, #0x60
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options: Kind=8 Len=1 (malformed) + padding */
+    mov     w1, #0x08
+    strb    w1, [x0, #54]          /* Kind = Timestamps */
+    mov     w1, #0x01
+    strb    w1, [x0, #55]          /* Length = 1 (< 2, malformed) */
+    strb    wzr, [x0, #56]
+    strb    wzr, [x0, #57]
+
+    /* Call tcp_parse_tsopt(frame, 24) */
+    mov     w1, #24
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (malformed) */
+    cbnz    w1, .Lfail_tcp_tsbl
+
+    ldr     x0, =name_tcp_tsbl
+    bl      test_pass
+    b       .Ldone_tcp_tsbl
+.Lfail_tcp_tsbl:
+    ldr     x0, =name_tcp_tsbl
+    bl      test_fail
+.Ldone_tcp_tsbl:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_skip — Non-TS variable-length option before TSopt → found
+ *
+ * Options: MSS(Kind=2 Len=4 05B4) NOP NOP Kind=8 Len=10 TSval TSecr
+ * Parser should skip MSS, skip NOPs, find TSopt.
+ * doff=0xA0 (40 bytes = 20 option bytes)
+ * ======================================================================== */
+test_tcp_tsopt_skip:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x90 (36 bytes = 16 option bytes) */
+    mov     w1, #0x90
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Option bytes at offset 54:
+       MSS: 02 04 05 B4
+       NOP: 01
+       NOP: 01
+       TSopt: 08 0A AA BB CC DD 00 00 00 00 */
+    mov     w1, #0x02
+    strb    w1, [x0, #54]          /* MSS Kind */
+    mov     w1, #0x04
+    strb    w1, [x0, #55]          /* MSS Length */
+    mov     w1, #0x05
+    strb    w1, [x0, #56]          /* MSS value high */
+    mov     w1, #0xB4
+    strb    w1, [x0, #57]          /* MSS value low */
+    mov     w1, #0x01
+    strb    w1, [x0, #58]          /* NOP */
+    strb    w1, [x0, #59]          /* NOP */
+    mov     w1, #0x08
+    strb    w1, [x0, #60]          /* TS Kind */
+    mov     w1, #0x0A
+    strb    w1, [x0, #61]          /* TS Length */
+    /* TSval = 0xAABBCCDD (NBO) */
+    mov     w1, #0xAA
+    strb    w1, [x0, #62]
+    mov     w1, #0xBB
+    strb    w1, [x0, #63]
+    mov     w1, #0xCC
+    strb    w1, [x0, #64]
+    mov     w1, #0xDD
+    strb    w1, [x0, #65]
+    /* TSecr = 0 */
+    strb    wzr, [x0, #66]
+    strb    wzr, [x0, #67]
+    strb    wzr, [x0, #68]
+    strb    wzr, [x0, #69]
+
+    /* Call tcp_parse_tsopt(frame, 36) */
+    mov     w1, #36
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=1 (found), w0=TSval as loaded by ldr (LE word) */
+    cmp     w1, #1
+    b.ne    .Lfail_tcp_tssk
+    ldr     w2, =0xDDCCBBAA         /* AA BB CC DD in memory → 0xDDCCBBAA via ldr */
+    cmp     w0, w2
+    b.ne    .Lfail_tcp_tssk
+
+    ldr     x0, =name_tcp_tssk
+    bl      test_pass
+    b       .Ldone_tcp_tssk
+.Lfail_tcp_tssk:
+    ldr     x0, =name_tcp_tssk
+    bl      test_fail
+.Ldone_tcp_tssk:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_tsopt_wrong_tslen — Kind=8 with wrong Length (6 != 10) → skip
+ *
+ * Options: Kind=8 Len=6 (wrong) + padding → parser skips, returns not found.
+ * doff=0x70 (28 bytes = 8 option bytes)
+ * ======================================================================== */
+test_tcp_tsopt_wrong_tslen:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+
+    /* Set doff=0x70 (28 bytes = 8 option bytes) */
+    mov     w1, #0x70
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* Options: Kind=8 Len=6 (wrong) val(4 bytes) + 2 NOP */
+    mov     w1, #0x08
+    strb    w1, [x0, #54]          /* Kind = Timestamps */
+    mov     w1, #0x06
+    strb    w1, [x0, #55]          /* Length = 6 (wrong, should be 10) */
+    strb    wzr, [x0, #56]
+    strb    wzr, [x0, #57]
+    strb    wzr, [x0, #58]
+    strb    wzr, [x0, #59]
+    mov     w1, #0x01
+    strb    w1, [x0, #60]          /* NOP */
+    strb    w1, [x0, #61]          /* NOP */
+
+    /* Call tcp_parse_tsopt(frame, 28) */
+    mov     w1, #28
+    bl      tcp_parse_tsopt
+
+    /* Should return w1=0 (not found — Kind=8 skipped due to wrong length) */
+    cbnz    w1, .Lfail_tcp_tswt
+
+    ldr     x0, =name_tcp_tswt
+    bl      test_pass
+    b       .Ldone_tcp_tswt
+.Lfail_tcp_tswt:
+    ldr     x0, =name_tcp_tswt
+    bl      test_fail
+.Ldone_tcp_tswt:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_paws_no_tsopt — TS_ENABLED but segment has no TSopt → accepted
+ *
+ * Verifies that when TCONN_TS_ENABLED=1 but the incoming data segment
+ * has a plain 20-byte TCP header (no options), PAWS is skipped and the
+ * segment is still processed normally.
+ * ======================================================================== */
+test_tcp_paws_no_tsopt:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pnt
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Enable timestamps on the connection */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Save RCV_NXT before */
+    ldr     w21, [x19, #TCONN_RCV_NXT]
+
+    /* Build a plain data frame (no TSopt, doff=0x50) using ttcp_build_data_frame */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #5                  /* 5-byte payload */
+    mov     w2, #0x41               /* fill with 'A' */
+    ldr     w3, [x19, #TCONN_RCV_NXT] /* SEQ = RCV_NXT */
+    add     w4, w20, #1             /* ACK = ISN+1 */
+    bl      ttcp_build_data_frame
+
+    mov     w22, w0                 /* frame_len */
+
+    /* Send it */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w22
+    bl      tcp_handle
+
+    /* Segment should be accepted: RCV_NXT should advance by 5 */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    add     w1, w21, #5
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_pnt
+
+    ldr     x0, =name_tcp_pnt
+    bl      test_pass
+    b       .Ldone_tcp_pnt
+.Lfail_tcp_pnt:
+    ldr     x0, =name_tcp_pnt
+    bl      test_fail
+.Ldone_tcp_pnt:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -8716,6 +9178,15 @@ name_tcp_tbfs:      .asciz "tcp_ts_build_frame_size"
 name_tcp_tpa:       .asciz "tcp_ts_paws_accept"
 name_tcp_tpr:       .asciz "tcp_ts_paws_reject"
 name_tcp_tru:       .asciz "tcp_ts_recent_update"
+name_tcp_ielp:      .asciz "tcp_icmp_err_lport"
+name_tcp_ierip:     .asciz "tcp_icmp_err_rip"
+name_tcp_tse:       .asciz "tcp_tsopt_exhaust"
+name_tcp_tseol:     .asciz "tcp_tsopt_eol"
+name_tcp_tstr:      .asciz "tcp_tsopt_trunc"
+name_tcp_tsbl:      .asciz "tcp_tsopt_badlen"
+name_tcp_tssk:      .asciz "tcp_tsopt_skip"
+name_tcp_tswt:      .asciz "tcp_tsopt_wrong_tslen"
+name_tcp_pnt:       .asciz "tcp_paws_no_tsopt"
 
 tcp_send_payload:
     .ascii  "World"
