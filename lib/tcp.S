@@ -28,6 +28,10 @@
 .global tcp_rxbuf_pool
 .global tcp_window_update
 .global tcp_send_ready
+.global tcp_set_send_ctx
+.global tcp_retransmit_cb
+.global tcp_rtxbuf_pool
+.global tcp_send_ctx
 
 .section .text
 
@@ -124,6 +128,20 @@ tcp_init:
 tcp_set_timer_pool:
     ldr     x1, =tcp_timer_pool_ptr
     str     x0, [x1]
+    ret
+
+/*
+ * tcp_set_send_ctx — Store I/O context for retransmit callback
+ *
+ * x0: dwc2_base, x1: ecm_state, x2: tx_buf, x3: send_fn
+ * Clobbers: x4
+ */
+tcp_set_send_ctx:
+    ldr     x4, =tcp_send_ctx
+    str     x0, [x4, #TSCTX_DWC2_BASE]
+    str     x1, [x4, #TSCTX_ECM_STATE]
+    str     x2, [x4, #TSCTX_TX_BUF]
+    str     x3, [x4, #TSCTX_SEND_FN]
     ret
 
 /*
@@ -1371,3 +1389,11 @@ tcp_timer_pool_ptr:
 .balign 16
 tcp_rxbuf_pool:
     .space  TCP_RXBUF_POOL_SIZE
+
+.balign 16
+tcp_rtxbuf_pool:
+    .space  TCP_RTXBUF_POOL_SIZE
+
+.balign 8
+tcp_send_ctx:
+    .space  TSCTX_SIZE

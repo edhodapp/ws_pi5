@@ -64,6 +64,9 @@
 .equ TCONN_TIMER_SLOT, 44      /* w32 — retransmit timer slot (-1=none) */
 .equ TCONN_RMAC,       48      /* 6 bytes — peer MAC (captured from SYN) */
 .equ TCONN_PAD4,       54
+.equ TCONN_RTXLEN,     56      /* u16 — retransmit frame length (0 = no pending) */
+.equ TCONN_RTXCOUNT,   58      /* u8  — retry count (incremented each timeout) */
+.equ TCONN_PAD5,       59      /* u8  — padding */
 .equ TCONN_SIZE,       64      /* power of 2 → lsl #6 for indexing */
 
 /* Connection table */
@@ -83,3 +86,15 @@
 .equ TCP_EVT_ACK,      4       /* ACK set, no SYN/FIN/RST */
 .equ TCP_N_EVENTS,     5
 .equ TCP_N_STATES,     10      /* CLOSED(0) through CLOSING(9) */
+
+/* Retransmission constants */
+.equ TCP_MAX_RETRIES,      8       /* max retransmit attempts before RST+close */
+.equ TCP_RTO_SHIFT_CAP,    5       /* max shift for backoff: 1<<5 = 32 seconds */
+.equ TCP_RTXBUF_POOL_SIZE, 32768   /* 16 × 2048 (same layout as rxbuf_pool) */
+
+/* TCP send context struct (for retransmit callback) */
+.equ TSCTX_DWC2_BASE,  0       /* u64 */
+.equ TSCTX_ECM_STATE,  8       /* u64 */
+.equ TSCTX_TX_BUF,     16      /* u64 */
+.equ TSCTX_SEND_FN,    24      /* u64 */
+.equ TSCTX_SIZE,        32
