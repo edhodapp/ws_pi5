@@ -175,6 +175,9 @@ test_tcp:
     bl      test_tcp_ts_reply_frame_size
     bl      test_tcp_ts_reply_no_ts
     bl      test_tcp_ts_build_frame_size
+    bl      test_tcp_ts_paws_accept
+    bl      test_tcp_ts_paws_reject
+    bl      test_tcp_ts_recent_update
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7914,6 +7917,242 @@ test_tcp_ts_build_frame_size:
     ret
 
 /* ========================================================================
+ * Helper: ttcp_build_ts_data_frame — Build data frame with TCP Timestamps option
+ *
+ * x0: dest buffer (must hold 71 bytes)
+ * w1: ISN (host order, for ACK = ISN+1)
+ * w2: TSval (host order)
+ * Returns: w0 = 71 (frame length: 66 header + 5 payload)
+ * Clobbers: x0-x6, x19-x24, x30
+ * ======================================================================== */
+ttcp_build_ts_data_frame:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* dest buf */
+    mov     w20, w1                 /* ISN host */
+    mov     w21, w2                 /* TSval host */
+
+    /* Copy first 54 bytes from data template (ETH+IP+TCP base) */
+    ldr     x0, =tcp_data_template
+    mov     x1, x19
+    mov     w2, #54
+.Lbtdf_copy_hdr:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lbtdf_copy_hdr
+
+    /* Insert TSopt at TCP+20 (frame offset 54): NOP NOP Kind8 Len10 TSval TSecr */
+    mov     w0, #0x01
+    strb    w0, [x19, #54]          /* NOP */
+    strb    w0, [x19, #55]          /* NOP */
+    mov     w0, #0x08
+    strb    w0, [x19, #56]          /* Kind = Timestamps */
+    mov     w0, #0x0A
+    strb    w0, [x19, #57]          /* Length = 10 */
+    rev     w0, w21                 /* TSval → NBO */
+    str     w0, [x19, #58]          /* TSval */
+    str     wzr, [x19, #62]         /* TSecr = 0 */
+
+    /* Copy 5-byte payload ("Hello") from data template offset 54 */
+    ldr     x0, =tcp_data_template
+    add     x0, x0, #54
+    add     x1, x19, #66            /* payload at offset 66 */
+    mov     w2, #5
+.Lbtdf_copy_payload:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lbtdf_copy_payload
+
+    /* Set doff = 0x80 (8 words = 32 bytes) */
+    mov     w0, #0x80
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* IP totlen = 57 (0x0039): 20 + 32 + 5 */
+    mov     w0, #0x0039
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Set ACK = rev(ISN+1) */
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum (section_len = 32 + 5 = 37) */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #37
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     w0, #71
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_paws_accept — TSval >= TS_RECENT → segment accepted
+ * ======================================================================== */
+test_tcp_ts_paws_accept:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tpa
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Enable timestamps, set TS_RECENT = 1000 */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Save RCV_NXT before */
+    ldr     w21, [x19, #TCONN_RCV_NXT]
+
+    /* Build data frame with TSval = 2000 (> 1000 → should pass PAWS) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w20                 /* ISN */
+    mov     w2, #2000               /* TSval */
+    bl      ttcp_build_ts_data_frame
+
+    /* Send it */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* Segment should be accepted: RCV_NXT should advance by 5 */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    add     w1, w21, #5
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_tpa
+
+    ldr     x0, =name_tcp_tpa
+    bl      test_pass
+    b       .Ldone_tcp_tpa
+.Lfail_tcp_tpa:
+    ldr     x0, =name_tcp_tpa
+    bl      test_fail
+.Ldone_tcp_tpa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_paws_reject — TSval < TS_RECENT → segment dropped
+ * ======================================================================== */
+test_tcp_ts_paws_reject:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tpr
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Enable timestamps, set TS_RECENT = 5000 */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    ldr     w0, =5000
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Save RCV_NXT before */
+    ldr     w21, [x19, #TCONN_RCV_NXT]
+
+    /* Build data frame with TSval = 1000 (< 5000 → should fail PAWS) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w20                 /* ISN */
+    mov     w2, #1000               /* TSval */
+    bl      ttcp_build_ts_data_frame
+
+    /* Send it */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* Segment should be dropped: RCV_NXT unchanged */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    cmp     w0, w21
+    b.ne    .Lfail_tcp_tpr
+
+    ldr     x0, =name_tcp_tpr
+    bl      test_pass
+    b       .Ldone_tcp_tpr
+.Lfail_tcp_tpr:
+    ldr     x0, =name_tcp_tpr
+    bl      test_fail
+.Ldone_tcp_tpr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_recent_update — After accepting data, TS_RECENT updated
+ * ======================================================================== */
+test_tcp_ts_recent_update:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tru
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Enable timestamps, set TS_RECENT = 1000 */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Build data frame with TSval = 3000 */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w20                 /* ISN */
+    ldr     w2, =3000               /* TSval */
+    bl      ttcp_build_ts_data_frame
+
+    /* Send it */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* TS_RECENT should now be 3000 */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    ldr     w1, =3000
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_tru
+
+    ldr     x0, =name_tcp_tru
+    bl      test_pass
+    b       .Ldone_tcp_tru
+.Lfail_tcp_tru:
+    ldr     x0, =name_tcp_tru
+    bl      test_fail
+.Ldone_tcp_tru:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -8474,6 +8713,9 @@ name_tcp_tsno:      .asciz "tcp_ts_syn_no_opt"
 name_tcp_trfs:      .asciz "tcp_ts_reply_frame_size"
 name_tcp_trnt:      .asciz "tcp_ts_reply_no_ts"
 name_tcp_tbfs:      .asciz "tcp_ts_build_frame_size"
+name_tcp_tpa:       .asciz "tcp_ts_paws_accept"
+name_tcp_tpr:       .asciz "tcp_ts_paws_reject"
+name_tcp_tru:       .asciz "tcp_ts_recent_update"
 
 tcp_send_payload:
     .ascii  "World"

@@ -1077,6 +1077,20 @@ tcp_estab_ack_handler:
     bl      tcp_rtx_clear
 .Leak_una_done:
 
+    /* PAWS check (RFC 7323 §4.2) — before SEQ validation */
+    ldrb    w0, [x19, #TCONN_TS_ENABLED]
+    cbz     w0, .Leak_paws_done
+    mov     x0, x20                 /* frame */
+    mov     w1, w22                 /* tcp_header_len */
+    bl      tcp_parse_tsopt
+    cbz     w1, .Leak_paws_done     /* no TSopt → skip PAWS */
+    rev     w0, w0                  /* TSval NBO → host order */
+    ldr     w2, [x19, #TCONN_TS_RECENT]
+    sub     w3, w0, w2              /* signed diff */
+    tbnz    w3, #31, .Leak_pure_ack /* TSval < TS_RECENT → drop */
+    str     w0, [x19, #TCONN_TS_RECENT] /* update TS_RECENT */
+.Leak_paws_done:
+
     sub     w4, w21, w22            /* w4 = data_len */
     cbz     w4, .Leak_pure_ack
 
