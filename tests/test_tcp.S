@@ -24,6 +24,12 @@
  *  17. test_tcp_syn_rcvd_rst  — SYN → SYN-ACK, then RST → conn CLOSED
  *  18. test_tcp_syn_rcvd_bad_ack — SYN → SYN-ACK, then ACK with wrong ACK# → RST
  *  19. test_tcp_table_full    — All slots occupied, SYN → RST (no free slot)
+ *  20. test_tcp_scan_rport_miss — Exact-match scan: lport matches, rport doesn't
+ *  21. test_tcp_scan_rip_miss — Exact-match scan: lport+rport match, rip doesn't
+ *  22. test_tcp_listen_synack_reject — SYN+ACK to LISTEN port → RST (pure SYN required)
+ *  23. test_tcp_unknown_state — Exact match in CLOSE_WAIT (unknown to Phase 2) → RST
+ *  24. test_tcp_syn_rcvd_no_ack — SYN_RCVD + bare data (no ACK/RST) → RST
+ *  25. test_tcp_established_rst — Full handshake → ESTABLISHED, then RST → CLOSED
  */
 
 .include "net.inc"
@@ -67,6 +73,12 @@ test_tcp:
     bl      test_tcp_syn_rcvd_rst
     bl      test_tcp_syn_rcvd_bad_ack
     bl      test_tcp_table_full
+    bl      test_tcp_scan_rport_miss
+    bl      test_tcp_scan_rip_miss
+    bl      test_tcp_listen_synack_reject
+    bl      test_tcp_unknown_state
+    bl      test_tcp_syn_rcvd_no_ack
+    bl      test_tcp_established_rst
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1164,6 +1176,383 @@ test_tcp_table_full:
     ret
 
 /* ========================================================================
+ * Branch coverage tests (20-25)
+ * ======================================================================== */
+
+/* ========================================================================
+ * test_tcp_scan_rport_miss — Exact-match scan: lport matches, rport doesn't
+ *
+ * Exercises line 174 taken (b.ne .Ltcp_scan_next on rport mismatch).
+ * Setup: tcp_init + SYN from :12345→:80 creates SYN_RCVD with rport=12345.
+ * Then send bare data from :54321→:80 — same lport, different rport.
+ * ======================================================================== */
+test_tcp_scan_rport_miss:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Create SYN_RCVD connection from 10.0.2.2:12345→:80 */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rpmiss
+
+    /* Send bare data from :54321→:80 (rport mismatch in exact-match scan) */
+    ldr     x0, =tcp_from54321_to80_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* LISTEN fallback, non-SYN → RST+ACK */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rpmiss
+
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_rpmiss
+
+    ldr     x0, =name_tcp_rpmiss
+    bl      test_pass
+    b       .Ldone_tcp_rpmiss
+
+.Lfail_tcp_rpmiss:
+    ldr     x0, =name_tcp_rpmiss
+    bl      test_fail
+
+.Ldone_tcp_rpmiss:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_scan_rip_miss — Exact-match scan: lport+rport match, rip doesn't
+ *
+ * Exercises line 177 taken (b.ne .Ltcp_scan_next on rip mismatch).
+ * Setup: tcp_init + SYN from 10.0.2.2:12345→:80 creates SYN_RCVD.
+ * Then send bare data from 10.0.2.3:12345→:80 — same ports, different IP.
+ * ======================================================================== */
+test_tcp_scan_rip_miss:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Create SYN_RCVD connection from 10.0.2.2:12345→:80 */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ripmiss
+
+    /* Send bare data from 10.0.2.3:12345→:80 (rip mismatch) */
+    ldr     x0, =tcp_diffip_to80_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* LISTEN fallback, non-SYN → RST+ACK */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_ripmiss
+
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_ripmiss
+
+    ldr     x0, =name_tcp_ripmiss
+    bl      test_pass
+    b       .Ldone_tcp_ripmiss
+
+.Lfail_tcp_ripmiss:
+    ldr     x0, =name_tcp_ripmiss
+    bl      test_fail
+
+.Ldone_tcp_ripmiss:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_listen_synack_reject — SYN+ACK to LISTEN port → RST
+ *
+ * Exercises line 200 taken (b.ne .Ltcp_no_conn when ACK set with SYN).
+ * LISTEN fallback matches, SYN=1 passes line 198, but ACK=1 fails line 200.
+ * Since incoming has ACK → RST with SEQ=SEG.ACK (flags=RST only).
+ * ======================================================================== */
+test_tcp_listen_synack_reject:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Send SYN+ACK to port 80 */
+    ldr     x0, =tcp_synack_to80_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Should get RST (return 54) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_lsar
+
+    /* Incoming had ACK → RST path (flags=RST only, SEQ=SEG.ACK) */
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST
+    b.ne    .Lfail_tcp_lsar
+
+    ldr     x0, =name_tcp_lsar
+    bl      test_pass
+    b       .Ldone_tcp_lsar
+
+.Lfail_tcp_lsar:
+    ldr     x0, =name_tcp_lsar
+    bl      test_fail
+
+.Ldone_tcp_lsar:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_unknown_state — Exact match in unknown state → RST
+ *
+ * Exercises line 243 (b .Ltcp_no_conn fallthrough from conn_dispatch).
+ * Setup: tcp_init + SYN→SYN-ACK, then overwrite slot state to CLOSE_WAIT.
+ * Send matching bare data → exact match → dispatch → not SYN_RCVD,
+ * not ESTABLISHED → falls to .Ltcp_no_conn → RST.
+ * ======================================================================== */
+test_tcp_unknown_state:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Create SYN_RCVD connection */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_unkst
+
+    /* Find SYN_RCVD slot and change state to CLOSE_WAIT */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lunkst_find:
+    cbz     w3, .Lfail_tcp_unkst
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.eq    .Lunkst_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lunkst_find
+
+.Lunkst_found:
+    mov     w1, #TCPS_CLOSE_WAIT
+    strb    w1, [x0, #TCONN_STATE]
+
+    /* Send matching bare data → exact match → unknown state → RST */
+    ldr     x0, =tcp_bare_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Unknown state → no_conn → RST+ACK (incoming flags=0 → no ACK path) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_unkst
+
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_unkst
+
+    ldr     x0, =name_tcp_unkst
+    bl      test_pass
+    b       .Ldone_tcp_unkst
+
+.Lfail_tcp_unkst:
+    ldr     x0, =name_tcp_unkst
+    bl      test_fail
+
+.Ldone_tcp_unkst:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_rcvd_no_ack — SYN_RCVD + bare data (no ACK, no RST) → RST
+ *
+ * Exercises line 312 taken (b.eq .Ltcp_no_conn when ACK not set).
+ * Setup: tcp_init + SYN→SYN-ACK, then send bare data (flags=0) from
+ * same source → exact match → SYN_RCVD → no RST → no ACK → RST.
+ * ======================================================================== */
+test_tcp_syn_rcvd_no_ack:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Create SYN_RCVD connection */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_srnoack
+
+    /* Send bare data from same source (flags=0) → SYN_RCVD + no ACK */
+    ldr     x0, =tcp_bare_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* No ACK in SYN_RCVD → no_conn → RST+ACK */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_srnoack
+
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_RST_ACK
+    b.ne    .Lfail_tcp_srnoack
+
+    ldr     x0, =name_tcp_srnoack
+    bl      test_pass
+    b       .Ldone_tcp_srnoack
+
+.Lfail_tcp_srnoack:
+    ldr     x0, =name_tcp_srnoack
+    bl      test_fail
+
+.Ldone_tcp_srnoack:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_established_rst — ESTABLISHED + RST → close connection
+ *
+ * Exercises line 330 taken (b.ne .Ltcp_conn_close in ESTABLISHED).
+ * Full handshake → ESTABLISHED, then send RST → return 0, state = CLOSED.
+ * ======================================================================== */
+test_tcp_established_rst:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+
+    /* Step 1: SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_erst
+
+    /* Extract ISN from SYN-ACK SEQ field */
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20                /* w20 = ISN (host order) */
+
+    /* Step 2: ACK with correct ACK=ISN+1 → ESTABLISHED */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+.Lcopy_erst_ack:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lcopy_erst_ack
+
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_erst
+
+    /* Step 3: Send RST → ESTABLISHED + RST → close */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cbnz    w0, .Lfail_tcp_erst
+
+    /* Verify no ESTABLISHED slots remain */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lerst_check:
+    cbz     w3, .Lerst_ok
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.eq    .Lfail_tcp_erst
+    add     x0, x0, #TCONN_SIZE
+    b       .Lerst_check
+
+.Lerst_ok:
+    ldr     x0, =name_tcp_erst
+    bl      test_pass
+    b       .Ldone_tcp_erst
+
+.Lfail_tcp_erst:
+    ldr     x0, =name_tcp_erst
+    bl      test_fail
+
+.Ldone_tcp_erst:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -1461,6 +1850,78 @@ tcp_bad_ack_template:
     .byte   0x00, 0x00                               /* checksum: 0 */
     .byte   0x00, 0x00                               /* urgent: 0 */
 
+/*
+ * 54-byte bare data from 10.0.2.2:54321→:80, flags=0x00
+ * Used to exercise rport mismatch in exact-match scan.
+ */
+.balign 4
+tcp_from54321_to80_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0xD4, 0x31                               /* sport: 54321 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x64                   /* seq: 100 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x00                                     /* flags: none */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
+/*
+ * 54-byte bare data from 10.0.2.3:12345→:80, flags=0x00
+ * Used to exercise rip mismatch in exact-match scan.
+ */
+.balign 4
+tcp_diffip_to80_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8B                   /* IP cksum for src=10.0.2.3 */
+    .byte   0x0A, 0x00, 0x02, 0x03                   /* src: 10.0.2.3 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x64                   /* seq: 100 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x00                                     /* flags: none */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
+/*
+ * 54-byte SYN+ACK from 10.0.2.2:12345→:80, flags=0x12
+ * Used to exercise LISTEN rejecting SYN+ACK (pure SYN required).
+ */
+.balign 4
+tcp_synack_to80_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x28
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x06, 0x50, 0x8C
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x01                   /* seq: 1 */
+    .byte   0x00, 0x00, 0x00, 0xC8                   /* ack: 200 */
+    .byte   0x50                                     /* data offset: 5 */
+    .byte   0x12                                     /* flags: SYN+ACK */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+
 name_tcp_cksum:     .asciz "tcp_checksum"
 name_tcp_ckdata:    .asciz "tcp_checksum_data"
 name_tcp_short:     .asciz "tcp_short"
@@ -1480,6 +1941,12 @@ name_tcp_synnolist: .asciz "tcp_syn_no_listen"
 name_tcp_srst:      .asciz "tcp_syn_rcvd_rst"
 name_tcp_badack2:   .asciz "tcp_syn_rcvd_bad_ack"
 name_tcp_tfull:     .asciz "tcp_table_full"
+name_tcp_rpmiss:    .asciz "tcp_scan_rport_miss"
+name_tcp_ripmiss:   .asciz "tcp_scan_rip_miss"
+name_tcp_lsar:      .asciz "tcp_listen_synack_reject"
+name_tcp_unkst:     .asciz "tcp_unknown_state"
+name_tcp_srnoack:   .asciz "tcp_syn_rcvd_no_ack"
+name_tcp_erst:      .asciz "tcp_established_rst"
 
 .section .data
 .balign 4
