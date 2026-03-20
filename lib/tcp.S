@@ -566,6 +566,8 @@ tcp_synrcvd_ack_handler:
     ldr     w5, [x0, #TCONN_SND_NXT]
     cmp     w4, w5
     b.ne    .Lsra_bad_ack
+    /* SYN-ACK is now ACKed: advance SND_UNA to SND_NXT */
+    str     w5, [x0, #TCONN_SND_UNA]
     mov     w0, #0
     ret
 .Lsra_bad_ack:
@@ -607,6 +609,18 @@ tcp_estab_ack_handler:
     rev16   w4, w4
     uxth    w4, w4
     strh    w4, [x0, #TCONN_SND_WND]
+
+    /* Advance SND_UNA: if SND_UNA < seg_ack <= SND_NXT, set SND_UNA = seg_ack */
+    ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4                  /* w4 = seg_ack (host order) */
+    ldr     w5, [x0, #TCONN_SND_UNA]
+    ldr     w6, [x0, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ls    .Leak_una_done          /* seg_ack <= SND_UNA → no advance */
+    cmp     w4, w6
+    b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
+    str     w4, [x0, #TCONN_SND_UNA]
+.Leak_una_done:
 
     sub     w4, w2, w3              /* w4 = data_len */
     cbz     w4, .Leak_pure_ack

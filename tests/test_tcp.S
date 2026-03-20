@@ -138,6 +138,9 @@ test_tcp:
     bl      test_tcp_send_ready_zero
     bl      test_tcp_snd_wnd_pure_ack
     bl      test_tcp_snd_wnd_data_ack
+    bl      test_tcp_snd_una_handshake
+    bl      test_tcp_snd_una_data_ack
+    bl      test_tcp_snd_una_pure_ack
     ldp     x29, x30, [sp], #16
     ret
 
@@ -5736,6 +5739,176 @@ test_tcp_snd_wnd_data_ack:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_snd_una_handshake — After handshake ACK, SND_UNA == SND_NXT
+ *
+ * Handshake completes → SND_UNA should be ISN+1 (SYN consumed 1 seq)
+ * ======================================================================== */
+test_tcp_snd_una_handshake:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_suah
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* After handshake: SND_UNA should == SND_NXT == ISN+1 */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    ldr     w1, [x21, #TCONN_SND_NXT]
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suah
+
+    /* Both should == ISN+1 */
+    add     w2, w22, #1
+    cmp     w0, w2
+    b.ne    .Lfail_tcp_suah
+
+    ldr     x0, =name_tcp_suah
+    bl      test_pass
+    b       .Ldone_tcp_suah
+.Lfail_tcp_suah:
+    ldr     x0, =name_tcp_suah
+    bl      test_fail
+.Ldone_tcp_suah:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_snd_una_data_ack — After send + ACK, SND_UNA advances
+ *
+ * Handshake → tcp_send 5 bytes → peer ACKs → SND_UNA == SND_NXT
+ * ======================================================================== */
+test_tcp_snd_una_data_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_suada
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes → SND_NXT += 5 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_suada
+
+    /* SND_UNA should still be ISN+1, SND_NXT should be ISN+6 */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    add     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suada
+
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w22, #6
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suada
+
+    /* Peer ACKs all data: send ACK with SEG.ACK = ISN+6, SEQ = 2 */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0                  /* no payload */
+    mov     w2, #0
+    mov     w3, #2                  /* SEQ (peer's seq, = RCV_NXT after handshake) */
+    add     w4, w22, #6             /* ACK = ISN+6 */
+    bl      ttcp_build_data_frame
+
+    /* tcp_handle */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* SND_UNA should now == SND_NXT == ISN+6 */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    ldr     w1, [x21, #TCONN_SND_NXT]
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suada
+
+    add     w2, w22, #6
+    cmp     w0, w2
+    b.ne    .Lfail_tcp_suada
+
+    ldr     x0, =name_tcp_suada
+    bl      test_pass
+    b       .Ldone_tcp_suada
+.Lfail_tcp_suada:
+    ldr     x0, =name_tcp_suada
+    bl      test_fail
+.Ldone_tcp_suada:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_snd_una_pure_ack — Pure ACK (no data) advances SND_UNA
+ *
+ * Handshake → tcp_send 5 bytes → pure ACK with partial advance →
+ * verify SND_UNA advanced but != SND_NXT
+ * ======================================================================== */
+test_tcp_snd_una_pure_ack:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_suapa
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_suapa
+
+    /* Peer partially ACKs: ACK = ISN+3 (only 2 of 5 bytes) */
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #2
+    add     w4, w22, #3             /* ACK = ISN+3 */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* SND_UNA should be ISN+3 (partial advance) */
+    ldr     w0, [x21, #TCONN_SND_UNA]
+    add     w1, w22, #3
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suapa
+
+    /* SND_NXT should still be ISN+6 */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w1, w22, #6
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_suapa
+
+    ldr     x0, =name_tcp_suapa
+    bl      test_pass
+    b       .Ldone_tcp_suapa
+.Lfail_tcp_suapa:
+    ldr     x0, =name_tcp_suapa
+    bl      test_fail
+.Ldone_tcp_suapa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -6259,6 +6432,9 @@ name_tcp_sb:        .asciz "tcp_send_boundary"
 name_tcp_srz:       .asciz "tcp_send_ready_zero"
 name_tcp_swpa:      .asciz "tcp_snd_wnd_pure_ack"
 name_tcp_swda:      .asciz "tcp_snd_wnd_data_ack"
+name_tcp_suah:      .asciz "tcp_snd_una_handshake"
+name_tcp_suada:     .asciz "tcp_snd_una_data_ack"
+name_tcp_suapa:     .asciz "tcp_snd_una_pure_ack"
 
 tcp_send_payload:
     .ascii  "World"
