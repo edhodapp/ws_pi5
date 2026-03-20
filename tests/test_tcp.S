@@ -172,6 +172,9 @@ test_tcp:
     bl      test_tcp_icmp_err_short
     bl      test_tcp_ts_syn_negotiate
     bl      test_tcp_ts_syn_no_opt
+    bl      test_tcp_ts_reply_frame_size
+    bl      test_tcp_ts_reply_no_ts
+    bl      test_tcp_ts_build_frame_size
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7785,6 +7788,132 @@ test_tcp_ts_syn_no_opt:
     ret
 
 /* ========================================================================
+ * test_tcp_ts_reply_frame_size — TS-enabled conn → tcp_build_reply returns 66
+ * ======================================================================== */
+test_tcp_ts_reply_frame_size:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_trfs
+    mov     x19, x0                 /* conn */
+
+    /* Enable timestamps on this connection */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    ldr     w0, =0x12345678
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Build a reply frame (need a valid frame to swap addresses in) */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf      /* frame */
+    mov     w1, #0                  /* SEQ */
+    mov     w2, #0                  /* ACK */
+    mov     w3, #TCP_ACK_FLAG      /* flags */
+    mov     w4, #0                  /* window */
+    mov     x5, x19                 /* conn → timestamps */
+    bl      tcp_build_reply
+
+    cmp     w0, #66
+    b.ne    .Lfail_tcp_trfs
+
+    ldr     x0, =name_tcp_trfs
+    bl      test_pass
+    b       .Ldone_tcp_trfs
+.Lfail_tcp_trfs:
+    ldr     x0, =name_tcp_trfs
+    bl      test_fail
+.Ldone_tcp_trfs:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_reply_no_ts — TS-disabled conn → tcp_build_reply returns 54
+ * ======================================================================== */
+test_tcp_ts_reply_no_ts:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_trnt
+    mov     x19, x0
+
+    /* Ensure timestamps disabled */
+    strb    wzr, [x19, #TCONN_TS_ENABLED]
+
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #0
+    mov     w2, #0
+    mov     w3, #TCP_ACK_FLAG
+    mov     w4, #0
+    mov     x5, x19                 /* conn → no timestamps */
+    bl      tcp_build_reply
+
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_trnt
+
+    ldr     x0, =name_tcp_trnt
+    bl      test_pass
+    b       .Ldone_tcp_trnt
+.Lfail_tcp_trnt:
+    ldr     x0, =name_tcp_trnt
+    bl      test_fail
+.Ldone_tcp_trnt:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_ts_build_frame_size — TS-enabled conn → tcp_build_frame returns 66+payload
+ * ======================================================================== */
+test_tcp_ts_build_frame_size:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_tbfs
+    mov     x19, x0
+
+    /* Enable timestamps */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    ldr     w0, =0x12345678
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Build frame with 5-byte payload */
+    mov     x0, x19                 /* conn */
+    ldr     x1, =tcp_send_test_buf  /* frame buf */
+    mov     w2, #TCP_PSH_ACK        /* flags */
+    ldr     x3, =tcp_send_payload   /* payload "World" */
+    mov     w4, #5                  /* payload_len */
+    bl      tcp_build_frame
+
+    /* Expected: 66 + 5 = 71 */
+    cmp     w0, #71
+    b.ne    .Lfail_tcp_tbfs
+
+    ldr     x0, =name_tcp_tbfs
+    bl      test_pass
+    b       .Ldone_tcp_tbfs
+.Lfail_tcp_tbfs:
+    ldr     x0, =name_tcp_tbfs
+    bl      test_fail
+.Ldone_tcp_tbfs:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -8342,6 +8471,9 @@ name_tcp_ierc:      .asciz "tcp_icmp_err_rtx_clear"
 name_tcp_ies:       .asciz "tcp_icmp_err_short"
 name_tcp_tssn:      .asciz "tcp_ts_syn_negotiate"
 name_tcp_tsno:      .asciz "tcp_ts_syn_no_opt"
+name_tcp_trfs:      .asciz "tcp_ts_reply_frame_size"
+name_tcp_trnt:      .asciz "tcp_ts_reply_no_ts"
+name_tcp_tbfs:      .asciz "tcp_ts_build_frame_size"
 
 tcp_send_payload:
     .ascii  "World"

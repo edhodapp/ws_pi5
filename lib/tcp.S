@@ -36,6 +36,7 @@
 .global tcp_rtxbuf_pool
 .global tcp_send_ctx
 .global tcp_parse_tsopt
+.global tcp_build_frame
 
 .section .text
 
@@ -477,18 +478,21 @@ tcp_retransmit_cb:
  *
  * x0: frame buffer pointer
  * w1: SEQ (NBO), w2: ACK (NBO), w3: flags, w4: window (NBO LE halfword)
- * Returns: w0 = 54
- * Clobbers: x0-x6, x19-x22, x30
+ * x5: connection pointer (0 = no timestamps)
+ * Returns: w0 = 54 (no TS) or 66 (with TS)
+ * Clobbers: x0-x6, x19-x23, x30
  */
 tcp_build_reply:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
 
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = SEQ (NBO) */
     mov     w21, w2                 /* w21 = ACK (NBO) */
     mov     w22, w3                 /* w22 = flags */
+    mov     x23, x5                 /* x23 = conn (may be 0) */
 
     /* Store window early (TCP_WINDOW unaffected by ETH/IP ops) */
     strh    w4, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
@@ -513,22 +517,11 @@ tcp_build_reply:
     mov     w3, #IP_DEFAULT_TTL
     strb    w3, [x19, #(ETH_PAYLOAD + IP_TTL)]
 
-    /* 4. IP TotalLength = 40 (0x0028 BE → 0x2800 LE halfword) */
-    mov     w3, #0x2800
-    strh    w3, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
-
     /* 5. Zero IP ID */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_ID)]
 
     /* 6. Zero IP flags/frag */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
-
-    /* 7. Recompute IP checksum */
-    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
-    add     x0, x19, #ETH_PAYLOAD
-    mov     w1, #IP_HDR_MIN
-    bl      ip_checksum
-    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
 
     /* 8. Swap TCP sport ↔ dport */
     ldrh    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
@@ -540,27 +533,96 @@ tcp_build_reply:
     str     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
     str     w21, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
 
-    /* 10. Data offset = 0x50 (5 words), flags */
-    mov     w3, #0x50
-    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* 10. Flags */
     strb    w22, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
     /* 11. Urgent = 0 (window already stored) */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_URGENT)]
 
-    /* 12. Compute TCP checksum */
+    /* Decide timestamps: x23 != 0 && TS_ENABLED != 0 */
+    cbz     x23, .Lbr_no_ts
+    ldrb    w3, [x23, #TCONN_TS_ENABLED]
+    cbz     w3, .Lbr_no_ts
+
+    /* --- Timestamps enabled path --- */
+
+    /* Data offset = 0x80 (8 words = 32 bytes) */
+    mov     w3, #0x80
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* IP TotalLength = 52 (0x0034 BE → 0x3400 LE) */
+    mov     w3, #0x3400
+    strh    w3, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Insert TSopt at TCP offset 20: NOP NOP Kind=8 Len=10 TSval TSecr */
+    mov     w3, #0x01
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]     /* NOP */
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]     /* NOP */
+    mov     w3, #TCP_OPT_TIMESTAMPS
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]     /* Kind=8 */
+    mov     w3, #TCP_OPT_TS_LEN
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]     /* Len=10 */
+
+    /* TSval = CNTPCT_EL0 >> 16, then rev to NBO */
+    mrs     x3, CNTPCT_EL0
+    lsr     x3, x3, #16
+    rev     w3, w3
+    str     w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]     /* TSval (NBO) */
+
+    /* TSecr = rev(TS_RECENT) to NBO */
+    ldr     w3, [x23, #TCONN_TS_RECENT]
+    rev     w3, w3
+    str     w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 28)]     /* TSecr (NBO) */
+
+    /* IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* TCP checksum over 32 bytes */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #32
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     w0, #TCP_TS_FRAME_LEN   /* 66 */
+    b       .Lbr_done
+
+.Lbr_no_ts:
+    /* --- No timestamps path --- */
+
+    /* Data offset = 0x50 (5 words = 20 bytes) */
+    mov     w3, #0x50
+    strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* IP TotalLength = 40 (0x0028 BE → 0x2800 LE) */
+    mov     w3, #0x2800
+    strh    w3, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* TCP checksum over 20 bytes */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x19
     mov     w1, #TCP_HDR_MIN
     bl      tcp_checksum
     strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
-    /* Return 54 */
-    mov     w0, #TCP_RST_FRAME_LEN
+    mov     w0, #TCP_RST_FRAME_LEN  /* 54 */
 
+.Lbr_done:
+    ldr     x23, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 /*
@@ -756,6 +818,7 @@ tcp_handle:
     /* w2 = ACK */
     mov     w3, #TCP_RST_ACK        /* flags */
     mov     w4, #0                  /* window */
+    mov     x5, #0                  /* no conn → no timestamps */
     bl      tcp_build_reply
     b       .Ltcp_done
 
@@ -766,6 +829,7 @@ tcp_handle:
     mov     w2, #0                  /* ACK = 0 */
     mov     w3, #TCP_RST            /* flags */
     mov     w4, #0                  /* window */
+    mov     x5, #0                  /* no conn → no timestamps */
     bl      tcp_build_reply
     b       .Ltcp_done
 
@@ -894,19 +958,21 @@ tcp_listen_syn_handler:
     mov     w3, #TCP_SYN_ACK
     /* Dynamic window from TCONN_RXLEN (just zeroed → window = TCP_RXBUF_SIZE) */
     ldrh    w4, [x21, #TCONN_RXLEN]
-    mov     w5, #TCP_RXBUF_SIZE
-    sub     w4, w5, w4
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
     rev16   w4, w4
     uxth    w4, w4
+    mov     x5, x21                 /* conn → timestamps if negotiated */
     bl      tcp_build_reply
+    mov     w22, w0                 /* save return value (54 or 66) */
 
     /* Save SYN-ACK to retransmit buffer */
     mov     x0, x21                 /* conn */
     mov     x1, x19                 /* frame */
-    mov     w2, #54                 /* frame_len */
+    mov     w2, w22                 /* frame_len */
     bl      tcp_rtx_save
 
-    mov     w0, #54                 /* restore return value */
+    mov     w0, w22                 /* restore return value */
 
 .Llsyn_done:
     ldp     x21, x22, [sp, #32]
@@ -1080,6 +1146,7 @@ tcp_estab_ack_handler:
     /* w1 = SEQ, w2 = ACK already set */
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
     /* w4 = window already set */
+    mov     x5, x19                 /* conn */
     bl      tcp_build_reply
 
     ldp     x21, x22, [sp, #32]
@@ -1103,8 +1170,8 @@ tcp_estab_ack_handler:
 
     mov     x0, x20                 /* frame */
     mov     w3, #TCP_ACK_FLAG
+    mov     x5, x19                 /* conn */
     bl      tcp_build_reply
-    /* Returns 54 */
 
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -1142,8 +1209,8 @@ tcp_estab_fin_handler:
 
     /* Dynamic window */
     ldrh    w4, [x21, #TCONN_RXLEN]
-    mov     w5, #TCP_RXBUF_SIZE
-    sub     w4, w5, w4
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
     rev16   w4, w4
     uxth    w4, w4
 
@@ -1152,6 +1219,7 @@ tcp_estab_fin_handler:
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
     /* w4 = window already set */
+    mov     x5, x21                 /* conn */
     bl      tcp_build_reply
 
     ldp     x21, x22, [sp, #32]
@@ -1173,16 +1241,25 @@ tcp_estab_fin_handler:
  * Does NOT update SND_NXT or change state — caller's responsibility.
  */
 tcp_build_frame:
-    stp     x29, x30, [sp, #-64]!
+    stp     x29, x30, [sp, #-80]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
+    str     x25, [sp, #64]
 
     mov     x19, x0                 /* x19 = conn */
     mov     x20, x1                 /* x20 = frame buf */
     mov     w21, w2                 /* w21 = flags */
     mov     x22, x3                 /* x22 = payload ptr */
     mov     w23, w4                 /* w23 = payload len */
+
+    /* Determine if timestamps enabled: w25 = 0 or 12 (TCP option size) */
+    ldrb    w25, [x19, #TCONN_TS_ENABLED]
+    cmp     w25, #0
+    mov     w25, #0                 /* default: no TS overhead */
+    b.eq    .Lbf_ts_decided
+    mov     w25, #TCP_TSOPT_SIZE    /* 12 bytes overhead */
+.Lbf_ts_decided:
 
     /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
     mov     x0, x20                 /* frame */
@@ -1196,8 +1273,9 @@ tcp_build_frame:
     strb    w0, [x20, #ETH_PAYLOAD]
     strb    wzr, [x20, #(ETH_PAYLOAD + 1)]
 
-    /* totlen = 40 + payload_len (NBO via rev16) */
+    /* totlen = 40 + ts_overhead + payload_len (NBO via rev16) */
     add     w0, w23, #40
+    add     w0, w0, w25
     rev16   w0, w0
     uxth    w0, w0
     strh    w0, [x20, #(ETH_PAYLOAD + IP_TOTLEN)]
@@ -1247,8 +1325,13 @@ tcp_build_frame:
     rev     w0, w0
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
 
-    /* data offset=0x50, flags */
+    /* data offset: 0x80 (32 bytes) if TS, 0x50 (20 bytes) if not */
+    cbnz    w25, .Lbf_ts_doff
     mov     w0, #0x50
+    b       .Lbf_doff_set
+.Lbf_ts_doff:
+    mov     w0, #0x80
+.Lbf_doff_set:
     strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
     strb    w21, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
@@ -1263,9 +1346,28 @@ tcp_build_frame:
     /* urgent = 0 */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_URGENT)]
 
+    /* Insert TSopt if enabled */
+    cbz     w25, .Lbf_no_tsopt
+    mov     w0, #0x01
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]     /* NOP */
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]     /* NOP */
+    mov     w0, #TCP_OPT_TIMESTAMPS
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]     /* Kind=8 */
+    mov     w0, #TCP_OPT_TS_LEN
+    strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]     /* Len=10 */
+    mrs     x0, CNTPCT_EL0
+    lsr     x0, x0, #16
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]     /* TSval (NBO) */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 28)]     /* TSecr (NBO) */
+.Lbf_no_tsopt:
+
     /* Copy payload if present */
     cbz     w23, .Lbf_no_payload
-    add     x0, x20, #54           /* dest = frame + 54 */
+    add     x0, x20, #54           /* dest = frame + 54 + ts_overhead */
+    add     x0, x0, x25
     mov     x1, x22                /* src = payload ptr */
     mov     w2, w23
 .Lbf_copy:
@@ -1275,28 +1377,31 @@ tcp_build_frame:
     b.ne    .Lbf_copy
 
 .Lbf_no_payload:
-    /* TCP checksum over 20 + payload_len bytes */
+    /* TCP checksum over (20 + ts_overhead + payload_len) bytes */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x20
     add     w1, w23, #TCP_HDR_MIN
+    add     w1, w1, w25
     bl      tcp_checksum
     strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
-    /* Return 54 + payload_len */
+    /* Return 54 + ts_overhead + payload_len */
     add     w0, w23, #54
+    add     w0, w0, w25
 
+    ldr     x25, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #64
+    ldp     x29, x30, [sp], #80
     ret
 
 /*
  * tcp_close — Initiate active close on a connection
  *
  * x0: connection pointer
- * x1: frame buffer (54 bytes written if successful)
- * Returns: w0 = 54 (FIN+ACK sent) or 0 (invalid state)
+ * x1: frame buffer (54 or 66 bytes written if successful)
+ * Returns: w0 = frame length (54 or 66) or 0 (invalid state)
  * Clobbers: x0-x6, x19-x25, x30
  *
  * Valid from ESTABLISHED → FIN_WAIT_1, or CLOSE_WAIT → LAST_ACK.
@@ -1331,11 +1436,12 @@ tcp_close:
     mov     x3, #0                  /* no payload */
     mov     w4, #0                  /* payload_len = 0 */
     bl      tcp_build_frame
+    mov     w22, w0                 /* save frame_len (54 or 66) */
 
     /* SND_NXT += 1 (FIN consumes one seq) */
-    ldr     w22, [x19, #TCONN_SND_NXT]
-    add     w22, w22, #1
-    str     w22, [x19, #TCONN_SND_NXT]
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    add     w0, w0, #1
+    str     w0, [x19, #TCONN_SND_NXT]
 
     /* State transition */
     cmp     w21, #TCPS_ESTABLISHED
@@ -1350,10 +1456,10 @@ tcp_close:
     /* Save FIN frame to retransmit buffer */
     mov     x0, x19                 /* conn */
     mov     x1, x20                 /* frame */
-    mov     w2, #54                 /* frame_len */
+    mov     w2, w22                 /* frame_len */
     bl      tcp_rtx_save
 
-    mov     w0, #54
+    mov     w0, w22                 /* return frame_len */
 
 .Ltc_done:
     ldp     x21, x22, [sp, #32]
@@ -1608,8 +1714,8 @@ tcp_finwait1_fin_handler:
 
     /* Dynamic window */
     ldrh    w4, [x21, #TCONN_RXLEN]
-    mov     w5, #TCP_RXBUF_SIZE
-    sub     w4, w5, w4
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
     rev16   w4, w4
     uxth    w4, w4
 
@@ -1618,6 +1724,7 @@ tcp_finwait1_fin_handler:
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG
     /* w4 = window already set */
+    mov     x5, x21                 /* conn */
     bl      tcp_build_reply
 
     ldp     x21, x22, [sp, #32]
@@ -1652,12 +1759,13 @@ tcp_finwait2_fin_handler:
     mov     w3, #TCP_ACK_FLAG
     /* Dynamic window */
     ldrh    w4, [x21, #TCONN_RXLEN]
-    mov     w5, #TCP_RXBUF_SIZE
-    sub     w4, w5, w4
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
     rev16   w4, w4
     uxth    w4, w4
+    mov     x5, x21                 /* conn */
     bl      tcp_build_reply
-    mov     w22, w0                 /* save return value (54) */
+    mov     w22, w0                 /* save return value (54 or 66) */
 
     /* Arm 2MSL timer (60 seconds) */
     mrs     x0, CNTFRQ_EL0
