@@ -19,6 +19,7 @@ FUZZ_ASM_OBJS = $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o $(BUI
 
 # Functional test kernel objects
 FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
+    $(BUILD)/test_tcp_func_hand.o \
     $(BUILD)/uart.o $(BUILD)/tcp.o $(BUILD)/ip.o $(BUILD)/eth.o \
     $(BUILD)/arp.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/net_cfg.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o $(BUILD)/ntp.o
@@ -190,6 +191,9 @@ $(BUILD)/test_func_main.o: tests/test_func_main.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_tcp_func.o: tests/test_tcp_func.S $(BUILD)/tcp_vectors.bin include/tcp.inc include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_tcp_func_hand.o: tests/test_tcp_func_hand.S include/tcp.inc include/net.inc include/timer.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/func_kernel8.elf: $(FUNC_TEST_OBJS) linker.ld
