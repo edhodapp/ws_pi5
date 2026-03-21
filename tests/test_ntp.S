@@ -40,6 +40,9 @@ test_ntp:
     bl      test_ntp_auth_build
     bl      test_ntp_auth_accept
     bl      test_ntp_auth_reject
+    bl      test_ntp_auth_short
+    bl      test_ntp_auth_keyid_mismatch
+    bl      test_ntp_auth_digest_half
     ldp     x29, x30, [sp], #16
     ret
 
@@ -833,6 +836,100 @@ test_ntp_auth_reject:
     ret
 
 /* ========================================================================
+ * 17. test_ntp_auth_short — auth configured, payload only 48 → rejected
+ * ======================================================================== */
+test_ntp_auth_short:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+    bl      tntp_set_auth
+
+    /* Pass only 48-byte payload (no key_id/digest appended) */
+    ldr     x0, =tntp_ntp_valid
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+
+    cbnz    w0, .Lfail_nas
+
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_SYNCED]
+    cbnz    w1, .Lfail_nas
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_nas
+    bl      test_pass
+    b       .Ldone_nas
+.Lfail_nas:
+    bl      tntp_clear_auth
+    ldr     x0, =name_nas
+    bl      test_fail
+.Ldone_nas:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 18. test_ntp_auth_keyid_mismatch — correct digest, wrong key_id → rejected
+ * ======================================================================== */
+test_ntp_auth_keyid_mismatch:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+    bl      tntp_set_auth
+
+    /* Payload has key_id=2 but we expect key_id=1 */
+    ldr     x0, =tntp_ntp_auth_wrongkid
+    mov     w1, #NTP_AUTH_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+
+    cbnz    w0, .Lfail_nakm
+
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_SYNCED]
+    cbnz    w1, .Lfail_nakm
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_nakm
+    bl      test_pass
+    b       .Ldone_nakm
+.Lfail_nakm:
+    bl      tntp_clear_auth
+    ldr     x0, =name_nakm
+    bl      test_fail
+.Ldone_nakm:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 19. test_ntp_auth_digest_half — first 8 bytes match, last 8 wrong → rejected
+ * ======================================================================== */
+test_ntp_auth_digest_half:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+    bl      tntp_set_auth
+
+    ldr     x0, =tntp_ntp_auth_badhalf
+    mov     w1, #NTP_AUTH_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+
+    cbnz    w0, .Lfail_nadh
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_nadh
+    bl      test_pass
+    b       .Ldone_nadh
+.Lfail_nadh:
+    bl      tntp_clear_auth
+    ldr     x0, =name_nadh
+    bl      test_fail
+.Ldone_nadh:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -979,6 +1076,9 @@ name_nhs16: .asciz "ntp_handle_stratum16"
 name_nab:   .asciz "ntp_auth_build"
 name_naa:   .asciz "ntp_auth_accept"
 name_nar:   .asciz "ntp_auth_reject"
+name_nas:   .asciz "ntp_auth_short"
+name_nakm:  .asciz "ntp_auth_keyid_mismatch"
+name_nadh:  .asciz "ntp_auth_digest_half"
 
 /* Auth key for tests: 16 × 'A' (0x41) */
 .balign 4
@@ -1009,6 +1109,28 @@ tntp_ntp_auth_valid:
     .byte   0x00, 0x00, 0x00, 0x01     /* key_id (BE) = 1 */
     .byte   0x09, 0x97, 0x4e, 0x02, 0x44, 0x9e, 0xca, 0xaf
     .byte   0x96, 0x37, 0x77, 0xe7, 0x08, 0xa6, 0x5d, 0xd8
+
+/* Same but with wrong key_id (2 instead of 1), correct digest */
+.balign 4
+tntp_ntp_auth_wrongkid:
+    .byte   0x24, 0x01, 0x06, 0xEC
+    .space  36
+    .byte   0x83, 0xB9, 0xC0, 0xC0
+    .byte   0x00, 0x00, 0x00, 0x00
+    .byte   0x00, 0x00, 0x00, 0x02     /* key_id (BE) = 2 (mismatch) */
+    .byte   0x09, 0x97, 0x4e, 0x02, 0x44, 0x9e, 0xca, 0xaf
+    .byte   0x96, 0x37, 0x77, 0xe7, 0x08, 0xa6, 0x5d, 0xd8
+
+/* First 8 bytes of digest correct, last 8 wrong (byte 15 flipped) */
+.balign 4
+tntp_ntp_auth_badhalf:
+    .byte   0x24, 0x01, 0x06, 0xEC
+    .space  36
+    .byte   0x83, 0xB9, 0xC0, 0xC0
+    .byte   0x00, 0x00, 0x00, 0x00
+    .byte   0x00, 0x00, 0x00, 0x01     /* key_id (BE) = 1 (correct) */
+    .byte   0x09, 0x97, 0x4e, 0x02, 0x44, 0x9e, 0xca, 0xaf
+    .byte   0x96, 0x37, 0x77, 0xe7, 0x08, 0xa6, 0x5d, 0x27  /* byte 15: 0xd8→0x27 */
 
 /* Same but with wrong digest (all zeros) */
 .balign 4
