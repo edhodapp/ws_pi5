@@ -387,13 +387,13 @@ The current 1-segment-in-flight design delivers a 200 KB page in 6.8 seconds at 
 | Rxbuf | 2 KB | 2 KB (unchanged) |
 | Memory | ~68 KB | ~32.5 MB (~3.2% of Pi 3 RAM) |
 
-Implementation:
-1. WSCALE negotiation in SYN-ACK
-2. Circular send buffer (replaces single-frame retransmit)
-3. Multi-segment send loop
-4. Sliding window ACK processing
-5. SACK (selective acknowledgment)
-6. RFC 6298 RTO (SRTT/RTTVAR measurement)
+All implemented:
+1. WSCALE negotiation in SYN-ACK (parse peer shift, apply to SND_WND)
+2. Circular send buffer — 256 KB per connection, 32 MB pool
+3. Multi-segment send — in-flight window check replaces 1-segment gate
+4. Sliding window ACK processing — frees send buffer space
+5. SACK (RFC 2018) — parse blocks, SACK-aware fast retransmit
+6. RFC 6298 RTO — SRTT/RTTVAR measurement with Karn's algorithm
 
 #### After TCP: HTTP
 
