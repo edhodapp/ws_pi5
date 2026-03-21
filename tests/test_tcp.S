@@ -241,6 +241,10 @@ test_tcp:
     bl      test_tcp_tw_fin_no_timer
     bl      test_tcp_tw_fin_no_pool
     bl      test_tcp_tw_fin_arm_no_pool
+    bl      test_tcp_ooo_outside_window
+    bl      test_tcp_badack_state_rollback
+    bl      test_tcp_rtx_resets_dupack
+    bl      test_tcp_reaper_synrcvd_60s
     ldp     x29, x30, [sp], #16
     ret
 
@@ -11668,6 +11672,202 @@ test_tcp_tw_fin_arm_no_pool:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_ooo_outside_window — OOO segment with SEQ beyond RCV_WND → dup ACK
+ * ======================================================================== */
+.global test_tcp_ooo_outside_window
+test_tcp_ooo_outside_window:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_oow
+    mov     x19, x0
+
+    /* Set RXLEN = 2000, so RCV_WND = 2048 - 2000 = 48 */
+    mov     w0, #2000
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    /* Build data frame with SEQ = RCV_NXT + 100 (gap=100 > window=48) */
+    ldr     w3, [x19, #TCONN_RCV_NXT]
+    add     w3, w3, #100            /* SEQ = RCV_NXT + 100 */
+    ldr     w4, [x19, #TCONN_SND_NXT]
+    ldr     x0, =tcp_test_buf
+    mov     w1, #5                  /* 5 bytes payload */
+    mov     w2, #0x41               /* fill = 'A' */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Should return > 0 (dup ACK reply) */
+    cmp     w0, #0
+    b.le    .Lfail_tcp_oow
+
+    /* OOO_COUNT should be 0 (not buffered due to window check) */
+    ldrb    w0, [x19, #TCONN_OOO_COUNT]
+    cbnz    w0, .Lfail_tcp_oow
+
+    ldr     x0, =name_tcp_oow
+    bl      test_pass
+    b       .Ldone_tcp_oow
+.Lfail_tcp_oow:
+    ldr     x0, =name_tcp_oow
+    bl      test_fail
+.Ldone_tcp_oow:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_badack_state_rollback — handler fail restores original state
+ * ======================================================================== */
+.global test_tcp_badack_state_rollback
+test_tcp_badack_state_rollback:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* SYN → SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #58
+    b.lt    .Lfail_tcp_bsr
+
+    /* Find the SYN_RCVD connection */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE  /* slot 1 */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.ne    .Lfail_tcp_bsr
+
+    /* Send bad ACK (ACK=0xDEADBEEF) → handler returns -1 */
+    ldr     x0, =tcp_bad_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* State should be rolled back to SYN_RCVD (not ESTABLISHED or CLOSED) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.ne    .Lfail_tcp_bsr
+
+    ldr     x0, =name_tcp_bsr
+    bl      test_pass
+    b       .Ldone_tcp_bsr
+.Lfail_tcp_bsr:
+    ldr     x0, =name_tcp_bsr
+    bl      test_fail
+.Ldone_tcp_bsr:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_rtx_resets_dupack — RTO callback resets DUP_ACK_CNT
+ * ======================================================================== */
+.global test_tcp_rtx_resets_dupack
+test_tcp_rtx_resets_dupack:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rrd
+    mov     x19, x0
+
+    /* Set DUP_ACK_CNT to 2 */
+    mov     w0, #2
+    strb    w0, [x19, #TCONN_DUP_ACK_CNT]
+
+    /* Set up for retransmit: need RTXLEN > 0, RTXCOUNT < max */
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+    strb    wzr, [x19, #TCONN_RTXCOUNT]
+
+    /* Install NULL send fn (skip actual send) */
+    ldr     x0, =tcp_send_ctx
+    str     xzr, [x0, #TSCTX_SEND_FN]
+
+    /* Call retransmit callback */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* DUP_ACK_CNT should be 0 */
+    ldrb    w0, [x19, #TCONN_DUP_ACK_CNT]
+    cbnz    w0, .Lfail_tcp_rrd
+
+    ldr     x0, =name_tcp_rrd
+    bl      test_pass
+    b       .Ldone_tcp_rrd
+.Lfail_tcp_rrd:
+    ldr     x0, =name_tcp_rrd
+    bl      test_fail
+.Ldone_tcp_rrd:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_reaper_synrcvd_60s — SYN_RCVD reaped at 60s, not 120s
+ * ======================================================================== */
+.global test_tcp_reaper_synrcvd_60s
+test_tcp_reaper_synrcvd_60s:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0                 /* x22 = freq */
+
+    /* Pre-seed slot 0 as SYN_RCVD with last_active = now - 61s */
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_SYN_RCVD
+    strb    w0, [x19, #TCONN_STATE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    bl      timer_now
+    mov     x1, #61
+    mul     x1, x22, x1
+    sub     x21, x0, x1            /* last_active = now - 61*freq */
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+
+    /* Fire reaper — should close (61 > 60s SYN_RCVD timeout) */
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rs60
+
+    ldr     x0, =name_tcp_rs60
+    bl      test_pass
+    b       .Ldone_tcp_rs60
+.Lfail_tcp_rs60:
+    ldr     x0, =name_tcp_rs60
+    bl      test_fail
+.Ldone_tcp_rs60:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -12316,6 +12516,10 @@ name_tcp_twfr:      .asciz "tcp_timewait_fin_reack"
 name_tcp_twnt:      .asciz "tcp_tw_fin_no_timer"
 name_tcp_twnp:      .asciz "tcp_tw_fin_no_pool"
 name_tcp_twap:      .asciz "tcp_tw_fin_arm_no_pool"
+name_tcp_oow:       .asciz "tcp_ooo_outside_window"
+name_tcp_bsr:       .asciz "tcp_badack_state_rollback"
+name_tcp_rrd:       .asciz "tcp_rtx_resets_dupack"
+name_tcp_rs60:      .asciz "tcp_reaper_synrcvd_60s"
 
 tcp_send_payload:
     .ascii  "World"

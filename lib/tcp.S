@@ -518,6 +518,7 @@ tcp_retransmit_cb:
     csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
     strh    w0, [x19, #TCONN_SSTHRESH]
     strh    w1, [x19, #TCONN_CWND]  /* restart slow start */
+    strb    wzr, [x19, #TCONN_DUP_ACK_CNT] /* reset dup ACK count */
 
     /* Load send context */
     ldr     x20, =tcp_send_ctx
@@ -899,7 +900,7 @@ tcp_handle:
     cbz     x16, .Ltcp_no_conn     /* no handler → RST */
     ldr     w3, [x1, #TRANS_NEXT]
 
-    /* Write next_state before calling handler */
+    /* Write next_state (rollback if handler fails) */
     strb    w3, [x23, #TCONN_STATE]
 
     /* handler(conn, frame, section_len, header_len) */
@@ -910,7 +911,13 @@ tcp_handle:
     blr     x16
 
     cmn     w0, #1
-    b.eq    .Ltcp_no_conn
+    b.ne    .Ltcp_handler_ok
+
+    /* Handler failed: rollback state, then generate RST */
+    strb    w20, [x23, #TCONN_STATE]
+    b       .Ltcp_no_conn
+
+.Ltcp_handler_ok:
 
     /* Update activity timestamp after successful handler */
     mov     w24, w0                 /* save handler return value */
@@ -1311,7 +1318,7 @@ tcp_estab_ack_handler:
     rev     w0, w0                  /* TSval NBO → host order */
     ldr     w2, [x19, #TCONN_TS_RECENT]
     sub     w3, w0, w2              /* signed diff */
-    tbnz    w3, #31, .Leak_pure_ack /* TSval < TS_RECENT → drop */
+    tbnz    w3, #31, .Leak_paws_drop /* TSval < TS_RECENT → PAWS drop */
     str     w0, [x19, #TCONN_TS_RECENT] /* update TS_RECENT */
 .Leak_paws_done:
 
@@ -1327,12 +1334,20 @@ tcp_estab_ack_handler:
     b.lo    .Leak_dup_data          /* SEQ < RCV_NXT → duplicate, re-ACK */
 
     /* SEQ > RCV_NXT → out-of-order segment, try to buffer */
+
+    /* Window check: (SEQ - RCV_NXT) must be < RCV_WND (RFC 9293 §3.3.7) */
+    sub     w8, w5, w6              /* gap = SEQ - RCV_NXT (unsigned) */
+    ldrh    w9, [x19, #TCONN_RXLEN]
+    mov     w10, #TCP_RXBUF_SIZE
+    sub     w10, w10, w9            /* RCV_WND = RXBUF_SIZE - RXLEN */
+    cmp     w8, w10
+    b.hs    .Leak_dup_data          /* outside window → dup ACK */
+
     ldrb    w7, [x19, #TCONN_OOO_COUNT]
     cmp     w7, #4
     b.hs    .Leak_dup_data          /* OOO slots full → dup ACK */
 
     /* Check rx buffer room: RXLEN + gap + data_len <= RXBUF_SIZE */
-    sub     w8, w5, w6              /* gap = SEQ - RCV_NXT */
     ldrh    w9, [x19, #TCONN_RXLEN]
     add     w10, w9, w8
     add     w10, w10, w4            /* end offset = RXLEN + gap + data_len */
@@ -1469,8 +1484,10 @@ tcp_estab_ack_handler:
     ldp     x29, x30, [sp], #48
     ret
 
+.Leak_paws_drop:
+    /* PAWS failed: send ACK per RFC 7323 §4.2 but do not process segment */
 .Leak_dup_data:
-    /* Duplicate data: build ACK with current RCV_NXT (re-ACK for peer) */
+    /* Duplicate/PAWS-failed: build ACK with current RCV_NXT */
     ldr     w0, [x19, #TCONN_SND_NXT]
     rev     w1, w0                      /* SEQ NBO */
     ldr     w0, [x19, #TCONN_RCV_NXT]
@@ -2436,9 +2453,9 @@ tcp_isn:
     /* Fold 64→32 */
     eor     x4, x4, x4, lsr #32
 
-    /* Add time component (coarse: shift right 6) */
+    /* Add time component (~4ms granularity at 19.2 MHz: shift right 2) */
     mrs     x5, CNTPCT_EL0
-    lsr     x5, x5, #6
+    lsr     x5, x5, #2
     add     w0, w4, w5
     ret
 
@@ -2556,7 +2573,7 @@ tcp_idle_reaper_cb:
     cmp     w0, #TCPS_ESTABLISHED
     b.eq    .Lreap_estab
     cmp     w0, #TCPS_SYN_RCVD
-    b.eq    .Lreap_estab
+    b.eq    .Lreap_synrcvd
     cmp     w0, #TCPS_FIN_WAIT_1
     b.eq    .Lreap_finwait
     cmp     w0, #TCPS_FIN_WAIT_2
@@ -2565,6 +2582,9 @@ tcp_idle_reaper_cb:
     mov     x2, #TCP_IDLE_CLOSEWAIT
     b       .Lreap_check
 
+.Lreap_synrcvd:
+    mov     x2, #TCP_IDLE_SYNRCVD
+    b       .Lreap_check
 .Lreap_estab:
     mov     x2, #TCP_IDLE_ESTAB
     b       .Lreap_check

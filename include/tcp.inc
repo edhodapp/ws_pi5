@@ -128,6 +128,7 @@
 .equ TCP_DUPACK_THRESH,    3       /* trigger fast retransmit at 3 dup ACKs */
 
 /* Idle connection reaper */
+.equ TCP_IDLE_SYNRCVD,     60      /* seconds — SYN_RCVD idle timeout */
 .equ TCP_IDLE_ESTAB,       120     /* seconds — ESTABLISHED idle timeout */
 .equ TCP_IDLE_FINWAIT2,    60      /* seconds — FIN_WAIT_2 idle timeout */
 .equ TCP_IDLE_CLOSEWAIT,   60      /* seconds — CLOSE_WAIT idle timeout */
