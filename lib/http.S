@@ -212,7 +212,8 @@ http_poll:
     sub     w2, w1, w22                 /* hdr_remaining */
     cmp     w24, w2
     csel    w24, w24, w2, lo
-    cbz     w0, .Lhp_next              /* status byte was 0 = 200 */
+
+    /* Select header source based on status */
     ldrb    w0, [x20, #HCONN_STATUS]
     cbnz    w0, .Lhp_hdr_404
 

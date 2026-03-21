@@ -26,6 +26,8 @@ extern void timer_pool_init(void *pool, int capacity);
 extern void tcp_set_timer_pool(void *pool);
 extern void ip_reasm_init(void);
 extern void ip_reasm_set_timer_pool(void *pool);
+extern void http_init(void);
+extern void http_poll(void);
 
 /* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
    under QEMU user mode, so provide a simple counter instead. */
@@ -73,6 +75,7 @@ int main(void)
     tcp_set_timer_pool(timer_pool);
     ip_reasm_init();
     ip_reasm_set_timer_pool(timer_pool);
+    http_init();
 
     int total = read(0, input, sizeof(input));
     if (total <= 0)
@@ -110,6 +113,7 @@ int main(void)
             buf[i] = input[off + i];
 
         net_recv_one(buf, (int)flen);
+        http_poll();    /* check for HTTP requests after each frame */
         off += flen;
         nframes++;
     }
