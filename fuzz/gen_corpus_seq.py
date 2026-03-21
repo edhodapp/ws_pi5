@@ -217,7 +217,7 @@ def main():
         syn, handshake_ack, data_frame, rst_estab])
 
     # 10. tcp_bad_seq_data.bin — Handshake + data with future SEQ (> RCV_NXT)
-    #     Exercises out-of-order drop path in estab_ack_handler
+    #     Exercises OOO buffering + dup ACK path in estab_ack_handler
     bad_seq_frame = build_frame(PEER_PORT, LISTEN_PORT,
                                 seq=peer_seq + 1 + 999, ack_num=SERVER_ISN + 1,
                                 flags=PSH | ACK, window=65535,
@@ -280,6 +280,22 @@ def main():
                             flags=ACK, window=65535,
                             tsval=1001, tsecr=0)
     seeds['tcp_ts_handshake.bin'] = pack_sequence([syn_ts, ack_ts])
+
+    # 15. tcp_ooo_merge.bin — Handshake + out-of-order segment + gap fill
+    #     Exercises OOO buffering then in-order merge in estab_ack_handler
+    #     After handshake: RCV_NXT = peer_seq+1 = 2
+    #     Send seg at SEQ=7 (gap of 5) → OOO buffered, dup ACK
+    #     Send seg at SEQ=2 (fills gap) → accepted, OOO merge advances RCV_NXT
+    ooo_seg = build_frame(PEER_PORT, LISTEN_PORT,
+                          seq=peer_seq + 1 + 5, ack_num=SERVER_ISN + 1,
+                          flags=PSH | ACK, window=65535,
+                          payload=b'World')
+    gap_fill = build_frame(PEER_PORT, LISTEN_PORT,
+                           seq=peer_seq + 1, ack_num=SERVER_ISN + 1,
+                           flags=PSH | ACK, window=65535,
+                           payload=b'Hello')
+    seeds['tcp_ooo_merge.bin'] = pack_sequence([
+        syn, handshake_ack, ooo_seg, gap_fill])
 
     for name, data in seeds.items():
         path = os.path.join(outdir, name)

@@ -108,7 +108,7 @@ def main():
     icmp_payload_raw = icmp_payload_raw[:2] + struct.pack('!H', icmp_cksum) + icmp_payload_raw[4:]
     seeds['ip_wrong_dst.bin'] = build_ip_frame(1, PEER_IP, wrong_dst, icmp_payload_raw)
 
-    # 6. IPv4 with proto=UDP (17) — rejected at proto check
+    # 6. IPv4 with proto=UDP (17) — dispatched to udp_handle, dropped (port 0)
     udp_payload = b'\x00' * 8  # dummy
     seeds['ip_udp.bin'] = build_ip_frame(17, PEER_IP, OUR_IP, udp_payload)
 
@@ -127,6 +127,40 @@ def main():
     # 10. TCP SYN to port 12345 — no LISTEN match → RST
     seeds['tcp_syn_wrong_port.bin'] = build_tcp_frame(
         sport=54321, dport=12345, seq=1, ack_num=0, flags=0x02, window=65535)
+
+    # 11. NTP client request to port 123 — exercises udp_handle → ntp_handle
+    ntp_payload = struct.pack('!BBBbIII', 0x24, 0, 0, 0, 0, 0, 0)  # flags=0x24 (server mode 4)
+    ntp_payload += b'\x00' * (48 - len(ntp_payload))  # pad to 48 bytes
+    udp_hdr = struct.pack('!HHHH', 12345, 123, 8 + 48, 0)  # sport, dport, length, cksum=0
+    seeds['ntp_response.bin'] = build_ip_frame(17, PEER_IP, OUR_IP, udp_hdr + ntp_payload)
+
+    # 12. IP fragment (first fragment, MF set) — exercises ip_reasm_input
+    #     IP flags_frag = 0x2000 (MF=1, offset=0)
+    icmp_frag = struct.pack('!BBH HH', 8, 0, 0, 1, 1)  # ICMP echo header
+    icmp_frag += b'\x41' * 16  # partial payload
+    ip_total = 20 + len(icmp_frag)
+    ip_hdr = struct.pack('!BBHHHBBH4s4s',
+        0x45, 0x00, ip_total,
+        0xABCD, 0x2000,       # ID=0xABCD, MF=1, offset=0
+        64, 1, 0,             # TTL, proto=ICMP, checksum placeholder
+        PEER_IP, OUR_IP)
+    frag_cksum = ip_checksum(ip_hdr)
+    ip_hdr = ip_hdr[:10] + struct.pack('!H', frag_cksum) + ip_hdr[12:]
+    eth = OUR_MAC + PEER_MAC + struct.pack('!H', 0x0800)
+    seeds['ip_fragment.bin'] = eth + ip_hdr + icmp_frag
+
+    # 13. TCP SYN with MSS option (Kind=2, Len=4, Value=1460)
+    #     Exercises tcp_parse_mss in tcp_listen_syn_handler
+    tcp_mss = struct.pack('!HHIIBBHHH',
+        12345, 80,
+        1, 0,
+        0x60, 0x02,           # data offset = 6 words (24 bytes), SYN flag
+        65535,
+        0, 0)
+    tcp_mss += struct.pack('!BBH', 2, 4, 1460)  # MSS option
+    cksum = tcp_checksum(PEER_IP, OUR_IP, tcp_mss)
+    tcp_mss = tcp_mss[:16] + struct.pack('!H', cksum) + tcp_mss[18:]
+    seeds['tcp_syn_mss.bin'] = build_ip_frame(6, PEER_IP, OUR_IP, tcp_mss)
 
     for name, data in seeds.items():
         path = os.path.join(outdir, name)

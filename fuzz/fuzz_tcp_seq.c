@@ -24,6 +24,8 @@ extern int tcp_close(void *conn, void *frame);
 extern char tcp_conn_table[];
 extern void timer_pool_init(void *pool, int capacity);
 extern void tcp_set_timer_pool(void *pool);
+extern void ip_reasm_init(void);
+extern void ip_reasm_set_timer_pool(void *pool);
 
 /* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
    under QEMU user mode, so provide a simple counter instead. */
@@ -69,6 +71,8 @@ int main(void)
     tcp_listen(80);
     timer_pool_init(timer_pool, 16);
     tcp_set_timer_pool(timer_pool);
+    ip_reasm_init();
+    ip_reasm_set_timer_pool(timer_pool);
 
     int total = read(0, input, sizeof(input));
     if (total <= 0)
