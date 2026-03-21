@@ -357,6 +357,13 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
             return r[:5] + (PRE_RCV_NXT, 0, PRE_SND_UNA)
         return r
 
+    # 5b. RST SEQ validation (RFC 5961) — for connected states
+    if evt == 0 and port_match == 'exact':
+        rcv_wnd = 2048  # TCP_RXBUF_SIZE - RXLEN (RXLEN=0 in pre-seeded state)
+        delta = (tcp_seq_host - PRE_RCV_NXT) & 0xFFFFFFFF
+        if delta >= rcv_wnd:
+            return (0, state_code, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
+
     # 6. FSA table lookup
     entry = FSA_TABLE.get(lookup_state, {}).get(evt)
     if entry is None:
