@@ -39,6 +39,13 @@ test_ntp:
     bl      test_ntp_auth_short
     bl      test_ntp_auth_keyid_mismatch
     bl      test_ntp_auth_digest_half
+    bl      test_ntp_handle_li3
+    bl      test_ntp_handle_bad_version
+    bl      test_ntp_handle_high_disp
+    bl      test_ntp_handle_zero_ts
+    bl      test_ntp_handle_backward
+    bl      test_ntp_time_stale
+    bl      test_ntp_poll_backoff
     ldp     x29, x30, [sp], #16
     ret
 
@@ -820,6 +827,291 @@ test_ntp_auth_digest_half:
     ret
 
 /* ========================================================================
+ * test_ntp_handle_li3 — LI=3 (unsync) → rejected
+ * ======================================================================== */
+test_ntp_handle_li3:
+    stp     x29, x30, [sp, #-16]!
+    bl      tntp_reset_state
+
+    /* Copy valid template to buf, set LI=3: flags = 0xE4 (11_100_100) */
+    ldr     x0, =tntp_ntp_valid
+    ldr     x1, =tntp_ntp_buf
+    bl      tntp_copy48
+    mov     w0, #0xE4               /* LI=3, VN=4, Mode=4 */
+    ldr     x1, =tntp_ntp_buf
+    strb    w0, [x1, #NTP_FLAGS]
+
+    ldr     x0, =tntp_ntp_buf
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+    cbnz    w0, .Lfail_nli3
+
+    ldr     x0, =name_nli3
+    bl      test_pass
+    b       .Ldone_nli3
+.Lfail_nli3:
+    ldr     x0, =name_nli3
+    bl      test_fail
+.Ldone_nli3:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_handle_bad_version — version=5 → rejected
+ * ======================================================================== */
+test_ntp_handle_bad_version:
+    stp     x29, x30, [sp, #-16]!
+    bl      tntp_reset_state
+
+    /* flags = 0x2C: LI=0, VN=5(101), Mode=4(100) */
+    ldr     x0, =tntp_ntp_valid
+    ldr     x1, =tntp_ntp_buf
+    bl      tntp_copy48
+    mov     w0, #0x2C
+    ldr     x1, =tntp_ntp_buf
+    strb    w0, [x1, #NTP_FLAGS]
+
+    ldr     x0, =tntp_ntp_buf
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+    cbnz    w0, .Lfail_nbv
+
+    ldr     x0, =name_nbv
+    bl      test_pass
+    b       .Ldone_nbv
+.Lfail_nbv:
+    ldr     x0, =name_nbv
+    bl      test_fail
+.Ldone_nbv:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_handle_high_disp — root dispersion > 1s → rejected
+ * ======================================================================== */
+test_ntp_handle_high_disp:
+    stp     x29, x30, [sp, #-16]!
+    bl      tntp_reset_state
+
+    ldr     x0, =tntp_ntp_valid
+    ldr     x1, =tntp_ntp_buf
+    bl      tntp_copy48
+
+    /* Set root dispersion at offset 8 to 2.0 (0x00020000 BE) */
+    ldr     x1, =tntp_ntp_buf
+    mov     w0, #0x00
+    strb    w0, [x1, #8]
+    mov     w0, #0x02
+    strb    w0, [x1, #9]
+    strb    wzr, [x1, #10]
+    strb    wzr, [x1, #11]
+
+    ldr     x0, =tntp_ntp_buf
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+    cbnz    w0, .Lfail_nhd
+
+    ldr     x0, =name_nhd
+    bl      test_pass
+    b       .Ldone_nhd
+.Lfail_nhd:
+    ldr     x0, =name_nhd
+    bl      test_fail
+.Ldone_nhd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_handle_zero_ts — TX timestamp = 0 → rejected
+ * ======================================================================== */
+test_ntp_handle_zero_ts:
+    stp     x29, x30, [sp, #-16]!
+    bl      tntp_reset_state
+
+    ldr     x0, =tntp_ntp_valid
+    ldr     x1, =tntp_ntp_buf
+    bl      tntp_copy48
+
+    /* Zero out TX timestamp at offset 40 */
+    ldr     x1, =tntp_ntp_buf
+    str     wzr, [x1, #NTP_TX_TS]
+
+    ldr     x0, =tntp_ntp_buf
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+    cbnz    w0, .Lfail_nzt
+
+    ldr     x0, =name_nzt
+    bl      test_pass
+    b       .Ldone_nzt
+.Lfail_nzt:
+    ldr     x0, =name_nzt
+    bl      test_fail
+.Ldone_nzt:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_handle_backward — new time < current sync → rejected
+ * ======================================================================== */
+test_ntp_handle_backward:
+    stp     x29, x30, [sp, #-16]!
+
+    /* First: sync with a high timestamp (Unix seconds = 1000000) */
+    bl      tntp_reset_state
+    ldr     x0, =tntp_ntp_valid
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+    cmp     w0, #1
+    b.ne    .Lfail_nbk
+
+    /* Now try to sync with an earlier timestamp.
+     * Build a response with TX_TS = NTP_OFFSET + 500000 (< 1000000) */
+    ldr     x0, =tntp_ntp_valid
+    ldr     x1, =tntp_ntp_buf
+    bl      tntp_copy48
+
+    /* TX_TS for Unix=500000: 500000 + 0x83AA7E80 = 0x83B21700 (BE) */
+    ldr     x1, =tntp_ntp_buf
+    mov     w0, #0x83
+    strb    w0, [x1, #40]
+    mov     w0, #0xB2
+    strb    w0, [x1, #41]
+    mov     w0, #0x17
+    strb    w0, [x1, #42]
+    strb    wzr, [x1, #43]
+
+    ldr     x0, =tntp_ntp_buf
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #6000
+    bl      ntp_handle
+
+    /* Should be rejected (backward jump) */
+    cbnz    w0, .Lfail_nbk
+
+    /* Verify sync_secs unchanged (still 1000000) */
+    ldr     x0, =ntp_state
+    ldr     x1, [x0, #NTPS_SYNC_SECS]
+    ldr     x2, =1000000
+    cmp     x1, x2
+    b.ne    .Lfail_nbk
+
+    ldr     x0, =name_nbk
+    bl      test_pass
+    b       .Ldone_nbk
+.Lfail_nbk:
+    ldr     x0, =name_nbk
+    bl      test_fail
+.Ldone_nbk:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_time_stale — elapsed > 1800s → returns 0
+ * ======================================================================== */
+test_ntp_time_stale:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Set up synced state with known values */
+    ldr     x0, =ntp_state
+    ldr     x1, =1000000
+    str     x1, [x0, #NTPS_SYNC_SECS]
+    mov     x1, #1000
+    str     x1, [x0, #NTPS_SYNC_TICKS]
+    mov     x1, #1                      /* 1 tick per second for easy math */
+    str     x1, [x0, #NTPS_TIMER_FREQ]
+    mov     w1, #1
+    str     w1, [x0, #NTPS_SYNCED]
+
+    /* Call ntp_time with current_ticks = 1000 + 1801 = 2801 */
+    mov     x0, #2801
+    bl      ntp_time
+
+    /* Should return 0 (stale) */
+    cbnz    x0, .Lfail_ntst
+
+    ldr     x0, =name_ntst
+    bl      test_pass
+    b       .Ldone_ntst
+.Lfail_ntst:
+    ldr     x0, =name_ntst
+    bl      test_fail
+.Ldone_ntst:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ntp_poll_backoff — poll_shift increments in timer_cb re-arm
+ * ======================================================================== */
+test_ntp_poll_backoff:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* Reset state: poll_shift = 0, freq = 1 */
+    ldr     x0, =ntp_state
+    stp     xzr, xzr, [x0]
+    stp     xzr, xzr, [x0, #16]
+    mov     x1, #1
+    str     x1, [x0, #NTPS_TIMER_FREQ]
+
+    /* Ensure gateway MAC is not valid (skip send path) */
+    ldr     x0, =net_gw_mac_valid
+    str     wzr, [x0]
+
+    /* Set up send_ctx with NULL pool → skip timer_set */
+    ldr     x19, =ntp_send_ctx
+    str     xzr, [x19, #NTPC_DWC2_BASE]
+    str     xzr, [x19, #NTPC_ECM_STATE]
+    str     xzr, [x19, #NTPC_TX_BUF]
+    str     xzr, [x19, #NTPC_TIMER_POOL]
+    str     xzr, [x19, #NTPC_SEND_FN]
+
+    /* Call timer_cb */
+    ldr     x0, =ntp_send_ctx
+    bl      ntp_timer_cb
+
+    /* poll_shift should now be 1 (incremented from 0) */
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_POLL_SHIFT]
+    cmp     w1, #1
+    b.ne    .Lfail_npb
+
+    /* Call again — shift should be 2 */
+    ldr     x0, =ntp_send_ctx
+    bl      ntp_timer_cb
+
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_POLL_SHIFT]
+    cmp     w1, #2
+    b.ne    .Lfail_npb
+
+    ldr     x0, =name_npb
+    bl      test_pass
+    b       .Ldone_npb
+.Lfail_npb:
+    ldr     x0, =name_npb
+    bl      test_fail
+.Ldone_npb:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* === Helper: copy 48 bytes from x0 to x1 === */
+tntp_copy48:
+    ldp     x2, x3, [x0]
+    stp     x2, x3, [x1]
+    ldp     x2, x3, [x0, #16]
+    stp     x2, x3, [x1, #16]
+    ldp     x2, x3, [x0, #32]
+    stp     x2, x3, [x1, #32]
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -928,6 +1220,13 @@ name_und:   .asciz "udp_ntp_dispatch"
 name_ntcng: .asciz "ntp_timer_cb_no_gw"
 name_ntcs:  .asciz "ntp_timer_cb_send"
 name_nhs16: .asciz "ntp_handle_stratum16"
+name_nli3:  .asciz "ntp_handle_li3"
+name_nbv:   .asciz "ntp_handle_bad_version"
+name_nhd:   .asciz "ntp_handle_high_disp"
+name_nzt:   .asciz "ntp_handle_zero_ts"
+name_nbk:   .asciz "ntp_handle_backward"
+name_ntst:  .asciz "ntp_time_stale"
+name_npb:   .asciz "ntp_poll_backoff"
 name_nab:   .asciz "ntp_auth_build"
 name_naa:   .asciz "ntp_auth_accept"
 name_nar:   .asciz "ntp_auth_reject"
@@ -1004,6 +1303,10 @@ tntp_ntp_auth_bad:
 .balign 16
 tntp_frame_buf:
     .space  90
+
+.balign 4
+tntp_ntp_buf:
+    .space  48
 
 .balign 4
 tntp_udp_ntp_buf:

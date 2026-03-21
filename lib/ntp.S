@@ -231,8 +231,20 @@ ntp_handle:
     cmp     w20, #NTP_PKT_LEN
     b.lt    .Lntp_ignore
 
-    /* Validate mode == 4 (server): flags & 0x07 */
+    /* Validate flags byte: LI(bits 7:6), VN(bits 5:3), Mode(bits 2:0) */
     ldrb    w3, [x19, #NTP_FLAGS]
+
+    /* Reject LI=3 (clock not synchronized, RFC 5905 §7.3) */
+    lsr     w4, w3, #6
+    cmp     w4, #3
+    b.eq    .Lntp_ignore
+
+    /* Reject version > 4 (RFC 5905 §7.3) */
+    ubfx    w4, w3, #3, #3         /* extract bits 5:3 = version */
+    cmp     w4, #4
+    b.hi    .Lntp_ignore
+
+    /* Validate mode == 4 (server) */
     and     w3, w3, #0x07
     cmp     w3, #NTP_SERVER_MODE
     b.ne    .Lntp_ignore
@@ -244,6 +256,15 @@ ntp_handle:
     /* Reject stratum > 15 (invalid per RFC 5905) */
     cmp     w3, #16
     b.hs    .Lntp_ignore
+
+    /* Reject root dispersion > 1 second (RFC 5905 §8.2.1)
+     * Root dispersion is at offset 8, 4 bytes big-endian, fixed-point 16.16.
+     * 1.0 seconds = 0x00010000. */
+    ldr     w3, [x19, #NTP_ROOT_DISP]
+    rev     w3, w3
+    ldr     w4, =0x00010000
+    cmp     w3, w4
+    b.hi    .Lntp_ignore
 
     /* Auth verification if configured */
     ldr     x0, =ntp_auth_key_id
@@ -293,19 +314,32 @@ ntp_handle:
     ldr     w3, [x19, #NTP_TX_TS]
     rev     w3, w3                  /* big-endian → host order */
 
+    /* Reject zero timestamp */
+    cbz     w3, .Lntp_ignore
+
     /* Convert NTP epoch → Unix epoch: subtract 0x83AA7E80 */
     mov     w4, #NTP_UNIX_OFFSET_LO
     movk    w4, #NTP_UNIX_OFFSET_HI, lsl #16
     sub     w3, w3, w4
 
+    /* Monotonicity guard: reject if new time < current sync time */
+    ldr     x4, =ntp_state
+    ldr     w5, [x4, #NTPS_SYNCED]
+    cbz     w5, .Lntp_store         /* first sync — always accept */
+    ldr     x5, [x4, #NTPS_SYNC_SECS]
+    mov     x6, x3                  /* zero-extend w3 to x6 */
+    cmp     x6, x5
+    b.lo    .Lntp_ignore            /* backward jump — reject */
+
+.Lntp_store:
     /* Store in ntp_state */
     ldr     x4, =ntp_state
-    /* Zero-extend w3 to x3 for 64-bit store */
-    mov     x5, x3
+    mov     x5, x3                  /* zero-extend w3 */
     str     x5, [x4, #NTPS_SYNC_SECS]
     str     x21, [x4, #NTPS_SYNC_TICKS]
     mov     w5, #1
     str     w5, [x4, #NTPS_SYNCED]
+    str     wzr, [x4, #NTPS_POLL_SHIFT]  /* reset backoff on success */
 
     mov     w0, #1
     b       .Lntp_ret
@@ -338,6 +372,10 @@ ntp_time:
     /* elapsed_secs = elapsed_ticks / timer_freq */
     ldr     x3, [x1, #NTPS_TIMER_FREQ]
     udiv    x0, x0, x3
+
+    /* Staleness guard: if elapsed > 1800s (30 min), return 0 */
+    cmp     x0, #1800
+    b.hi    .Lntp_time_nosync
 
     /* wall_time = sync_secs + elapsed_secs */
     ldr     x4, [x1, #NTPS_SYNC_SECS]
@@ -417,21 +455,36 @@ ntp_timer_cb:
     blr     x4
 
 .Lntp_rearm:
-    /* Re-arm timer: expiry = now + NTP_POLL_SECS * freq */
+    /* Re-arm timer: expiry = now + (NTP_POLL_SECS << poll_shift) * freq */
     bl      timer_now
-    mov     x21, x0                     /* x21 = now */
+    mov     x21, x0
 
     ldr     x0, =ntp_state
-    ldr     x22, [x0, #NTPS_TIMER_FREQ]  /* x22 = freq */
+    ldr     x22, [x0, #NTPS_TIMER_FREQ]
+    ldr     w4, [x0, #NTPS_POLL_SHIFT]
+
+    /* poll_secs = NTP_POLL_SECS << min(shift, cap) */
+    cmp     w4, #NTP_POLL_SHIFT_CAP
+    csel    w5, w4, w4, lo
+    mov     w6, #NTP_POLL_SHIFT_CAP
+    csel    w5, w5, w6, lo
     mov     x0, #NTP_POLL_SECS
-    mul     x0, x0, x22                /* poll_ticks = 64 * freq */
-    add     x1, x21, x0               /* expiry = now + poll_ticks */
+    lsl     x0, x0, x5
+    mul     x0, x0, x22
+    add     x1, x21, x0
+
+    /* Increment shift for next poll (backoff until ntp_handle resets it) */
+    add     w4, w4, #1
+    ldr     x0, =ntp_state
+    str     w4, [x0, #NTPS_POLL_SHIFT]
 
     ldr     x0, [x19, #NTPC_TIMER_POOL]
+    cbz     x0, .Lntp_tcb_done
     ldr     x2, =ntp_timer_cb
     ldr     x3, =ntp_send_ctx
     bl      timer_set
 
+.Lntp_tcb_done:
     ldp     x19, x20, [sp, #16]
     ldp     x21, x22, [sp, #32]
     ldp     x29, x30, [sp], #48

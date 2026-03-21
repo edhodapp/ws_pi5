@@ -34,8 +34,11 @@
 .equ NTPS_SYNC_TICKS,   8       /* u64 — counter ticks at last sync */
 .equ NTPS_TIMER_FREQ,   16      /* u64 — CNTFRQ_EL0 cached */
 .equ NTPS_SYNCED,        24      /* u32 — 1 after first successful sync */
-.equ NTPS_PAD,           28      /* u32 — padding */
+.equ NTPS_POLL_SHIFT,   28      /* u32 — backoff shift (0=64s, 1=128s, ...) */
 .equ NTPS_SIZE,          32
+
+/* Poll backoff cap: 64 << 3 = 512 seconds (~8.5 min) */
+.equ NTP_POLL_SHIFT_CAP, 3
 
 /* ntp_send_ctx struct offsets (40 bytes, .data) */
 .equ NTPC_DWC2_BASE,    0       /* u64 — DWC2 register base */

@@ -190,7 +190,19 @@ def main():
     icmp_badck = struct.pack('!BBH HH', 8, 0, 0xFFFF, 1, 1)  # wrong checksum
     seeds['icmp_bad_checksum.bin'] = build_ip_frame(1, PEER_IP, OUR_IP, icmp_badck)
 
-    # 21. TCP SYN with MSS option
+    # 21. NTP response with LI=3 (unsync) — exercises new LI rejection
+    ntp_li3 = struct.pack('!BBBbIII', 0xE4, 1, 0, 0, 0, 0, 0)  # LI=3, VN=4, Mode=4
+    ntp_li3 += b'\x00' * (48 - len(ntp_li3))
+    udp_li3 = struct.pack('!HHHH', 12345, 123, 8 + 48, 0)
+    seeds['ntp_li3.bin'] = build_ip_frame(17, PEER_IP, OUR_IP, udp_li3 + ntp_li3)
+
+    # 22. NTP response with version=5 — exercises version rejection
+    ntp_v5 = struct.pack('!BBBbIII', 0x2C, 1, 0, 0, 0, 0, 0)  # LI=0, VN=5, Mode=4
+    ntp_v5 += b'\x00' * (48 - len(ntp_v5))
+    udp_v5 = struct.pack('!HHHH', 12345, 123, 8 + 48, 0)
+    seeds['ntp_bad_version.bin'] = build_ip_frame(17, PEER_IP, OUR_IP, udp_v5 + ntp_v5)
+
+    # 23. TCP SYN with MSS option
     #     Exercises tcp_parse_mss in tcp_listen_syn_handler
     tcp_mss = struct.pack('!HHIIBBHHH',
         12345, 80,
