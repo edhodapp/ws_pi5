@@ -29,7 +29,10 @@ Boots on a Raspberry Pi 3, brings up a USB Ethernet adapter (CDC-ECM class), and
 
 ```
 boot.S          Core 0 init, stack, BSS zero
-  main.S        uart_init → dwc2_init → cdc_ecm_init → cdc_ecm_activate → ntp_start
+  main.S        uart_init → dwc2_init → cdc_ecm_init → cdc_ecm_activate
+                  → timer_pool_init → ip_reasm_init → tcp_init → tcp_listen(80)
+                  → tcp_set_timer_pool → tcp_start_reaper → tcp_set_send_ctx
+                  → ntp_init → ntp_start
     net_loop    Receive Ethernet frames via USB bulk-IN
       net.S     Dispatch by EtherType
         ARP  →  arp.S    Validate request, build reply in-place, cache gateway MAC
@@ -41,7 +44,7 @@ boot.S          Core 0 init, stack, BSS zero
       cdc_ecm_send       Transmit reply via USB bulk-OUT
 ```
 
-The kernel image is under 12 KB.
+The kernel image is under 20 KB.
 
 ## Project Structure
 
@@ -55,10 +58,13 @@ lib/            Pure computation libraries
   net.S           Receive dispatcher — routes by EtherType
   arp.S           ARP request validation and in-place reply builder
   ip.S            RFC 1071 checksum, IPv4 header validation, protocol dispatch
+  ip_reasm.S      IP fragment reassembly — 4-slot reassembly engine with timeout
   icmp.S          ICMP echo reply — swap addresses, recompute checksums
   udp.S           UDP checksum with pseudo-header, validation, echo service (port 7)
-  tcp.S           TCP — table-driven FSA, connection table, three-way handshake, data transfer
+  tcp.S           TCP — 2900-line implementation: 10-state FSA, congestion control,
+                    timestamps, retransmission, OOO buffering, security hardening
   ntp.S           SNTP client — request builder, response parser, timer-driven polling
+  md5.S           MD5 hash — used for TCP ISN generation (RFC 6528)
   timer_pool.S    Software timer pool — set, cancel, check expired
   vmio_queue.S    Circular event queue with priority levels
   vmio_engine.S   Finite state automaton engine — init, single-step
@@ -72,7 +78,7 @@ drivers/        Hardware drivers
   cdc_ecm.S       CDC-ECM device init, activate, send/recv
   timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 186 unit tests across 22 files
+tests/          Test sources — 292 unit tests across 26 files
 tests/func/     PICT-based functional test models
 fuzz/           Fuzz harness for network packet parsers
 scripts/        Build and test automation (including Python oracle)
@@ -121,11 +127,11 @@ make clean
 
 ### Unit Tests
 
-186 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to TCP connection lifecycle, data transfer, and active/passive close.
+292 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to the full TCP connection lifecycle including congestion control, retransmission, timestamps, OOO buffering, and security hardening.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
-Branch coverage is audited after each feature: every conditional branch in production code has at least one test that exercises it. Two dedicated coverage-gap tests (`test_tcp_fsa_null_handler`, `test_tcp_scan_lport_miss`) exist solely to cover edge-case branches that no behavioral test would naturally hit.
+Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths. Dedicated coverage-gap tests exist solely to close branches that no behavioral test would naturally hit — examples include FSA null-handler dispatch, connection scan miss paths, ICMP soft-error state guards, FIN-with-data SEQ/overflow rejection, and TIME_WAIT timer-cancel edge cases.
 
 The TDD workflow:
 
@@ -171,7 +177,7 @@ Thirteen multi-step protocol-level tests verify correctness properties across se
 
 Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
 
-Six independent parameters — connection state, TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 137 test vectors. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, reply flags, and post-state. This gives two independent specifications of TCP correctness written in different languages — if both agree on all cases, confidence is very high.
+Six independent parameters — connection state (10 states), TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 138 PICT-generated test vectors plus 7 handcrafted scenario tests (ICMP teardown, timestamp negotiation, PAWS rejection, etc.) for a total of 145 functional tests. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, post-state, reply flags, SEQ/ACK values, and post-connection fields (RCV_NXT, RXLEN, SND_UNA). This gives two independent specifications of TCP correctness written in different languages — if both agree on all 145 cases, confidence is very high.
 
 The pipeline:
 
@@ -199,20 +205,38 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 
 **Implemented states:** CLOSED, LISTEN, SYN_RCVD, ESTABLISHED, CLOSE_WAIT, LAST_ACK, FIN_WAIT_1, FIN_WAIT_2, CLOSING, TIME_WAIT.
 
-**What works:**
+**Core protocol:**
 - Three-way handshake (passive open): SYN → SYN-ACK → ACK → ESTABLISHED
 - Data transfer: ACK+PSH with payload → receive buffering, ACK reply with dynamic window
 - `tcp_send`: application-driven data transmission with PSH+ACK
 - `tcp_rx_peek`/`tcp_rx_flush`: application access to receive buffer (2 KB per connection)
 - Dynamic window advertisement: tracks buffer fill, advertises zero when full
-- Out-of-order detection: segments with wrong SEQ are silently dropped
-- Passive close: peer FIN → ACK, CLOSE_WAIT → LAST_ACK → CLOSED
+- Passive close: peer FIN → ACK, CLOSE_WAIT → LAST_ACK → CLOSED (accepts data on FIN)
 - Active close: `tcp_close` → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED (and simultaneous close via CLOSING)
-- Send window tracking: SND_WND captured from handshake, updated from incoming ACKs, `tcp_send` guards against exceeding peer's window
-- `tcp_send_ready`: query available send window before sending
-- `tcp_window_update`: explicit window update frame generation
+- TIME_WAIT with 2MSL timer, re-ACKs retransmitted FINs
+- Send window tracking: SND_WND captured from handshake, updated from incoming ACKs
+- `tcp_send_ready` / `tcp_window_update`: query and advertise window state
+- Connection table with 16 slots, SYN_RCVD eviction on table-full
+
+**Reliability:**
+- Retransmission timer with exponential backoff (1s base, capped at 60s, max 8 retries)
+- Fast retransmit on 3 duplicate ACKs (RFC 5681) with multiplicative decrease
+- Congestion control: slow start, congestion avoidance, ssthresh tracking
+- OOO segment buffering: 4 slots per connection, merge on in-order delivery
+
+**Options:**
+- MSS negotiation (advertise 1460, parse peer MSS, default 536)
+- TCP timestamps (TSopt): negotiated from SYN, echoed in all replies
+- PAWS: reject stale segments via TSval comparison
+
+**Security hardening:**
+- RST SEQ validation (RFC 5961): out-of-window RSTs silently dropped
+- RST rate limiting: token-bucket at 10/sec burst
+- ICMP soft errors for ESTABLISHED+ (RFC 5461): only hard-close SYN_RCVD
+- Idle connection reaper: per-state timeouts (ESTABLISHED 120s, FIN states 60s)
+- Persist timer: zero-window probing with exponential backoff (5s–60s)
+- DF bit set on all outgoing IP packets
 - RST generation for invalid packets, unknown ports, and unpopulated FSA entries
-- Connection table with 16 slots, scanned on each incoming segment
 
 The FSA approach made adding each new feature trivial — a new handler function and a populated table entry, with no changes to the dispatch logic.
 
@@ -277,7 +301,7 @@ With AFL++:
 afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 ```
 
-**Seed files** (generated by `fuzz/gen_corpus_seq.py`):
+**16 seed files** (generated by `fuzz/gen_corpus_seq.py`):
 
 | File | Frames | TCP path exercised |
 |------|--------|--------------------|
@@ -286,6 +310,17 @@ afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 | `tcp_handshake_fin.bin` | SYN + ACK + FIN+ACK | Passive close (CLOSE_WAIT) |
 | `tcp_handshake_rst.bin` | SYN + ACK + RST | ESTABLISHED → CLOSED |
 | `tcp_handshake_multi.bin` | SYN + ACK + 3× PSH+ACK data | Multi-segment buffering, window shrink |
+| `tcp_full_close.bin` | Handshake + FIN + ACK | Full passive close to CLOSED |
+| `tcp_active_close.bin` | Handshake + close sentinel | Active close (FIN_WAIT path) |
+| `tcp_simultaneous_close.bin` | Handshake + cross-FINs | CLOSING → TIME_WAIT |
+| `tcp_last_ack.bin` | Handshake + FIN + close sentinel | LAST_ACK → CLOSED |
+| `tcp_dup_data.bin` | Handshake + 2× same data | Duplicate segment handling |
+| `tcp_dup_syn.bin` | 2× SYN to same port | Duplicate SYN |
+| `tcp_dup_syn_flood.bin` | 17× SYN (exceeds 16 slots) | SYN_RCVD eviction |
+| `tcp_data_then_rst.bin` | Handshake + data + RST | Mid-transfer teardown |
+| `tcp_bad_seq_data.bin` | Handshake + wrong-SEQ data | OOO / bad SEQ rejection |
+| `tcp_ts_handshake.bin` | SYN(TSopt) + ACK | Timestamp negotiation |
+| `tcp_ooo_merge.bin` | Handshake + OOO + in-order | OOO buffering and merge |
 
 ## Hardware Test Plan
 
@@ -305,17 +340,19 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - USB device enumeration (control transfers, descriptor parsing)
 - CDC-ECM Ethernet device activation and bulk data transfer
 - ARP request/reply with passive gateway MAC learning
+- IP with checksum validation, fragment reassembly (4-slot engine with timeouts)
 - ICMP echo request/reply (ping)
 - UDP with echo service (port 7)
-- TCP with table-driven FSA — three-way handshake, data transfer, send window tracking, active/passive close, RST generation
+- TCP — complete transport layer: 10-state FSA, congestion control (slow start / avoidance), retransmission with backoff, fast retransmit (RFC 5681), TCP timestamps with PAWS, OOO buffering, MSS negotiation, persist timer, idle reaper, RST rate limiting, RST SEQ validation (RFC 5961), ICMP soft errors (RFC 5461), SYN flood eviction, DF bit, data-on-FIN, TIME_WAIT re-ACK
 - Timer infrastructure (ARM generic timer, software timer pool)
 - SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
-- Dependency injection for testability (send function pointer in NTP context, MMIO base addresses as parameters)
+- MD5 hash for TCP ISN generation (RFC 6528)
+- Dependency injection for testability (send function pointer, MMIO base addresses as parameters)
 
-**Test coverage:** 186 unit tests (complete branch coverage) + 137 PICT-generated functional tests (exhaustive combinatorial coverage of TCP state machine). All tests run on QEMU raspi3b.
+**Test coverage:** 292 unit tests (complete branch coverage) + 145 functional tests (138 PICT-generated exhaustive combinatorial + 7 handcrafted scenario) + 29 fuzz corpus inputs (13 single-packet + 16 multi-packet sequence). All tests run on QEMU raspi3b, zero crashes.
 
 **Next:**
-- HTTP request parsing and response generation
+- HTTP request parsing and response generation (the only hard blocker — TCP transport is complete)
 
 ## Work in Progress
 
