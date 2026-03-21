@@ -1,6 +1,6 @@
-/* VideoCore Mailbox interface for BCM2837 (Raspberry Pi 3) */
+/* VideoCore Mailbox interface for BCM2711 (Raspberry Pi 4) */
 
-.equ MBOX_BASE,        0x3F00B880
+.equ MBOX_BASE,        0xFE00B880
 
 /* Register offsets from MBOX_BASE */
 .equ MBOX_READ,        0x00
