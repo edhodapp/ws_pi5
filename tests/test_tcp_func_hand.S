@@ -6,6 +6,9 @@
  *   2. Outgoing timestamps (SYN-ACK with TSopt)
  *   3. PAWS rejection (stale TSval drops segment)
  *   4. ICMP Destination Unreachable tears down connection via net_recv_one
+ *   5. Full 3-way handshake with timestamps
+ *   6. ICMP teardown with active retransmit timer
+ *   7. Data ACK with timestamp echo
  */
 
 .include "net.inc"
@@ -25,6 +28,9 @@ test_tcp_func_handcrafted:
     bl      test_func_ts_synack
     bl      test_func_paws_reject
     bl      test_func_icmp_teardown
+    bl      test_func_handshake_ts
+    bl      test_func_icmp_rtx_timer
+    bl      test_func_data_ack_ts_echo
     ldp     x29, x30, [sp], #16
     ret
 
@@ -33,7 +39,8 @@ test_tcp_func_handcrafted:
  *
  * Setup: tcp_init, tcp_listen(80), tcp_listen(8080)
  * Send:  SYN to dport=8080 via tcp_handle
- * Verify: return=54, reply flags=SYN-ACK, a SYN_RCVD conn exists for port 8080
+ * Verify: return=54, reply flags=SYN-ACK, reply ports correct,
+ *         SYN_RCVD conn exists for 8080, port 80 LISTEN preserved
  * =========================================================================== */
 test_func_multiport:
     stp     x29, x30, [sp, #-48]!
@@ -93,6 +100,18 @@ test_func_multiport:
     cmp     w0, #TCP_SYN_ACK
     b.ne    .Lfmp_fail
 
+    /* Verify reply sport = 8080 NBO (0x901F as LE halfword) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
+    mov     w1, #0x901F
+    cmp     w0, w1
+    b.ne    .Lfmp_fail
+
+    /* Verify reply dport = 12345 NBO (0x3930 as LE halfword) */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DPORT)]
+    mov     w1, #0x3930
+    cmp     w0, w1
+    b.ne    .Lfmp_fail
+
     /* Verify a SYN_RCVD connection exists with lport=8080 NBO */
     ldr     x0, =tcp_conn_table
     mov     w2, #TCP_MAX_CONNS
@@ -111,6 +130,12 @@ test_func_multiport:
     b       .Lfmp_scan
 .Lfmp_found:
 
+    /* Verify slot 0 (port 80) still LISTEN */
+    ldr     x0, =tcp_conn_table
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfmp_fail
+
     ldr     x0, =name_fmp
     bl      test_pass
     b       .Lfmp_done
@@ -128,7 +153,8 @@ test_func_multiport:
  *
  * Setup: tcp_init, tcp_listen(80)
  * Send:  66-byte SYN with TSopt (TSval=0x12345678) via tcp_handle
- * Verify: return=66, reply doff=0x80, reply TSecr=0x12345678
+ * Verify: return=66, reply doff=0x80, reply TSecr=0x12345678,
+ *         new conn has TS_ENABLED=1
  * =========================================================================== */
 test_func_ts_synack:
     stp     x29, x30, [sp, #-48]!
@@ -248,6 +274,14 @@ test_func_ts_synack:
     cmp     w0, #0x78
     b.ne    .Lfts_fail
 
+    /* Verify new connection (slot 1) has TS_ENABLED = 1.
+       Slot 0 was LISTEN(80) → consumed by FSA. Handler allocates slot 1. */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, #TCONN_SIZE       /* slot 1 */
+    ldrb    w1, [x0, #TCONN_TS_ENABLED]
+    cmp     w1, #1
+    b.ne    .Lfts_fail
+
     ldr     x0, =name_fts
     bl      test_pass
     b       .Lfts_done
@@ -266,7 +300,7 @@ test_func_ts_synack:
  * Setup: tcp_init, tcp_listen(80), pre-seed ESTABLISHED conn with
  *        TS_ENABLED=1, TS_RECENT=5000
  * Send:  71-byte data frame (5 bytes "Hello") with TSval=1000 (< 5000)
- * Verify: return=0 (dropped), RCV_NXT unchanged
+ * Verify: return=0, RCV_NXT unchanged, TS_RECENT preserved, state preserved
  * =========================================================================== */
 test_func_paws_reject:
     stp     x29, x30, [sp, #-48]!
@@ -387,6 +421,17 @@ test_func_paws_reject:
     cmp     w0, w20
     b.ne    .Lfpr_fail
 
+    /* Verify TS_RECENT still 5000 (not updated to stale value) */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    ldr     w1, =5000
+    cmp     w0, w1
+    b.ne    .Lfpr_fail
+
+    /* Verify state still ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfpr_fail
+
     ldr     x0, =name_fpr
     bl      test_pass
     b       .Lfpr_done
@@ -404,7 +449,7 @@ test_func_paws_reject:
  *
  * Setup: tcp_init, tcp_listen(80), pre-seed ESTABLISHED conn in slot 1
  * Send:  ICMP type 3 frame matching the conn via net_recv_one
- * Verify: return=0, conn state=CLOSED
+ * Verify: return=0, conn state=CLOSED, slot 0 LISTEN preserved
  * =========================================================================== */
 test_func_icmp_teardown:
     stp     x29, x30, [sp, #-48]!
@@ -540,6 +585,12 @@ test_func_icmp_teardown:
     ldrb    w0, [x19, #TCONN_STATE]
     cbnz    w0, .Lfic_fail
 
+    /* Verify slot 0 (port 80 LISTEN) preserved */
+    ldr     x0, =tcp_conn_table
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfic_fail
+
     ldr     x0, =name_fic
     bl      test_pass
     b       .Lfic_done
@@ -547,6 +598,509 @@ test_func_icmp_teardown:
     ldr     x0, =name_fic
     bl      test_fail
 .Lfic_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ===========================================================================
+ * test_func_handshake_ts — Full 3-way handshake with timestamps
+ *
+ * Setup: tcp_init, tcp_listen(80)
+ * Phase 1: SYN w/TSopt (TSval=0x12345678) → SYN-ACK (66 bytes)
+ * Phase 2: ACK w/TSopt (TSval=0x22222222) → return 0 (pure ACK)
+ * Verify: slot 1 state=ESTABLISHED, TS_ENABLED=1,
+ *         TS_RECENT=0x12345678 (from SYN, not updated by handshake ACK)
+ * =========================================================================== */
+test_func_handshake_ts:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    ldr     x19, =fh_scratch
+
+    /* === Phase 1: SYN w/TSopt === */
+
+    /* Copy SYN template → scratch (54 bytes) */
+    ldr     x0, =fh_syn_template
+    mov     x1, x19
+    mov     w2, #54
+.Lfhts_syn_copy:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfhts_syn_copy
+
+    /* Extend to 66 bytes: set doff=0x80, IP totlen=52, add TSopt */
+    mov     w0, #0x80
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #0x3400
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* TSopt: NOP NOP Kind=8 Len=10 TSval=0x12345678(NBO) TSecr=0 */
+    mov     w0, #0x01
+    strb    w0, [x19, #54]
+    strb    w0, [x19, #55]
+    mov     w0, #0x08
+    strb    w0, [x19, #56]
+    mov     w0, #0x0A
+    strb    w0, [x19, #57]
+    mov     w0, #0x12
+    strb    w0, [x19, #58]
+    mov     w0, #0x34
+    strb    w0, [x19, #59]
+    mov     w0, #0x56
+    strb    w0, [x19, #60]
+    mov     w0, #0x78
+    strb    w0, [x19, #61]
+    str     wzr, [x19, #62]
+
+    /* Recompute checksums */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #32
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Send SYN */
+    mov     x0, x19
+    mov     w1, #66
+    bl      tcp_handle
+
+    /* Verify SYN-ACK returned */
+    cmp     w0, #66
+    b.ne    .Lfhts_fail
+
+    /* Extract server ISN from SYN-ACK SEQ field (NBO) */
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* === Phase 2: Build ACK to complete handshake === */
+
+    /* Re-copy SYN template → scratch (54 bytes) */
+    ldr     x0, =fh_syn_template
+    mov     x1, x19
+    mov     w2, #54
+.Lfhts_ack_copy:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfhts_ack_copy
+
+    /* Extend to 66 bytes with TSopt */
+    mov     w0, #0x80
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #0x3400
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Flags = ACK (0x10) */
+    mov     w0, #TCP_ACK_FLAG
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+
+    /* SEQ = 2 (NBO) — client's ISN(1) + 1 after SYN */
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* ACK = server ISN + 1 (NBO) */
+    rev     w0, w20              /* ISN host order */
+    add     w0, w0, #1          /* ISN+1 */
+    rev     w0, w0              /* back to NBO */
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* TSopt: NOP NOP Kind=8 Len=10 TSval=0x22222222 TSecr=0 */
+    mov     w0, #0x01
+    strb    w0, [x19, #54]
+    strb    w0, [x19, #55]
+    mov     w0, #0x08
+    strb    w0, [x19, #56]
+    mov     w0, #0x0A
+    strb    w0, [x19, #57]
+    mov     w0, #0x22
+    strb    w0, [x19, #58]
+    strb    w0, [x19, #59]
+    strb    w0, [x19, #60]
+    strb    w0, [x19, #61]
+    str     wzr, [x19, #62]
+
+    /* Recompute checksums */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #32
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Send ACK (completes handshake) */
+    mov     x0, x19
+    mov     w1, #66
+    bl      tcp_handle
+
+    /* Verify return = 0 (pure ACK, no reply) */
+    cbnz    w0, .Lfhts_fail
+
+    /* Verify slot 1 state = ESTABLISHED */
+    ldr     x21, =tcp_conn_table
+    add     x21, x21, #TCONN_SIZE     /* slot 1 */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfhts_fail
+
+    /* Verify TS_ENABLED = 1 */
+    ldrb    w0, [x21, #TCONN_TS_ENABLED]
+    cmp     w0, #1
+    b.ne    .Lfhts_fail
+
+    /* Verify TS_RECENT = 0x12345678 (from SYN, not updated by handshake ACK
+       since tcp_synrcvd_ack_handler doesn't process timestamps) */
+    ldr     w0, [x21, #TCONN_TS_RECENT]
+    ldr     w1, =0x12345678
+    cmp     w0, w1
+    b.ne    .Lfhts_fail
+
+    ldr     x0, =name_fhts
+    bl      test_pass
+    b       .Lfhts_done
+.Lfhts_fail:
+    ldr     x0, =name_fhts
+    bl      test_fail
+.Lfhts_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ===========================================================================
+ * test_func_icmp_rtx_timer — ICMP teardown cancels active retransmit timer
+ *
+ * Setup: tcp_init, tcp_listen(80), init timer pool, pre-seed ESTABLISHED
+ *        conn with active timer (TIMER_SLOT=0, RTXLEN=54, RTXCOUNT=2)
+ * Send:  ICMP type 3 via net_recv_one
+ * Verify: state=CLOSED, TIMER_SLOT=-1, RTXLEN=0, RTXCOUNT=0,
+ *         timer pool slot callback cleared
+ * =========================================================================== */
+test_func_icmp_rtx_timer:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Initialize timer pool and register it with TCP */
+    ldr     x0, =fh_timer_pool
+    mov     w1, #1                  /* 1 slot */
+    bl      timer_pool_init
+
+    ldr     x0, =fh_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Pre-seed slot 1 as ESTABLISHED */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+    mov     w0, #0x3930
+    strh    w0, [x19, #TCONN_RPORT]
+    ldr     w0, =0x0202000A
+    str     w0, [x19, #TCONN_RIP]
+
+    /* Pre-seed retransmit state */
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+    mov     w0, #2
+    strb    w0, [x19, #TCONN_RTXCOUNT]
+
+    /* Arm a timer (far-future expiry so it won't fire) */
+    ldr     x0, =fh_timer_pool
+    mvn     x1, xzr                /* expiry = 0xFFFF...FFFF */
+    ldr     x2, =tcp_retransmit_cb
+    mov     x3, x19                 /* context = conn */
+    bl      timer_set
+    str     w0, [x19, #TCONN_TIMER_SLOT]  /* should be 0 */
+
+    /* Build ICMP type 3 frame — reuse same pattern as test_func_icmp_teardown */
+    ldr     x21, =fh_scratch
+
+    /* Zero 70 bytes */
+    mov     x0, x21
+    mov     w1, #70
+.Lfirt_zero:
+    strb    wzr, [x0], #1
+    subs    w1, w1, #1
+    b.ne    .Lfirt_zero
+
+    /* ETH header */
+    mov     w0, #0x02
+    strb    w0, [x21, #ETH_DST]
+    mov     w0, #0x01
+    strb    w0, [x21, #(ETH_DST + 5)]
+    mov     w0, #0xAA
+    strb    w0, [x21, #ETH_SRC]
+    mov     w0, #0xBB
+    strb    w0, [x21, #(ETH_SRC + 1)]
+    mov     w0, #0xCC
+    strb    w0, [x21, #(ETH_SRC + 2)]
+    mov     w0, #0xDD
+    strb    w0, [x21, #(ETH_SRC + 3)]
+    mov     w0, #0xEE
+    strb    w0, [x21, #(ETH_SRC + 4)]
+    mov     w0, #0xFF
+    strb    w0, [x21, #(ETH_SRC + 5)]
+    mov     w0, #0x0008
+    strh    w0, [x21, #ETH_TYPE]
+
+    /* Outer IP */
+    mov     w0, #0x45
+    strb    w0, [x21, #ETH_PAYLOAD]
+    mov     w0, #0x3800
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_TOTLEN)]
+    mov     w0, #64
+    strb    w0, [x21, #(ETH_PAYLOAD + IP_TTL)]
+    mov     w0, #IP_PROTO_ICMP
+    strb    w0, [x21, #(ETH_PAYLOAD + IP_PROTO)]
+    ldr     w0, =0x0202000A
+    str     w0, [x21, #(ETH_PAYLOAD + IP_SRC)]
+    ldr     w0, =0x0F02000A
+    str     w0, [x21, #(ETH_PAYLOAD + IP_DST)]
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x21, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* ICMP type 3 */
+    mov     w0, #ICMP_DEST_UNREACHABLE
+    strb    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    mov     w0, #1
+    strb    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+
+    /* Encapsulated IP + TCP */
+    mov     w0, #0x45
+    strb    w0, [x21, #42]
+    mov     w0, #6
+    strb    w0, [x21, #(42 + IP_PROTO)]
+    ldr     w0, =0x0F02000A
+    str     w0, [x21, #(42 + IP_SRC)]
+    ldr     w0, =0x0202000A
+    str     w0, [x21, #(42 + IP_DST)]
+    mov     w0, #0x5000
+    strh    w0, [x21, #(62 + TCP_SPORT)]
+    mov     w0, #0x3930
+    strh    w0, [x21, #(62 + TCP_DPORT)]
+
+    /* ICMP checksum */
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+    add     x0, x21, #(ETH_PAYLOAD + IP_HDR_MIN)
+    mov     w1, #36
+    bl      ip_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+
+    /* Send through full stack */
+    mov     x0, x21
+    mov     w1, #70
+    bl      net_recv_one
+
+    /* Verify return = 0 */
+    cbnz    w0, .Lfirt_fail
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfirt_fail
+
+    /* Verify TIMER_SLOT = -1 (timer cancelled) */
+    ldr     w0, [x19, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.ne    .Lfirt_fail
+
+    /* Verify RTXLEN = 0 */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbnz    w0, .Lfirt_fail
+
+    /* Verify RTXCOUNT = 0 */
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfirt_fail
+
+    /* Verify timer pool slot 0 callback cleared (inactive) */
+    ldr     x0, =fh_timer_pool
+    ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
+    cbnz    x1, .Lfirt_fail
+
+    ldr     x0, =name_firt
+    bl      test_pass
+    b       .Lfirt_done
+.Lfirt_fail:
+    ldr     x0, =name_firt
+    bl      test_fail
+.Lfirt_done:
+    /* Clean up: reset timer pool pointer to avoid affecting other tests */
+    mov     x0, #0
+    bl      tcp_set_timer_pool
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ===========================================================================
+ * test_func_data_ack_ts_echo — Data ACK echoes peer's TSval
+ *
+ * Setup: tcp_init, tcp_listen(80), pre-seed ESTABLISHED conn with
+ *        TS_ENABLED=1, TS_RECENT=5000
+ * Send:  71-byte data frame with TSval=6000 (> 5000, passes PAWS)
+ * Verify: return=66 (ACK with TSopt), reply TSecr echoes 6000,
+ *         TS_RECENT updated to 6000, RCV_NXT advanced by 5
+ * =========================================================================== */
+test_func_data_ack_ts_echo:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Pre-seed slot 1 as ESTABLISHED with timestamps */
+    ldr     x20, =tcp_conn_table
+    add     x20, x20, #TCONN_SIZE  /* slot 1 = conn pointer */
+
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x20, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x20, #TCONN_LPORT]
+    mov     w0, #0x3930
+    strh    w0, [x20, #TCONN_RPORT]
+    ldr     w0, =0x0202000A
+    str     w0, [x20, #TCONN_RIP]
+    ldr     w0, =0x41424345
+    str     w0, [x20, #TCONN_SND_NXT]
+    str     w0, [x20, #TCONN_SND_UNA]
+    mov     w0, #2
+    str     w0, [x20, #TCONN_RCV_NXT]
+    mov     w0, #1
+    strb    w0, [x20, #TCONN_TS_ENABLED]
+    ldr     w0, =5000
+    str     w0, [x20, #TCONN_TS_RECENT]
+    mov     w0, #-1
+    str     w0, [x20, #TCONN_TIMER_SLOT]
+    strh    wzr, [x20, #TCONN_RXLEN]
+
+    /* Copy peer MAC from template */
+    ldr     x0, =fh_syn_template
+    add     x0, x0, #ETH_SRC
+    ldr     w1, [x0]
+    str     w1, [x20, #TCONN_RMAC]
+    ldrh    w1, [x0, #4]
+    strh    w1, [x20, #(TCONN_RMAC + 4)]
+
+    /* Build 71-byte data frame with TSopt, TSval=6000 (passes PAWS) */
+    ldr     x0, =fh_data_ts_template
+    ldr     x1, =fh_scratch
+    mov     w2, #71
+.Lfdae_copy:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfdae_copy
+
+    ldr     x19, =fh_scratch
+
+    /* SEQ = 2 (matches RCV_NXT), ACK = SND_NXT */
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    ldr     w0, =0x41424345
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* TSval = 6000 (host order) → rev for NBO at frame offset 58
+       6000 = 0x1770, rev(0x00001770) = 0x70170000 */
+    ldr     w0, =6000
+    rev     w0, w0
+    str     w0, [x19, #58]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum (32 + 5 = 37 bytes) */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #37
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle */
+    mov     x0, x19
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* Verify return = 66 (ACK with TSopt) */
+    cmp     w0, #66
+    b.ne    .Lfdae_fail
+
+    /* Verify reply flags = ACK */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_ACK_FLAG
+    b.ne    .Lfdae_fail
+
+    /* Verify reply doff = 0x80 (timestamps included) */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    cmp     w0, #0x80
+    b.ne    .Lfdae_fail
+
+    /* Verify reply TSecr at frame offset 62 echoes TSval=6000 (NBO).
+       6000 = 0x1770. NBO bytes: 00 00 17 70 */
+    ldrb    w0, [x19, #62]
+    cbnz    w0, .Lfdae_fail
+    ldrb    w0, [x19, #63]
+    cbnz    w0, .Lfdae_fail
+    ldrb    w0, [x19, #64]
+    cmp     w0, #0x17
+    b.ne    .Lfdae_fail
+    ldrb    w0, [x19, #65]
+    cmp     w0, #0x70
+    b.ne    .Lfdae_fail
+
+    /* Verify TS_RECENT updated to 6000 */
+    ldr     w0, [x20, #TCONN_TS_RECENT]
+    ldr     w1, =6000
+    cmp     w0, w1
+    b.ne    .Lfdae_fail
+
+    /* Verify RCV_NXT advanced by 5 (from 2 to 7) */
+    ldr     w0, [x20, #TCONN_RCV_NXT]
+    cmp     w0, #7
+    b.ne    .Lfdae_fail
+
+    ldr     x0, =name_fdae
+    bl      test_pass
+    b       .Lfdae_done
+.Lfdae_fail:
+    ldr     x0, =name_fdae
+    bl      test_fail
+.Lfdae_done:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
@@ -630,8 +1184,15 @@ name_fmp:   .asciz "func_multiport_listen"
 name_fts:   .asciz "func_ts_synack"
 name_fpr:   .asciz "func_paws_reject"
 name_fic:   .asciz "func_icmp_teardown"
+name_fhts:  .asciz "func_handshake_ts"
+name_firt:  .asciz "func_icmp_rtx_timer"
+name_fdae:  .asciz "func_data_ack_ts_echo"
 
 .section .bss
 .balign 16
 fh_scratch:
     .space  256
+
+.balign 8
+fh_timer_pool:
+    .space  40              /* 8 header + 1×32 slot */
