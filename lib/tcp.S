@@ -40,6 +40,11 @@
 .global tcp_rst_allow
 .global tcp_rst_tokens
 .global tcp_rst_last_tick
+.global tcp_fast_retransmit
+.global tcp_idle_reaper_cb
+.global tcp_start_reaper
+.global tcp_persist_arm
+.global tcp_persist_cb
 
 .section .text
 
@@ -849,6 +854,23 @@ tcp_handle:
     cmn     w0, #1
     b.eq    .Ltcp_no_conn
 
+    /* RST SEQ validation (RFC 5961) — only for connected states */
+    cmp     w0, #TCP_EVT_RST
+    b.ne    .Ltcp_fsa_lookup
+
+    /* Check: (SEG.SEQ - RCV_NXT) < RCV_WND (unsigned) */
+    ldr     w4, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w4, w4
+    ldr     w5, [x23, #TCONN_RCV_NXT]
+    /* Compute dynamic RCV_WND = RXBUF_SIZE - RXLEN */
+    ldrh    w6, [x23, #TCONN_RXLEN]
+    mov     w7, #TCP_RXBUF_SIZE
+    sub     w6, w7, w6
+    sub     w4, w4, w5
+    cmp     w4, w6
+    b.hs    .Ltcp_drop              /* out of window → silently drop */
+
+.Ltcp_fsa_lookup:
     /* Table lookup: index = state * TCP_N_EVENTS + evt */
     mov     w1, #TCP_N_EVENTS
     madd    w0, w20, w1, w0         /* state * 5 + evt */
@@ -872,6 +894,12 @@ tcp_handle:
 
     cmn     w0, #1
     b.eq    .Ltcp_no_conn
+
+    /* Update activity timestamp after successful handler */
+    mov     w24, w0                 /* save handler return value */
+    bl      timer_now
+    str     x0, [x23, #TCONN_LAST_ACTIVE]
+    mov     w0, w24                 /* restore return value */
     b       .Ltcp_done
 
 .Ltcp_no_conn:
@@ -1083,6 +1111,12 @@ tcp_listen_syn_handler:
     strh    w0, [x21, #TCONN_CWND]
 .Llsyn_mss_done:
 
+    /* Initialize activity timestamp */
+    bl      timer_now
+    str     x0, [x21, #TCONN_LAST_ACTIVE]
+    /* Initialize persist shift */
+    strb    wzr, [x21, #TCONN_PERSIST_SHIFT]
+
     /* Build SYN-ACK via tcp_build_frame (includes MSS option) */
     mov     x0, x21                 /* conn */
     mov     x1, x19                 /* frame buf */
@@ -1189,8 +1223,25 @@ tcp_estab_ack_handler:
     ldrh    w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
     rev16   w4, w4
     uxth    w4, w4
+    cbz     w4, .Leak_zero_window
     strh    w4, [x19, #TCONN_SND_WND]
+    /* Non-zero window: cancel persist if active */
+    ldrb    w5, [x19, #TCONN_PERSIST_SHIFT]
+    cbz     w5, .Leak_wnd_done
+    strb    wzr, [x19, #TCONN_PERSIST_SHIFT]
+    b       .Leak_wnd_done
 
+.Leak_zero_window:
+    strh    wzr, [x19, #TCONN_SND_WND]    /* store window=0 */
+    ldrb    w5, [x19, #TCONN_PERSIST_SHIFT]
+    cbnz    w5, .Leak_wnd_done             /* already armed */
+    mov     w5, #1
+    strb    w5, [x19, #TCONN_PERSIST_SHIFT]
+    /* Arm persist timer */
+    mov     x0, x19
+    bl      tcp_persist_arm
+
+.Leak_wnd_done:
     /* Advance SND_UNA: if SND_UNA < seg_ack <= SND_NXT, set SND_UNA = seg_ack */
     ldr     w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4                  /* w4 = seg_ack (host order) */
@@ -1426,6 +1477,28 @@ tcp_estab_ack_handler:
     ret
 
 .Leak_pure_ack:
+    /* Check for duplicate ACK: seg_ack == SND_UNA and RTXLEN > 0 */
+    ldr     w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w4, w4                  /* seg_ack host order */
+    ldr     w5, [x19, #TCONN_SND_UNA]
+    cmp     w4, w5
+    b.ne    .Leak_not_dup
+    ldrh    w6, [x19, #TCONN_RTXLEN]
+    cbz     w6, .Leak_not_dup       /* no outstanding data → ignore */
+
+    /* Increment DUP_ACK_CNT */
+    ldrb    w7, [x19, #TCONN_DUP_ACK_CNT]
+    add     w7, w7, #1
+    strb    w7, [x19, #TCONN_DUP_ACK_CNT]
+    cmp     w7, #TCP_DUPACK_THRESH
+    b.ne    .Leak_not_dup           /* not at threshold yet */
+
+    /* Fast retransmit: retransmit immediately */
+    mov     x0, x19
+    bl      tcp_fast_retransmit
+    strb    wzr, [x19, #TCONN_DUP_ACK_CNT]  /* reset counter */
+
+.Leak_not_dup:
     mov     w0, #0
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -2307,6 +2380,310 @@ tcp_isn:
     add     w0, w4, w5
     ret
 
+/*
+ * tcp_fast_retransmit — Retransmit immediately on 3 duplicate ACKs
+ *
+ * x0: connection pointer
+ * Performs: multiplicative decrease (cwnd halved + 3*MSS inflate),
+ *           copy rtxbuf → tx_buf, send, reset RTO timer.
+ * Clobbers: x0-x6, x19-x22, x30
+ */
+tcp_fast_retransmit:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    mov     x19, x0
+
+    /* Multiplicative decrease: ssthresh = max(cwnd/2, 2*MSS) */
+    ldrh    w0, [x19, #TCONN_CWND]
+    lsr     w0, w0, #1              /* cwnd / 2 */
+    ldrh    w1, [x19, #TCONN_PEER_MSS]
+    lsl     w2, w1, #1              /* 2 * MSS */
+    cmp     w0, w2
+    csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
+    strh    w0, [x19, #TCONN_SSTHRESH]
+    /* cwnd = ssthresh + 3*MSS (RFC 5681: inflate for 3 dup ACKs in flight) */
+    mov     w2, #3
+    mul     w2, w1, w2
+    add     w0, w0, w2
+    mov     w3, #0xFFFF
+    cmp     w0, w3
+    csel    w0, w0, w3, lo
+    strh    w0, [x19, #TCONN_CWND]
+
+    /* Copy rtxbuf → tx_buf and send */
+    ldr     x20, =tcp_send_ctx
+    ldr     x1, [x20, #TSCTX_SEND_FN]
+    cbz     x1, .Lfrtx_done
+
+    ldr     x2, =tcp_conn_table
+    sub     x2, x19, x2
+    lsr     x2, x2, #7
+
+    ldr     x3, =tcp_rtxbuf_pool
+    add     x3, x3, x2, lsl #TCP_RXBUF_SHIFT
+    ldr     x4, [x20, #TSCTX_TX_BUF]
+    ldrh    w21, [x19, #TCONN_RTXLEN]
+    mov     w5, w21
+.Lfrtx_copy:
+    cbz     w5, .Lfrtx_send
+    ldrb    w6, [x3], #1
+    strb    w6, [x4], #1
+    sub     w5, w5, #1
+    b       .Lfrtx_copy
+
+.Lfrtx_send:
+    ldr     x0, [x20, #TSCTX_DWC2_BASE]
+    ldr     x1, [x20, #TSCTX_ECM_STATE]
+    ldr     x2, [x20, #TSCTX_TX_BUF]
+    mov     w3, w21
+    ldr     x4, [x20, #TSCTX_SEND_FN]
+    blr     x4
+
+    /* Reset RTO timer (restart from 1 second) */
+    strb    wzr, [x19, #TCONN_RTXCOUNT]
+    mov     x0, x19
+    bl      tcp_rtx_arm
+
+.Lfrtx_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_idle_reaper_cb — Periodic timer callback to close idle connections
+ *
+ * x0: context (unused)
+ * Scans all 16 connection slots. For non-CLOSED/LISTEN/TIME_WAIT slots,
+ * computes elapsed = timer_now() - LAST_ACTIVE and compares against
+ * per-state timeout thresholds.
+ * Re-arms itself for the next interval.
+ * Clobbers: x0-x6, x19-x22, x30
+ */
+tcp_idle_reaper_cb:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      timer_now
+    mov     x20, x0                 /* x20 = now */
+    bl      timer_freq
+    mov     x22, x0                 /* x22 = freq */
+
+    ldr     x19, =tcp_conn_table
+    mov     w21, #TCP_MAX_CONNS
+.Lreap_loop:
+    cbz     w21, .Lreap_rearm
+    sub     w21, w21, #1
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    /* Skip CLOSED, LISTEN, TIME_WAIT */
+    cbz     w0, .Lreap_next         /* CLOSED */
+    cmp     w0, #TCPS_LISTEN
+    b.eq    .Lreap_next
+    cmp     w0, #TCPS_TIME_WAIT
+    b.eq    .Lreap_next
+
+    /* Compute elapsed seconds: (now - LAST_ACTIVE) / freq */
+    ldr     x1, [x19, #TCONN_LAST_ACTIVE]
+    sub     x1, x20, x1             /* elapsed ticks */
+    udiv    x1, x1, x22             /* elapsed seconds */
+
+    /* Select timeout threshold by state */
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Lreap_estab
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Lreap_estab
+    cmp     w0, #TCPS_FIN_WAIT_1
+    b.eq    .Lreap_finwait
+    cmp     w0, #TCPS_FIN_WAIT_2
+    b.eq    .Lreap_finwait
+    /* CLOSE_WAIT, LAST_ACK, CLOSING */
+    mov     x2, #TCP_IDLE_CLOSEWAIT
+    b       .Lreap_check
+
+.Lreap_estab:
+    mov     x2, #TCP_IDLE_ESTAB
+    b       .Lreap_check
+.Lreap_finwait:
+    mov     x2, #TCP_IDLE_FINWAIT2
+.Lreap_check:
+    cmp     x1, x2
+    b.lo    .Lreap_next
+
+    /* Timeout exceeded: tear down connection */
+    mov     x0, x19
+    bl      tcp_rtx_clear
+    strb    wzr, [x19, #TCONN_STATE]
+
+.Lreap_next:
+    add     x19, x19, #TCONN_SIZE
+    b       .Lreap_loop
+
+.Lreap_rearm:
+    /* Re-arm reaper timer for next interval */
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lreap_done
+    mov     x19, x0                 /* pool */
+    mov     x1, #TCP_REAPER_INTERVAL
+    mul     x1, x22, x1
+    add     x1, x20, x1             /* expiry = now + interval*freq */
+    mov     x0, x19
+    ldr     x2, =tcp_idle_reaper_cb
+    mov     x3, xzr
+    bl      timer_set
+    ldr     x1, =tcp_reaper_slot
+    str     w0, [x1]
+
+.Lreap_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_start_reaper — Arm the idle connection reaper timer
+ *
+ * Call after tcp_set_timer_pool.
+ * Clobbers: x0-x3, x19-x21, x30
+ */
+tcp_start_reaper:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lsr_done
+    mov     x19, x0                 /* pool */
+    bl      timer_freq
+    mov     x20, x0                 /* freq */
+    mov     x1, #TCP_REAPER_INTERVAL
+    mul     x20, x20, x1            /* interval ticks */
+    bl      timer_now
+    add     x1, x0, x20             /* expiry */
+    mov     x0, x19
+    ldr     x2, =tcp_idle_reaper_cb
+    mov     x3, xzr
+    bl      timer_set
+    ldr     x1, =tcp_reaper_slot
+    str     w0, [x1]
+.Lsr_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_persist_arm — Arm persist timer with exponential backoff
+ *
+ * x0: connection pointer
+ * timeout = min(TCP_PERSIST_INITIAL << (shift-1), TCP_PERSIST_MAX) seconds
+ * Clobbers: x0-x3, x19-x21, x30
+ */
+tcp_persist_arm:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    mov     x19, x0                 /* conn */
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lparm_done
+    mov     x20, x0                 /* pool */
+
+    /* Compute timeout: TCP_PERSIST_INITIAL << (shift-1), capped at TCP_PERSIST_MAX */
+    ldrb    w1, [x19, #TCONN_PERSIST_SHIFT]
+    sub     w1, w1, #1
+    mov     w2, #TCP_PERSIST_INITIAL
+    lsl     w2, w2, w1              /* 5 << (shift-1) */
+    cmp     w2, #TCP_PERSIST_MAX
+    mov     w3, #TCP_PERSIST_MAX
+    csel    w21, w2, w3, lo         /* min(shifted, 60) */
+
+    bl      timer_freq
+    mul     x21, x0, x21            /* timeout ticks */
+    bl      timer_now
+    add     x1, x0, x21             /* expiry */
+    mov     x0, x20                 /* pool */
+    ldr     x2, =tcp_persist_cb
+    mov     x3, x19                 /* context = conn */
+    bl      timer_set
+    /* (We don't track persist slot — it auto-cancels on window open) */
+
+.Lparm_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/*
+ * tcp_persist_cb — Timer callback for zero-window probing
+ *
+ * x0: connection pointer (context)
+ * Sends a window probe (zero-length ACK with SEQ=SND_UNA) to nudge
+ * the peer into sending a window update.
+ * Increments PERSIST_SHIFT (backoff), re-arms timer.
+ * Clobbers: x0-x6, x19-x22, x30
+ */
+tcp_persist_cb:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* conn */
+
+    /* Guard: if state != ESTABLISHED or SND_WND != 0, stale — return */
+    ldrb    w1, [x19, #TCONN_STATE]
+    cmp     w1, #TCPS_ESTABLISHED
+    b.ne    .Lpersist_done
+    ldrh    w1, [x19, #TCONN_SND_WND]
+    cbnz    w1, .Lpersist_done
+
+    /* Build window probe using tcp_build_frame: zero-length ACK */
+    ldr     x20, =tcp_send_ctx
+    ldr     x1, [x20, #TSCTX_SEND_FN]
+    cbz     x1, .Lpersist_done
+    ldr     x21, [x20, #TSCTX_TX_BUF]
+
+    mov     x0, x19                 /* conn */
+    mov     x1, x21                 /* frame buf (tx_buf) */
+    mov     w2, #TCP_ACK_FLAG       /* flags */
+    mov     x3, #0                  /* no payload */
+    mov     w4, #0
+    bl      tcp_build_frame
+    mov     w22, w0                 /* frame_len */
+
+    /* Send the probe */
+    ldr     x0, [x20, #TSCTX_DWC2_BASE]
+    ldr     x1, [x20, #TSCTX_ECM_STATE]
+    mov     x2, x21                 /* tx_buf */
+    mov     w3, w22                 /* frame_len */
+    ldr     x4, [x20, #TSCTX_SEND_FN]
+    blr     x4
+
+    /* Increase PERSIST_SHIFT (backoff) */
+    ldrb    w0, [x19, #TCONN_PERSIST_SHIFT]
+    add     w0, w0, #1
+    cmp     w0, #5                  /* cap shift so timeout doesn't exceed PERSIST_MAX */
+    mov     w1, #5
+    csel    w0, w0, w1, lo
+    strb    w0, [x19, #TCONN_PERSIST_SHIFT]
+
+    /* Re-arm persist timer */
+    mov     x0, x19
+    bl      tcp_persist_arm
+
+.Lpersist_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
 /* --- FSA transition table (9 states × 5 events = 45 entries × 16 bytes) ---
  *
  * Entry layout (matches vmio.inc TRANS_*):
@@ -2432,3 +2809,7 @@ tcp_rst_tokens:
 .balign 8
 tcp_rst_last_tick:
     .space  8
+
+.balign 4
+tcp_reaper_slot:
+    .space  4                       /* 0 = no active reaper slot */

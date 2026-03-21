@@ -205,6 +205,16 @@ test_tcp:
     bl      test_tcp_rst_ratelimit
     bl      test_tcp_rst_refill
     bl      test_tcp_syn_evict
+    bl      test_tcp_rst_seq_valid
+    bl      test_tcp_rst_seq_invalid
+    bl      test_tcp_idle_estab_timeout
+    bl      test_tcp_idle_estab_active
+    bl      test_tcp_idle_finwait2_timeout
+    bl      test_tcp_idle_closewait_timeout
+    bl      test_tcp_fast_retransmit
+    bl      test_tcp_dupack_below_thresh
+    bl      test_tcp_persist_arm
+    bl      test_tcp_persist_cancel
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2408,12 +2418,22 @@ test_tcp_close_wait_rst:
     mov     w1, #54
     bl      tcp_handle
 
-    /* Send RST to CLOSE_WAIT conn */
+    /* Send RST to CLOSE_WAIT conn — SEQ must match RCV_NXT (=3 after FIN) */
     ldr     x0, =tcp_rst_from_peer_template
     ldr     x1, =tcp_test_buf
     mov     w2, #54
     bl      ttcp_fill_checksum
-    ldr     x0, =tcp_test_buf
+    /* Patch SEQ to current RCV_NXT */
+    ldr     x19, =tcp_test_buf
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
     mov     w1, #54
     bl      tcp_handle
 
@@ -9346,6 +9366,656 @@ test_tcp_syn_evict:
     ret
 
 /* ========================================================================
+ * test_tcp_rst_seq_valid — RST with in-window SEQ closes ESTABLISHED
+ *
+ * Pre-seed ESTABLISHED with RCV_NXT=1000, RXLEN=0 (so RCV_WND=2048).
+ * Send RST with SEQ=1000 (== RCV_NXT, in window). Expect state=CLOSED.
+ * ======================================================================== */
+test_tcp_rst_seq_valid:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Pre-seed slot 1 as ESTABLISHED */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE           /* slot 1 */
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000                      /* port 80 NBO */
+    strh    w0, [x19, #TCONN_LPORT]
+    mov     w0, #0x3930                      /* port 12345 NBO (0x3039 rev16) */
+    strh    w0, [x19, #TCONN_RPORT]
+    movz    w0, #0x000A                      /* 10.0.2.2 NBO as LE word */
+    movk    w0, #0x0202, lsl #16
+    str     w0, [x19, #TCONN_RIP]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_RCV_NXT]
+    strh    wzr, [x19, #TCONN_RXLEN]
+    /* Peer MAC */
+    mov     w0, #0xBBAA
+    movk    w0, #0xDDCC, lsl #16
+    str     w0, [x19, #TCONN_RMAC]
+    mov     w0, #0xFFEE
+    strh    w0, [x19, #(TCONN_RMAC + 4)]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Build RST with SEQ=1000 (in window) */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x20, =tcp_test_buf
+    mov     w0, #1000
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x20
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rsv
+
+    ldr     x0, =name_tcp_rsv
+    bl      test_pass
+    b       .Ldone_tcp_rsv
+.Lfail_tcp_rsv:
+    ldr     x0, =name_tcp_rsv
+    bl      test_fail
+.Ldone_tcp_rsv:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_rst_seq_invalid — RST with out-of-window SEQ is dropped
+ *
+ * Pre-seed ESTABLISHED with RCV_NXT=1000, RXLEN=0 (RCV_WND=2048).
+ * Send RST with SEQ=5000 (outside window). Expect state=ESTABLISHED.
+ * ======================================================================== */
+test_tcp_rst_seq_invalid:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Pre-seed slot 1 as ESTABLISHED */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+    mov     w0, #0x3930
+    strh    w0, [x19, #TCONN_RPORT]
+    movz    w0, #0x0A00
+    movk    w0, #0x0202, lsl #16
+    str     w0, [x19, #TCONN_RIP]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_RCV_NXT]
+    strh    wzr, [x19, #TCONN_RXLEN]
+    mov     w0, #0xBBAA
+    movk    w0, #0xDDCC, lsl #16
+    str     w0, [x19, #TCONN_RMAC]
+    mov     w0, #0xFFEE
+    strh    w0, [x19, #(TCONN_RMAC + 4)]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Build RST with SEQ=5000 (outside window: 5000-1000=4000 >= 2048) */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x20, =tcp_test_buf
+    mov     w0, #5000
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x20
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* tcp_handle should return 0 (dropped) */
+    cbnz    w0, .Lfail_tcp_rsi
+
+    /* Verify state still ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_rsi
+
+    ldr     x0, =name_tcp_rsi
+    bl      test_pass
+    b       .Ldone_tcp_rsi
+.Lfail_tcp_rsi:
+    ldr     x0, =name_tcp_rsi
+    bl      test_fail
+.Ldone_tcp_rsi:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_idle_estab_timeout — Reaper closes idle ESTABLISHED connection
+ *
+ * Pre-seed ESTABLISHED with LAST_ACTIVE = now - 121*freq.
+ * Call tcp_idle_reaper_cb. Verify state=CLOSED.
+ * ======================================================================== */
+test_tcp_idle_estab_timeout:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+    /* Don't set up LISTEN — we only need to pre-seed a slot */
+
+    /* Compute LAST_ACTIVE = now - 121*freq */
+    bl      timer_freq
+    mov     x22, x0                         /* freq */
+    bl      timer_now
+    mov     x20, x0                         /* now */
+    mov     x1, #121
+    mul     x1, x22, x1
+    sub     x21, x20, x1                    /* past = now - 121*freq */
+
+    /* Pre-seed slot 0 as ESTABLISHED */
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Call reaper */
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    /* Verify state = CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_iet
+
+    ldr     x0, =name_tcp_iet
+    bl      test_pass
+    b       .Ldone_tcp_iet
+.Lfail_tcp_iet:
+    ldr     x0, =name_tcp_iet
+    bl      test_fail
+.Ldone_tcp_iet:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_idle_estab_active — Reaper preserves active ESTABLISHED connection
+ *
+ * Pre-seed ESTABLISHED with LAST_ACTIVE = now - 60*freq (under threshold).
+ * Call reaper. Verify state=ESTABLISHED.
+ * ======================================================================== */
+test_tcp_idle_estab_active:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0
+    bl      timer_now
+    mov     x20, x0
+    mov     x1, #60
+    mul     x1, x22, x1
+    sub     x21, x20, x1                    /* past = now - 60*freq */
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    /* Verify state still ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_iea
+
+    ldr     x0, =name_tcp_iea
+    bl      test_pass
+    b       .Ldone_tcp_iea
+.Lfail_tcp_iea:
+    ldr     x0, =name_tcp_iea
+    bl      test_fail
+.Ldone_tcp_iea:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_idle_finwait2_timeout — Reaper closes idle FIN_WAIT_2
+ *
+ * Pre-seed FIN_WAIT_2 with LAST_ACTIVE = now - 61*freq.
+ * Call reaper. Verify state=CLOSED.
+ * ======================================================================== */
+test_tcp_idle_finwait2_timeout:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0
+    bl      timer_now
+    mov     x20, x0
+    mov     x1, #61
+    mul     x1, x22, x1
+    sub     x21, x20, x1
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_FIN_WAIT_2
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_ift
+
+    ldr     x0, =name_tcp_ift
+    bl      test_pass
+    b       .Ldone_tcp_ift
+.Lfail_tcp_ift:
+    ldr     x0, =name_tcp_ift
+    bl      test_fail
+.Ldone_tcp_ift:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_idle_closewait_timeout — Reaper closes idle CLOSE_WAIT
+ *
+ * Pre-seed CLOSE_WAIT with LAST_ACTIVE = now - 61*freq.
+ * Call reaper. Verify state=CLOSED.
+ * ======================================================================== */
+test_tcp_idle_closewait_timeout:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0
+    bl      timer_now
+    mov     x20, x0
+    mov     x1, #61
+    mul     x1, x22, x1
+    sub     x21, x20, x1
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_CLOSE_WAIT
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_ict
+
+    ldr     x0, =name_tcp_ict
+    bl      test_pass
+    b       .Ldone_tcp_ict
+.Lfail_tcp_ict:
+    ldr     x0, =name_tcp_ict
+    bl      test_fail
+.Ldone_tcp_ict:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_fast_retransmit — 3 duplicate ACKs trigger fast retransmit
+ *
+ * Handshake → tcp_send → set up mock send_ctx → send 3 dup ACKs →
+ * verify send_fn called, DUP_ACK_CNT reset, ssthresh updated.
+ * ======================================================================== */
+test_tcp_fast_retransmit:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_frtx
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_frtx
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counters */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Record SND_UNA for dup ACK check */
+    ldr     w20, [x21, #TCONN_SND_UNA]
+
+    /* Send 3 duplicate ACKs (seg_ack == SND_UNA) */
+    mov     w19, #3
+.Lfrtx_dup_loop:
+    cbz     w19, .Lfrtx_check
+
+    /* Build ACK frame with seg_ack = SND_UNA */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    /* Set SEQ = RCV_NXT of peer (use 2, from SYN template SEQ=1 +1) */
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* Set ACK = SND_UNA (NBO) — this is the dup ACK */
+    rev     w1, w20
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    sub     w19, w19, #1
+    b       .Lfrtx_dup_loop
+
+.Lfrtx_check:
+    /* Verify mock send was called (retransmit happened) */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_frtx
+
+    /* Verify DUP_ACK_CNT reset to 0 */
+    ldrb    w0, [x21, #TCONN_DUP_ACK_CNT]
+    cbnz    w0, .Lfail_tcp_frtx
+
+    /* Verify ssthresh was set (should be max(cwnd/2, 2*MSS)) */
+    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    cbz     w0, .Lfail_tcp_frtx
+
+    ldr     x0, =name_tcp_frtx
+    bl      test_pass
+    b       .Ldone_tcp_frtx
+.Lfail_tcp_frtx:
+    ldr     x0, =name_tcp_frtx
+    bl      test_fail
+.Ldone_tcp_frtx:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_dupack_below_thresh — 2 dup ACKs don't trigger retransmit
+ *
+ * Same setup, send only 2 dup ACKs. Verify DUP_ACK_CNT=2, no retransmit.
+ * ======================================================================== */
+test_tcp_dupack_below_thresh:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_dabt
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Send 5 bytes to populate retransmit buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_dabt
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    ldr     w20, [x21, #TCONN_SND_UNA]
+
+    /* Send 2 duplicate ACKs */
+    mov     w19, #2
+.Ldabt_dup_loop:
+    cbz     w19, .Ldabt_check
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w20
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    sub     w19, w19, #1
+    b       .Ldabt_dup_loop
+
+.Ldabt_check:
+    /* Verify DUP_ACK_CNT == 2 */
+    ldrb    w0, [x21, #TCONN_DUP_ACK_CNT]
+    cmp     w0, #2
+    b.ne    .Lfail_tcp_dabt
+
+    /* Verify mock send was NOT called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_dabt
+
+    ldr     x0, =name_tcp_dabt
+    bl      test_pass
+    b       .Ldone_tcp_dabt
+.Lfail_tcp_dabt:
+    ldr     x0, =name_tcp_dabt
+    bl      test_fail
+.Ldone_tcp_dabt:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_persist_arm — Zero-window ACK sets PERSIST_SHIFT=1
+ *
+ * Handshake → send ACK with window=0. Verify PERSIST_SHIFT=1.
+ * ======================================================================== */
+test_tcp_persist_arm:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pa
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Verify PERSIST_SHIFT starts at 0 */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cbnz    w0, .Lfail_tcp_pa
+
+    /* Build ACK with window=0 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    /* Set SEQ from peer perspective */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* Set ACK = SND_NXT (valid) */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Set window = 0 */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* Recompute checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify PERSIST_SHIFT == 1 */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_pa
+
+    /* Verify SND_WND == 0 */
+    ldrh    w0, [x21, #TCONN_SND_WND]
+    cbnz    w0, .Lfail_tcp_pa
+
+    ldr     x0, =name_tcp_pa
+    bl      test_pass
+    b       .Ldone_tcp_pa
+.Lfail_tcp_pa:
+    ldr     x0, =name_tcp_pa
+    bl      test_fail
+.Ldone_tcp_pa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_persist_cancel — Non-zero window clears PERSIST_SHIFT
+ *
+ * Pre-seed ESTABLISHED with PERSIST_SHIFT=2. Send ACK with window>0.
+ * Verify PERSIST_SHIFT=0.
+ * ======================================================================== */
+test_tcp_persist_cancel:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pc
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Set PERSIST_SHIFT = 2 (as if persist was armed) */
+    mov     w0, #2
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Build ACK with window > 0 (template has 0xFFFF) */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify PERSIST_SHIFT == 0 */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cbnz    w0, .Lfail_tcp_pc
+
+    ldr     x0, =name_tcp_pc
+    bl      test_pass
+    b       .Ldone_tcp_pc
+.Lfail_tcp_pc:
+    ldr     x0, =name_tcp_pc
+    bl      test_fail
+.Ldone_tcp_pc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -9958,6 +10628,16 @@ name_tcp_oom:       .asciz "tcp_ooo_merge"
 name_tcp_rl:        .asciz "tcp_rst_ratelimit"
 name_tcp_rf:        .asciz "tcp_rst_refill"
 name_tcp_sevict:    .asciz "tcp_syn_evict"
+name_tcp_rsv:       .asciz "tcp_rst_seq_valid"
+name_tcp_rsi:       .asciz "tcp_rst_seq_invalid"
+name_tcp_iet:       .asciz "tcp_idle_estab_timeout"
+name_tcp_iea:       .asciz "tcp_idle_estab_active"
+name_tcp_ift:       .asciz "tcp_idle_finwait2_timeout"
+name_tcp_ict:       .asciz "tcp_idle_closewait_timeout"
+name_tcp_frtx:      .asciz "tcp_fast_retransmit"
+name_tcp_dabt:      .asciz "tcp_dupack_below_thresh"
+name_tcp_pa:        .asciz "tcp_persist_arm"
+name_tcp_pc:        .asciz "tcp_persist_cancel"
 
 tcp_send_payload:
     .ascii  "World"

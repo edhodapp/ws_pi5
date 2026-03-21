@@ -74,7 +74,9 @@
 .equ TCONN_DUP_ACK_CNT, 70    /* u8  — duplicate ACK counter */
 .equ TCONN_OOO_COUNT,  71      /* u8  — number of OOO slots in use (0-4) */
 .equ TCONN_OOO_SLOTS,  72      /* 32 bytes — 4 × {SEQ u32, LEN u16, PAD u16} */
-/* 104-127: reserved for future use */
+.equ TCONN_LAST_ACTIVE,    104     /* u64 — last activity timestamp (counter ticks) */
+.equ TCONN_PERSIST_SHIFT,  112     /* u8 — persist backoff shift (0=inactive) */
+/* 113-127: reserved for future use */
 .equ TCONN_SIZE,       128     /* power of 2 → lsl #7 for indexing */
 
 /* Connection table */
@@ -121,6 +123,19 @@
 .equ TCP_OPT_MSS_LEN,    4
 .equ TCP_DEFAULT_MSS,     536   /* RFC 1122 */
 .equ TCP_OUR_MSS,         1460  /* ETH_MTU(1500) - IP(20) - TCP(20) */
+
+/* Fast retransmit (RFC 5681) */
+.equ TCP_DUPACK_THRESH,    3       /* trigger fast retransmit at 3 dup ACKs */
+
+/* Idle connection reaper */
+.equ TCP_IDLE_ESTAB,       120     /* seconds — ESTABLISHED idle timeout */
+.equ TCP_IDLE_FINWAIT2,    60      /* seconds — FIN_WAIT_2 idle timeout */
+.equ TCP_IDLE_CLOSEWAIT,   60      /* seconds — CLOSE_WAIT idle timeout */
+.equ TCP_REAPER_INTERVAL,  30      /* seconds — reaper fires every 30s */
+
+/* Persist timer (zero-window probing) */
+.equ TCP_PERSIST_INITIAL,  5       /* initial persist timeout (seconds) */
+.equ TCP_PERSIST_MAX,      60      /* max persist timeout (seconds) */
 
 /* RST rate limiting */
 .equ TCP_RST_BURST,       10    /* max tokens (refilled every second) */
