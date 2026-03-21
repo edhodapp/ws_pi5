@@ -78,7 +78,7 @@ drivers/        Hardware drivers
   cdc_ecm.S       CDC-ECM device init, activate, send/recv
   timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
 include/        Shared constants and macros (.inc files)
-tests/          Test sources — 292 unit tests across 26 files
+tests/          Test sources — 295 unit tests across 26 files
 tests/func/     PICT-based functional test models
 fuzz/           Fuzz harness for network packet parsers
 scripts/        Build and test automation (including Python oracle)
@@ -127,7 +127,7 @@ make clean
 
 ### Unit Tests
 
-292 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to the full TCP connection lifecycle including congestion control, retransmission, timestamps, OOO buffering, and security hardening.
+295 tests run on `qemu-system-aarch64 -M raspi3b`, covering every layer of the stack from UART output through USB enumeration to the full TCP connection lifecycle including congestion control, retransmission, timestamps, OOO buffering, and security hardening.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -349,53 +349,127 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 - MD5 hash for TCP ISN generation (RFC 6528)
 - Dependency injection for testability (send function pointer, MMIO base addresses as parameters)
 
-**Test coverage:** 292 unit tests (complete branch coverage) + 145 functional tests (138 PICT-generated exhaustive combinatorial + 7 handcrafted scenario) + 29 fuzz corpus inputs (13 single-packet + 16 multi-packet sequence). All tests run on QEMU raspi3b, zero crashes.
+**Test coverage:** 295 unit tests (complete branch coverage) + 145 functional tests (138 PICT-generated exhaustive combinatorial + 7 handcrafted scenario) + 29 fuzz corpus inputs (13 single-packet + 16 multi-packet sequence). All tests run on QEMU raspi3b, zero crashes.
 
 **Next:**
-- HTTP request parsing and response generation (the only hard blocker — TCP transport is complete)
+- Complete the production-quality network stack hardening described below, then implement HTTP
 
 ## Work in Progress
 
-### TCP Stack Audit: HTTP/Internet Readiness
+### Network Stack Production-Quality Audit
 
-The TCP transport layer is complete. The only blocker for serving HTTP is the application layer itself.
+A full audit of every layer against the relevant RFCs identified ~50 issues spanning compliance gaps, missing validation, security vulnerabilities, and robustness failures. The stack is functional in a controlled lab environment but does not yet meet the standard for production deployment on an untrusted network.
 
-#### Hard Blockers
+Work proceeds bottom-up — each layer must be solid before building on it. The Ethernet/glue layer is complete. Remaining work is organized by layer in fix order.
+
+#### Completed: Ethernet / Glue Layer
+
+| Fix | Description |
+|-----|-------------|
+| **Frame length from USB** | `usb_bulk_xfer` returns actual transfer length via HCTSIZ residual; `net_loop` no longer hardcodes `ETH_FRAME_MAX` |
+| **Upper-bound frame check** | `eth_type` rejects frames > 1514 bytes |
+| **802.3 length rejection** | `eth_type` rejects EtherType < 0x0600 (IEEE 802.3 length field) |
+| **MAC destination filtering** | `net_recv_one` drops frames not addressed to us or broadcast |
+| **Init ordering** | `tcp_set_timer_pool` called before `tcp_listen` |
+| **CDC-ECM FCS documented** | USB transport strips CRC; no software FCS validation needed |
+
+#### Layer 2: ARP (`lib/arp.S`) — RFC 826
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **ARP replies not processed** — handler only accepts OPER=1 (request); never learns from replies | Critical | RFC 826 |
+| **No cache timeout** — gateway MAC cached forever; stale entry = total outbound failure | Critical | RFC 826 |
+| **No SPA validation** — accepts SPA=0.0.0.0, broadcast, multicast; cache poisoning vector | High | Security |
+| **No gratuitous ARP** — no duplicate address detection or failover support | Medium | RFC 5227 |
+| **Single-entry cache** — only gateway MAC stored; can't resolve other hosts on subnet | Medium | Design |
+
+#### Layer 3: IP (`lib/ip.S`, `lib/ip_reasm.S`) — RFC 791, RFC 1122
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **TTL=0 not rejected** — packets with TTL=0 processed normally | High | RFC 1122 §3.2.1.7 (MUST) |
+| **Overlapping fragments accepted** — classic Teardrop attack surface; no overlap detection | High | RFC 5722 §2.2 |
+| **Fragment offset alignment not validated** — non-8-byte-aligned offsets accepted for non-final fragments | Medium | RFC 791 §3.1 |
+| **Non-final fragment length not validated** — MF=1 fragments with non-8-multiple length accepted | Medium | RFC 791 §3.1 |
+| **TTL on reassembly set to default** — should be min(all fragment TTLs) | Medium | RFC 1122 §3.2.1.11 |
+| **No ICMP Time Exceeded on reassembly timeout** | Medium | RFC 792 |
+| **Slot exhaustion silent** — 4-slot limit with no eviction or signaling | Medium | Design |
+
+#### Layer 3.5: ICMP (`lib/icmp.S`) — RFC 792, RFC 1122, RFC 1191, RFC 1812
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **No ICMP error generation** — no Destination Unreachable, Time Exceeded, or Parameter Problem | Critical | RFC 1122 §3.2.2 (MUST) |
+| **No ICMP rate limiting** — must rate-limit error messages to prevent storms | Critical | RFC 1812 §4.3.2.8 (MUST) |
+| **No PMTUD** — no generation or processing of type 3 code 4; TCP fails on MTU < 1500 paths | Critical | RFC 1191 |
+| **Inbound ICMP checksum not validated** — corrupted messages processed as valid | High | RFC 792 |
+| **ICMP type 3 codes not distinguished** — all Unreachable codes treated identically; no PMTUD extraction | Medium | RFC 792 |
+
+ICMP is the weakest layer. Error generation alone is estimated at ~400-600 lines of assembly plus callsites in ip_reasm (timeout), ip_handle (TTL/protocol), and udp_handle (port unreachable).
+
+#### Layer 4: TCP (`lib/tcp.S`) — RFC 9293, RFC 7323, RFC 5681, RFC 6298
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **OOO buffer accepts segments outside RCV_WND** — checks buffer space but not window boundary | High | RFC 9293 §3.3.7 |
+| **PAWS check only on data segments** — pure ACKs with stale timestamps not rejected | High | RFC 7323 §4.2 |
+| **SYN in ESTABLISHED writes CLOSED before handler check** — state change before validation | High | RFC 9293 §3.10.4 |
+| **No window scaling (WSCALE)** — window capped at 64 KB | High | RFC 7323 §2.2 |
+| **No RFC 6298 RTO** — simple 1s/2s/4s backoff instead of SRTT/RTTVAR measurement | Medium | RFC 6298 |
+| **ISN time component ~64ms granularity** — predictable within window | Medium | RFC 6948 |
+| **DUP_ACK_CNT not reset on RTO timeout** — stale count could trigger spurious fast retransmit | Medium | RFC 5681 |
+| **SYN_RCVD uses same idle timeout as ESTABLISHED (120s)** — should be shorter | Medium | RFC 1122 §4.2.3.6 |
+| **TS_RECENT updated without monotonicity check** | Low | RFC 7323 §4.3 |
+
+The TCP core is solid — the FSA, congestion control, retransmission, timestamps, and security hardening all work correctly. These are refinements, not fundamental gaps.
+
+#### Layer 4: UDP (`lib/udp.S`) — RFC 768
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **No minimum UDP length check** — length < 8 bytes not rejected | High | RFC 768 / RFC 1122 §4.1.3.4 (MUST) |
+| **Zero checksum silently accepted** — no counting of unverified packets | Medium | RFC 768 |
+
+#### Application: NTP (`lib/ntp.S`) — RFC 5905
+
+| Issue | Severity | RFC |
+|-------|----------|-----|
+| **No timestamp validation** — no monotonicity, jump detection, or replay protection | Critical | RFC 5905 §8.2 |
+| **Only 32-bit seconds** — fractional seconds ignored; 1-second resolution | High | RFC 5905 §6 |
+| **Leap Indicator LI=3 (unsync) not rejected** | Medium | RFC 5905 §7.3 |
+| **NTP version field not validated** | Medium | RFC 5905 §7.3 |
+| **Root dispersion ignored** — poor-quality sources accepted | Medium | RFC 5905 §8.2.1 |
+| **No request/response matching** — originate timestamp not set or verified; off-path injection possible | Medium | RFC 5905 §8.1 |
+| **Wall clock can jump backward** — no monotonicity enforcement across syncs | Medium | Robustness |
+| **No poll backoff on sync failure** — hammers server every 64s forever | Medium | RFC 5905 §8.2.4 |
+
+#### Infrastructure: VMIO Engine / Timers
+
+| Issue | Severity | Location |
+|-------|----------|----------|
+| **Integer overflow in FSA table indexing** — 32-bit multiply can wrap on corrupted state | High | vmio_engine.S |
+| **State not bounds-checked** — only evt_code validated; corrupted state → OOB access | High | vmio_engine.S |
+| **`timer_cancel` no index bounds check** — caller-supplied index not validated | Medium | timer_pool.S |
+
+#### Application Layer (Not Yet Started)
 
 | Gap | Impact |
 |-----|--------|
 | **HTTP request parser** | Cannot understand what client wants |
 | **HTTP response generator** | Cannot reply to client |
 
-#### Recommended Before Internet Exposure
+#### Design Decisions Unchanged
 
-| Gap | Risk |
-|-----|------|
-| **PMTUD (ICMP "too big")** | DF bit is set; paths with MTU < 1500 (VPN, PPPoE) will black-hole packets |
-| **SWS avoidance (receive side)** | Near-full rxbuf advertises tiny windows, causing inefficient small segments |
+These limitations are intentional for this project's scope and do not require changes:
 
-#### Acceptable Limitations
-
-| Item | Status | Why it's OK for basic HTTP |
-|------|--------|---------------------------|
-| No segmentation | App loops `tcp_send` with MSS chunks | Straightforward for small pages |
-| 1 segment in flight | ~29 KB/s at 50ms RTT | Fine for a 5 KB static page (~200ms) |
-| 2048-byte rxbuf | Typical GET is 200-500 bytes | Sufficient for GET-only server |
-| 16-slot conn table | Personal/demo traffic | Workable with SYN eviction + reaper |
-| No RTT estimation | Fixed 1s initial RTO | Conservative but functional |
-| No Nagle | Immediate sends | HTTP servers disable Nagle anyway |
-| No window scaling / SACK | Small buffers, 1-seg-in-flight | Irrelevant for this design |
-
-#### What's Implemented
-
-The full TCP capability list, all tested:
-
-- **Core**: 10-state FSA, 3-way handshake, passive/active/simultaneous close, TIME_WAIT with 2MSL timer, RST generation and handling
-- **Data transfer**: in-order receive, `tcp_send`, receive buffer management (`rx_peek`/`rx_flush`), send window tracking, dynamic receive window advertisement
-- **Reliability**: retransmission timer with exponential backoff (max 8 retries), fast retransmit (3 dup ACKs, RFC 5681), congestion control (slow start, congestion avoidance, ssthresh)
-- **Options**: MSS negotiation, TCP timestamps (TSopt), PAWS (Protection Against Wrapped Sequences)
-- **Security**: RST SEQ validation (RFC 5961), SYN flood protection with SYN_RCVD eviction, RST rate limiting (token bucket), ICMP soft errors for ESTABLISHED+ (RFC 5461), idle connection reaper (per-state timeouts)
-- **Robustness**: persist timer (zero-window probing with backoff), DF bit on all outgoing IP, data-on-FIN acceptance, TIME_WAIT FIN re-ACK, OOO segment buffering (4 slots per connection), IP fragment reassembly
+| Item | Rationale |
+|------|-----------|
+| 1 segment in flight | Sufficient for small static pages; ~29 KB/s at 50ms RTT |
+| 2048-byte rxbuf | Typical HTTP GET is 200-500 bytes |
+| 16-slot connection table | Personal/demo traffic; SYN eviction + reaper mitigates exhaustion |
+| No Nagle algorithm | HTTP servers disable Nagle anyway |
+| No SACK | Irrelevant with 1-segment-in-flight design |
+| No IP options parsing | Deliberately rejected (VER_IHL == 0x45 only) |
 
 ## Future: Multi-Pi Architecture
 
