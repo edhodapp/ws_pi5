@@ -101,6 +101,8 @@ _start:
     bl      test_udp
     bl      test_timer
     bl      test_ntp
+    bl      test_ip_reasm_two_frags
+    bl      test_ip_reasm_timeout
     bl      test_tcp
 
     /* === Print summary === */

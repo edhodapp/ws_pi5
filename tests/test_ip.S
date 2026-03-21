@@ -25,6 +25,8 @@
 .global test_ip_handle_bad_ver
 .global test_ip_handle_totlen_short
 .global test_ip_handle_totlen_overrun
+.global test_ip_reasm_two_frags
+.global test_ip_reasm_timeout
 
 .section .text
 
@@ -306,6 +308,155 @@ test_ip_handle_totlen_overrun:
     ret
 
 /* ========================================================================
+ * test_ip_reasm_two_frags — Two-fragment ICMP reassembly
+ *
+ * Fragment 1: offset=0, MF=1, 16 bytes payload
+ * Fragment 2: offset=2, MF=0, 8 bytes payload
+ * Expected: reassembled frame with 24-byte ICMP payload
+ * ======================================================================== */
+.global test_ip_reasm_two_frags
+test_ip_reasm_two_frags:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Reset reassembly state */
+    bl      ip_reasm_init
+
+    /* ---- Fragment 1: should return 0 (incomplete) ---- */
+    /* Copy fragment 1 to mutable buffer */
+    ldr     x0, =ip_frag1_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lrf_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrf_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_reasm_input
+
+    cbnz    x0, .Lfail_ip_reasm
+
+    /* ---- Fragment 2: should return non-zero (complete) ---- */
+    ldr     x0, =ip_frag2_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lrf_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrf_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+
+    cbz     x0, .Lfail_ip_reasm
+
+    /* ---- Verify reassembled IP header ---- */
+    mov     x4, x0                      /* x4 = frame ptr */
+
+    /* IP total length should be 44 (20 + 24) = 0x002C */
+    ldrh    w0, [x4, #(ETH_PAYLOAD + IP_TOTLEN)]
+    rev16   w0, w0
+    uxth    w0, w0
+    cmp     w0, #44
+    b.ne    .Lfail_ip_reasm
+
+    /* Proto should be ICMP (1) */
+    ldrb    w0, [x4, #(ETH_PAYLOAD + IP_PROTO)]
+    cmp     w0, #IP_PROTO_ICMP
+    b.ne    .Lfail_ip_reasm
+
+    /* Flags/frag should be 0 (not fragmented) */
+    ldrh    w0, [x4, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    cbnz    w0, .Lfail_ip_reasm
+
+    /* Verify IP checksum == 0 */
+    add     x0, x4, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    cbnz    w0, .Lfail_ip_reasm
+
+    /* ---- Verify reassembled payload (24 bytes) ---- */
+    add     x0, x4, #(ETH_PAYLOAD + IP_HDR_MIN)
+    ldr     x1, =ip_reasm_expected_payload
+    mov     w2, #24
+.Lrf_verify:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    ldrb    w5, [x1, x2]
+    cmp     w3, w5
+    b.ne    .Lfail_ip_reasm
+    cbnz    w2, .Lrf_verify
+
+    /* ---- Verify slot is freed ---- */
+    ldr     x0, =reasm_slots
+    ldrb    w0, [x0, #REASM_FLAGS]
+    cbnz    w0, .Lfail_ip_reasm
+
+    ldr     x0, =name_ip_reasm
+    bl      test_pass
+    b       .Ldone_ip_reasm
+
+.Lfail_ip_reasm:
+    ldr     x0, =name_ip_reasm
+    bl      test_fail
+
+.Ldone_ip_reasm:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_timeout — Stale slot freed by timeout callback
+ * ======================================================================== */
+.global test_ip_reasm_timeout
+test_ip_reasm_timeout:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Send fragment 1 to allocate a slot */
+    ldr     x0, =ip_frag1_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lrt_copy:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrt_copy
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_reasm_input
+
+    /* Slot should be active */
+    ldr     x0, =reasm_slots
+    ldrb    w1, [x0, #REASM_FLAGS]
+    tbz     w1, #7, .Lfail_ip_timeout
+
+    /* Fire timeout callback on the slot */
+    bl      ip_reasm_timeout_cb
+
+    /* Slot should now be inactive */
+    ldr     x0, =reasm_slots
+    ldrb    w1, [x0, #REASM_FLAGS]
+    tbnz    w1, #7, .Lfail_ip_timeout
+
+    ldr     x0, =name_ip_timeout
+    bl      test_pass
+    b       .Ldone_ip_timeout
+
+.Lfail_ip_timeout:
+    ldr     x0, =name_ip_timeout
+    bl      test_fail
+
+.Ldone_ip_timeout:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -432,6 +583,34 @@ ip_totlen_overrun_frame:
     .byte   0x08, 0x00, 0xF7, 0xFD
     .byte   0x00, 0x01, 0x00, 0x01
 
+/*
+ * Fragment 1: offset=0, MF=1, 16-byte payload (50 bytes total)
+ * IP: totlen=36, id=0xABCD, flags_frag=0x2000 (MF=1,off=0)
+ */
+.balign 4
+ip_frag1_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00, 0x45, 0x00
+    .byte   0x00, 0x24, 0xAB, 0xCD, 0x20, 0x00, 0x40, 0x01, 0x96, 0xFB, 0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00
+    .byte   0x02, 0x0F, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E
+    .byte   0x4F, 0x50
+
+/*
+ * Fragment 2: offset=2 (16 bytes), MF=0, 8-byte payload (42 bytes total)
+ * IP: totlen=28, id=0xABCD, flags_frag=0x0002 (MF=0,off=2)
+ */
+.balign 4
+ip_frag2_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00, 0x45, 0x00
+    .byte   0x00, 0x1C, 0xAB, 0xCD, 0x00, 0x02, 0x40, 0x01, 0xB7, 0x01, 0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00
+    .byte   0x02, 0x0F, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58
+
+/* Expected reassembled payload (16 + 8 = 24 bytes) */
+.balign 4
+ip_reasm_expected_payload:
+    .byte   0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48
+    .byte   0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50
+    .byte   0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58
+
 name_ip_cksum:      .asciz "ip_checksum"
 name_ip_carry:      .asciz "ip_checksum_carry"
 name_ip_icmp:       .asciz "ip_handle_icmp"
@@ -442,6 +621,8 @@ name_ip_unknown:    .asciz "ip_handle_unknown_proto"
 name_ip_bad_ver:    .asciz "ip_handle_bad_ver"
 name_ip_totlen_short:   .asciz "ip_handle_totlen_short"
 name_ip_totlen_overrun: .asciz "ip_handle_totlen_overrun"
+name_ip_reasm:      .asciz "ip_reasm_two_frags"
+name_ip_timeout:    .asciz "ip_reasm_timeout"
 
 .section .data
 .balign 4
@@ -451,3 +632,7 @@ ip_cksum_buf:
 .balign 4
 ip_handle_buf:
     .space  42
+
+.balign 8
+ip_reasm_buf:
+    .space  ETH_FRAME_MAX

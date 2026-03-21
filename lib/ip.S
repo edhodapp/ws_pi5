@@ -105,6 +105,26 @@ ip_handle:
     cmp     w0, w1
     b.ne    .Lip_drop
 
+    /* 6.5 Check for IP fragments: MF flag or non-zero offset */
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    rev16   w0, w0
+    uxth    w0, w0
+    and     w2, w0, #0x3FFF        /* MF + frag offset */
+    cbz     w2, .Lip_dispatch
+
+    /* Fragment → reassembly engine */
+    mov     x0, x19
+    mov     w1, w20
+    bl      ip_reasm_input
+    cbz     x0, .Lip_drop          /* incomplete or error */
+
+    /* Reassembled: x0 = frame pointer (built in-place) */
+    mov     x19, x0
+    ldrh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+    rev16   w0, w0
+    uxth    w21, w0
+
+.Lip_dispatch:
     /* 7. Dispatch on IP.Protocol */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_PROTO)]
     cmp     w0, #IP_PROTO_ICMP

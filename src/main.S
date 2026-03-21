@@ -53,6 +53,11 @@ main:
     mov     w1, #TPOOL_DEFAULT_CAP
     bl      timer_pool_init
 
+    /* Initialize IP fragment reassembly */
+    bl      ip_reasm_init
+    ldr     x0, =timer_pool
+    bl      ip_reasm_set_timer_pool
+
     /* Initialize TCP connection table */
     bl      tcp_init
     mov     w0, #80

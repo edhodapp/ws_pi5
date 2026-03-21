@@ -69,6 +69,23 @@
 .equ UDP_HDR_LEN,      8
 .equ UDP_ECHO_PORT,    7
 
+/* IP fragment reassembly — slot layout */
+.equ REASM_SRC_IP,       0      /* u32: source IP (NBO) */
+.equ REASM_DST_IP,       4      /* u32: dest IP (NBO) */
+.equ REASM_IP_ID,        8      /* u16: IP identification (NBO) */
+.equ REASM_PROTO,        10     /* u8:  IP protocol */
+.equ REASM_FLAGS,        11     /* u8:  bit 0=have_last, bit 7=active */
+.equ REASM_TOTAL_LEN,    12     /* u16: total payload bytes (valid when have_last) */
+.equ REASM_TIMER_SLOT,   14     /* u8:  timer pool slot (0xFF=none) */
+.equ REASM_HDR_SIZE,     32     /* padded to 32 */
+.equ REASM_BITMAP,       32     /* 32-byte bitmap (256 bits, 1 per 8-byte unit) */
+.equ REASM_BITMAP_SIZE,  32
+.equ REASM_DATA,         64     /* payload buffer */
+.equ REASM_BUF_SIZE,     2048
+.equ REASM_SLOT_SIZE,    2112   /* 64 + 2048 */
+.equ REASM_MAX_SLOTS,    4
+.equ REASM_TIMEOUT_SECS, 30
+
 /* Static IP configuration (network byte order for zero-cost wire comparison) */
 .equ NET_IP_NBO,       0x0A00020F      /* 10.0.2.15 */
 .equ NET_GW_NBO,       0x0A000202      /* 10.0.2.2 */
