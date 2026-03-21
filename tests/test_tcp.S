@@ -61,6 +61,14 @@ test_tcp:
     subs    w1, w1, #1
     b.ne    .Lttcp_zero_table
 
+    /* Initialize RST rate limiter for Phase 1 tests */
+    ldr     x0, =tcp_rst_tokens
+    mov     w1, #TCP_RST_BURST
+    str     w1, [x0]
+    bl      timer_now
+    ldr     x1, =tcp_rst_last_tick
+    str     x0, [x1]
+
     bl      test_tcp_checksum
     bl      test_tcp_checksum_data
     bl      test_tcp_short
@@ -194,6 +202,8 @@ test_tcp:
     bl      test_tcp_cwnd_rtx_reset
     bl      test_tcp_cwnd_gate
     bl      test_tcp_ooo_merge
+    bl      test_tcp_rst_ratelimit
+    bl      test_tcp_syn_evict
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1405,7 +1415,8 @@ test_tcp_syn_rcvd_bad_ack:
     ret
 
 /* ========================================================================
- * test_tcp_table_full — Fill slots 1-15 as SYN_RCVD, then SYN → RST
+ * test_tcp_table_full — Fill slots 1-15 as ESTABLISHED, then SYN → RST
+ * (Uses ESTABLISHED so SYN_RCVD eviction cannot rescue the allocation)
  * ======================================================================== */
 test_tcp_table_full:
     stp     x29, x30, [sp, #-16]!
@@ -1414,10 +1425,10 @@ test_tcp_table_full:
     mov     w0, #80
     bl      tcp_listen
 
-    /* Fill slots 1-15 with state=SYN_RCVD (non-CLOSED) */
+    /* Fill slots 1-15 with state=ESTABLISHED (non-evictable) */
     ldr     x0, =tcp_conn_table
     add     x0, x0, #TCONN_SIZE    /* skip slot 0 (LISTEN) */
-    mov     w2, #TCPS_SYN_RCVD
+    mov     w2, #TCPS_ESTABLISHED
     mov     w3, #15
 .Ltfull_fill:
     strb    w2, [x0, #TCONN_STATE]
@@ -9142,6 +9153,144 @@ test_tcp_ooo_merge:
     ret
 
 /* ========================================================================
+ * test_tcp_rst_ratelimit — Send 11 SYNs to unmatched port; first 10 get
+ * RST, 11th is dropped (rate-limited)
+ * ======================================================================== */
+test_tcp_rst_ratelimit:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Seed last_tick with current time so no refill occurs during test */
+    bl      timer_now
+    ldr     x1, =tcp_rst_last_tick
+    str     x0, [x1]
+
+    /* Send 10 SYNs to port 12345 (no listener) — all should get RST (54) */
+    mov     w19, #10
+.Lrl_send_loop:
+    cbz     w19, .Lrl_send_11th
+    sub     w19, w19, #1
+
+    ldr     x0, =tcp_syn_wrongport_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rl
+    b       .Lrl_send_loop
+
+.Lrl_send_11th:
+    /* 11th SYN — tokens exhausted, should be dropped (return 0) */
+    ldr     x0, =tcp_syn_wrongport_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    cbnz    w0, .Lfail_tcp_rl
+
+    ldr     x0, =name_tcp_rl
+    bl      test_pass
+    b       .Ldone_tcp_rl
+
+.Lfail_tcp_rl:
+    ldr     x0, =name_tcp_rl
+    bl      test_fail
+
+.Ldone_tcp_rl:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_syn_evict — Fill slots 1-15 with SYN_RCVD, send SYN → SYN-ACK
+ * (evicts a SYN_RCVD slot instead of returning RST)
+ * ======================================================================== */
+test_tcp_syn_evict:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Fill slots 1-15 with state=SYN_RCVD (evictable) */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, #TCONN_SIZE    /* skip slot 0 (LISTEN) */
+    mov     w2, #TCPS_SYN_RCVD
+    mov     w3, #15
+.Lsevict_fill:
+    strb    w2, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    subs    w3, w3, #1
+    b.ne    .Lsevict_fill
+
+    /* Send SYN to port 80 — should evict a SYN_RCVD slot, return SYN-ACK */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Expect 58 (SYN-ACK reply: 54 + 4 MSS option) */
+    cmp     w0, #58
+    b.ne    .Lfail_tcp_sevict
+
+    /* Verify flags = SYN+ACK */
+    ldr     x0, =tcp_test_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w1, #TCP_SYN_ACK
+    b.ne    .Lfail_tcp_sevict
+
+    /* Verify a SYN_RCVD slot exists with our peer's rport (12345 = 0x3039 NBO) */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lsevict_verify:
+    cbz     w3, .Lfail_tcp_sevict
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.ne    .Lsevict_next
+    ldrh    w1, [x0, #TCONN_RPORT]
+    rev16   w1, w1
+    uxth    w1, w1
+    mov     w2, #12345
+    cmp     w1, w2
+    b.eq    .Lsevict_found
+.Lsevict_next:
+    add     x0, x0, #TCONN_SIZE
+    b       .Lsevict_verify
+
+.Lsevict_found:
+    ldr     x0, =name_tcp_sevict
+    bl      test_pass
+    b       .Ldone_tcp_sevict
+
+.Lfail_tcp_sevict:
+    ldr     x0, =name_tcp_sevict
+    bl      test_fail
+
+.Ldone_tcp_sevict:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -9751,6 +9900,8 @@ name_tcp_cwg:       .asciz "tcp_cwnd_grow"
 name_tcp_crr:       .asciz "tcp_cwnd_rtx_reset"
 name_tcp_cwga:      .asciz "tcp_cwnd_gate"
 name_tcp_oom:       .asciz "tcp_ooo_merge"
+name_tcp_rl:        .asciz "tcp_rst_ratelimit"
+name_tcp_sevict:    .asciz "tcp_syn_evict"
 
 tcp_send_payload:
     .ascii  "World"

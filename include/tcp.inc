@@ -121,3 +121,6 @@
 .equ TCP_OPT_MSS_LEN,    4
 .equ TCP_DEFAULT_MSS,     536   /* RFC 1122 */
 .equ TCP_OUR_MSS,         1460  /* ETH_MTU(1500) - IP(20) - TCP(20) */
+
+/* RST rate limiting */
+.equ TCP_RST_BURST,       10    /* max tokens (refilled every second) */

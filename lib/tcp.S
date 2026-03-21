@@ -37,6 +37,9 @@
 .global tcp_send_ctx
 .global tcp_parse_tsopt
 .global tcp_build_frame
+.global tcp_rst_allow
+.global tcp_rst_tokens
+.global tcp_rst_last_tick
 
 .section .text
 
@@ -108,6 +111,8 @@ tcp_checksum:
  * Clobbers: x0-x2
  */
 tcp_init:
+    stp     x29, x30, [sp, #-16]!
+
     /* Zero all 2048 bytes (128 iterations of 16 bytes) */
     ldr     x0, =tcp_conn_table
     mov     w1, #128
@@ -116,8 +121,17 @@ tcp_init:
     subs    w1, w1, #1
     b.ne    .Ltcp_init_zero
 
-    /* Tail-call weak ISN secret seeder (overridable in fuzz harnesses) */
-    b       tcp_init_secret
+    /* Initialize RST rate limiter */
+    ldr     x0, =tcp_rst_tokens
+    mov     w1, #TCP_RST_BURST
+    str     w1, [x0]
+    ldr     x0, =tcp_rst_last_tick
+    str     xzr, [x0]
+
+    bl      tcp_init_secret
+
+    ldp     x29, x30, [sp], #16
+    ret
 
 /* Weak ISN secret seeder — overridden in fuzz harnesses */
 .weak tcp_init_secret
@@ -162,6 +176,55 @@ tcp_listen:
 
 .Ltl_full:
     mov     w0, #-1
+    ret
+
+/*
+ * tcp_rst_allow — Token bucket gate for RST generation
+ *
+ * Returns: w0 = 1 (allow) or 0 (deny)
+ * Clobbers: x0-x4, x19-x20, x30
+ *
+ * Tokens refill to TCP_RST_BURST once per second (timer_freq ticks).
+ * Each allowed RST consumes one token.
+ */
+tcp_rst_allow:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* Get current time and frequency */
+    bl      timer_now
+    mov     x19, x0                 /* x19 = now */
+    bl      timer_freq
+    mov     x20, x0                 /* x20 = freq */
+
+    /* Check if refill needed: elapsed >= freq → refill */
+    ldr     x0, =tcp_rst_last_tick
+    ldr     x1, [x0]               /* last_tick */
+    sub     x2, x19, x1            /* elapsed = now - last_tick */
+    cmp     x2, x20                /* elapsed >= freq? */
+    b.lo    .Lrst_no_refill
+
+    /* Refill tokens */
+    ldr     x1, =tcp_rst_tokens
+    mov     w2, #TCP_RST_BURST
+    str     w2, [x1]
+    str     x19, [x0]              /* last_tick = now */
+
+.Lrst_no_refill:
+    ldr     x0, =tcp_rst_tokens
+    ldr     w1, [x0]
+    cbz     w1, .Lrst_deny
+    sub     w1, w1, #1
+    str     w1, [x0]
+    mov     w0, #1
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+.Lrst_deny:
+    mov     w0, #0
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /*
@@ -819,6 +882,13 @@ tcp_handle:
     tst     w2, #TCP_RST
     b.ne    .Ltcp_drop
 
+    /* Rate limit RST replies */
+    bl      tcp_rst_allow
+    cbz     w0, .Ltcp_drop
+
+    /* Re-load flags (clobbered by call) */
+    ldrb    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+
     tst     w2, #TCP_ACK_FLAG
     b.ne    .Ltcp_rst_has_ack
 
@@ -902,8 +972,29 @@ tcp_listen_syn_handler:
     b       .Llsyn_alloc_scan
 
 .Llsyn_no_slot:
-    mov     w0, #-1                 /* signal RST */
+    /* Second pass: evict oldest SYN_RCVD (likely from SYN flood) */
+    ldr     x21, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Llsyn_evict_scan:
+    cbz     w3, .Llsyn_really_full
+    sub     w3, w3, #1
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Llsyn_evict_found
+    add     x21, x21, #TCONN_SIZE
+    b       .Llsyn_evict_scan
+
+.Llsyn_really_full:
+    /* No SYN_RCVD to evict — truly full */
+    mov     w0, #-1
     b       .Llsyn_done
+
+.Llsyn_evict_found:
+    /* Clean up evicted connection */
+    mov     x0, x21
+    bl      tcp_rtx_clear
+    strb    wzr, [x21, #TCONN_STATE]  /* mark CLOSED */
+    b       .Llsyn_alloc_found        /* reuse x21 as free slot */
 
 .Llsyn_alloc_found:
     /* x21 = free slot */
@@ -2333,3 +2424,11 @@ tcp_send_ctx:
 .balign 8
 tcp_isn_secret:
     .space  TCP_ISN_SECRET_SIZE
+
+.balign 4
+tcp_rst_tokens:
+    .word   0
+
+.balign 8
+tcp_rst_last_tick:
+    .space  8

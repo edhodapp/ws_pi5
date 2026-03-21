@@ -297,6 +297,15 @@ def main():
     seeds['tcp_ooo_merge.bin'] = pack_sequence([
         syn, handshake_ack, ooo_seg, gap_fill])
 
+    # 16. tcp_dup_syn_flood.bin — 4 SYNs from different source ports
+    #     Exercises SYN_RCVD eviction + RST rate-limit paths when AFL mutates
+    flood_syns = []
+    for i in range(4):
+        flood_syns.append(build_frame(PEER_PORT + i, LISTEN_PORT,
+                                      seq=peer_seq, ack_num=0,
+                                      flags=SYN, window=65535))
+    seeds['tcp_dup_syn_flood.bin'] = pack_sequence(flood_syns)
+
     for name, data in seeds.items():
         path = os.path.join(outdir, name)
         with open(path, 'wb') as f:
