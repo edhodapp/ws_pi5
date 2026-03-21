@@ -215,6 +215,22 @@ test_tcp:
     bl      test_tcp_dupack_below_thresh
     bl      test_tcp_persist_arm
     bl      test_tcp_persist_cancel
+    bl      test_tcp_dupack_no_rtxdata
+    bl      test_tcp_persist_already_armed
+    bl      test_tcp_frtx_no_send_fn
+    bl      test_tcp_frtx_cwnd_floor
+    bl      test_tcp_reaper_skip_listen
+    bl      test_tcp_reaper_skip_timewait
+    bl      test_tcp_reaper_synrcvd
+    bl      test_tcp_reaper_finwait1
+    bl      test_tcp_start_reaper
+    bl      test_tcp_start_reaper_no_pool
+    bl      test_tcp_persist_cb_send
+    bl      test_tcp_persist_cb_not_estab
+    bl      test_tcp_persist_cb_wnd_open
+    bl      test_tcp_persist_cb_no_send_fn
+    bl      test_tcp_persist_cb_shift_cap
+    bl      test_tcp_persist_arm_with_pool
     ldp     x29, x30, [sp], #16
     ret
 
@@ -10016,6 +10032,853 @@ test_tcp_persist_cancel:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_dupack_no_rtxdata — Dup ACK with RTXLEN=0 is ignored
+ *
+ * Exercises .Leak_pure_ack cbz w6 (RTXLEN==0) taken path.
+ * Handshake → do NOT send data (RTXLEN stays 0) → send dup ACK →
+ * verify DUP_ACK_CNT stays 0.
+ * ======================================================================== */
+test_tcp_dupack_no_rtxdata:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_dnr
+    mov     x21, x0
+
+    /* Verify RTXLEN == 0 (no outstanding data) */
+    ldrh    w0, [x21, #TCONN_RTXLEN]
+    cbnz    w0, .Lfail_tcp_dnr
+
+    /* Save SND_UNA for dup ACK */
+    ldr     w20, [x21, #TCONN_SND_UNA]
+
+    /* Send ACK with seg_ack == SND_UNA (would be dup ACK if RTXLEN > 0) */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w0, w20
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* DUP_ACK_CNT should still be 0 (RTXLEN==0 guard skipped increment) */
+    ldrb    w0, [x21, #TCONN_DUP_ACK_CNT]
+    cbnz    w0, .Lfail_tcp_dnr
+
+    ldr     x0, =name_tcp_dnr
+    bl      test_pass
+    b       .Ldone_tcp_dnr
+.Lfail_tcp_dnr:
+    ldr     x0, =name_tcp_dnr
+    bl      test_fail
+.Ldone_tcp_dnr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_persist_already_armed — Second zero-window ACK doesn't re-arm
+ *
+ * Exercises .Leak_zero_window cbnz w5 (already armed) taken path.
+ * ======================================================================== */
+test_tcp_persist_already_armed:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_paa
+    mov     x21, x0
+
+    /* Pre-set PERSIST_SHIFT = 2 (as if already armed) */
+    mov     w0, #2
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Send ACK with window=0 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* PERSIST_SHIFT should still be 2 (not reset to 1) */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #2
+    b.ne    .Lfail_tcp_paa
+
+    ldr     x0, =name_tcp_paa
+    bl      test_pass
+    b       .Ldone_tcp_paa
+.Lfail_tcp_paa:
+    ldr     x0, =name_tcp_paa
+    bl      test_fail
+.Ldone_tcp_paa:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_frtx_no_send_fn — Fast retransmit with NULL send_fn bails
+ *
+ * Exercises tcp_fast_retransmit cbz x1 (send_fn NULL) taken path.
+ * Direct call: set up conn with data, clear send_ctx, call tcp_fast_retransmit.
+ * ======================================================================== */
+test_tcp_frtx_no_send_fn:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_fns
+    mov     x21, x0
+
+    /* Send 5 bytes to get RTXLEN > 0 */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_fns
+
+    /* Clear send_fn to NULL */
+    mov     x0, #0
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    bl      tcp_set_send_ctx
+
+    /* Record cwnd before */
+    ldrh    w19, [x21, #TCONN_CWND]
+
+    /* Call tcp_fast_retransmit directly */
+    mov     x0, x21
+    bl      tcp_fast_retransmit
+
+    /* ssthresh should still be updated (happens before send_fn check) */
+    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    cbz     w0, .Lfail_tcp_fns
+
+    /* But no crash occurred — test passes if we reach here */
+    ldr     x0, =name_tcp_fns
+    bl      test_pass
+    b       .Ldone_tcp_fns
+.Lfail_tcp_fns:
+    ldr     x0, =name_tcp_fns
+    bl      test_fail
+.Ldone_tcp_fns:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_frtx_cwnd_floor — Fast retransmit with low cwnd uses 2*MSS floor
+ *
+ * Exercises tcp_fast_retransmit csel: cwnd/2 < 2*MSS case.
+ * Set cwnd to MSS (536), so cwnd/2=268 < 2*MSS=1072 → ssthresh=1072.
+ * Also tests 0xFFFF cap path by setting cwnd high enough that
+ * ssthresh + 3*MSS > 65535.
+ * ======================================================================== */
+test_tcp_frtx_cwnd_floor:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_fcf
+    mov     x21, x0
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_fcf
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Set cwnd to MSS (536) — cwnd/2=268 < 2*MSS=1072 */
+    ldrh    w0, [x21, #TCONN_PEER_MSS]    /* w0 = MSS (536) */
+    strh    w0, [x21, #TCONN_CWND]
+
+    mov     x0, x21
+    bl      tcp_fast_retransmit
+
+    /* ssthresh should be 2*MSS = 1072 (floor) */
+    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    ldrh    w1, [x21, #TCONN_PEER_MSS]
+    lsl     w1, w1, #1                     /* 2*MSS */
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_fcf
+
+    /* cwnd should be ssthresh + 3*MSS = 1072 + 1608 = 2680 */
+    ldrh    w0, [x21, #TCONN_CWND]
+    ldrh    w1, [x21, #TCONN_PEER_MSS]
+    lsl     w2, w1, #1                     /* 2*MSS = ssthresh */
+    mov     w3, #3
+    mul     w3, w1, w3                     /* 3*MSS */
+    add     w2, w2, w3                     /* expected cwnd */
+    cmp     w0, w2
+    b.ne    .Lfail_tcp_fcf
+
+    /* --- Now test 0xFFFF cap: set PEER_MSS high so ssthresh+3*MSS > 65535 --- */
+    mov     w0, #0xFFFF
+    strh    w0, [x21, #TCONN_CWND]
+    mov     w0, #20000                      /* large MSS → 3*MSS=60000 */
+    strh    w0, [x21, #TCONN_PEER_MSS]
+    strh    wzr, [x21, #TCONN_RTXLEN]
+
+    /* Re-send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_fcf
+
+    mov     x0, x21
+    bl      tcp_fast_retransmit
+
+    /* ssthresh = max(65535/2=32767, 2*20000=40000) = 40000
+     * cwnd = 40000 + 3*20000 = 100000 → capped at 0xFFFF */
+    ldrh    w0, [x21, #TCONN_CWND]
+    mov     w1, #0xFFFF
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_fcf
+
+    ldr     x0, =name_tcp_fcf
+    bl      test_pass
+    b       .Ldone_tcp_fcf
+.Lfail_tcp_fcf:
+    ldr     x0, =name_tcp_fcf
+    bl      test_fail
+.Ldone_tcp_fcf:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_reaper_skip_listen — Reaper skips LISTEN slots
+ *
+ * Exercises tcp_idle_reaper_cb b.eq .Lreap_next for LISTEN state.
+ * ======================================================================== */
+test_tcp_reaper_skip_listen:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Slot 0: set to LISTEN with old LAST_ACTIVE (reaper should skip it) */
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_LISTEN
+    strb    w0, [x19, #TCONN_STATE]
+    str     xzr, [x19, #TCONN_LAST_ACTIVE]  /* ancient timestamp */
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    /* LISTEN should be preserved */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_LISTEN
+    b.ne    .Lfail_tcp_rsl
+
+    ldr     x0, =name_tcp_rsl
+    bl      test_pass
+    b       .Ldone_tcp_rsl
+.Lfail_tcp_rsl:
+    ldr     x0, =name_tcp_rsl
+    bl      test_fail
+.Ldone_tcp_rsl:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_reaper_skip_timewait — Reaper skips TIME_WAIT slots
+ *
+ * Exercises tcp_idle_reaper_cb b.eq .Lreap_next for TIME_WAIT state.
+ * ======================================================================== */
+test_tcp_reaper_skip_timewait:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x19, #TCONN_STATE]
+    str     xzr, [x19, #TCONN_LAST_ACTIVE]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_rst2
+
+    ldr     x0, =name_tcp_rst2
+    bl      test_pass
+    b       .Ldone_tcp_rst2
+.Lfail_tcp_rst2:
+    ldr     x0, =name_tcp_rst2
+    bl      test_fail
+.Ldone_tcp_rst2:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_reaper_synrcvd — Reaper closes idle SYN_RCVD
+ *
+ * Exercises tcp_idle_reaper_cb b.eq .Lreap_estab for SYN_RCVD state.
+ * SYN_RCVD uses ESTAB timeout (120s).
+ * ======================================================================== */
+test_tcp_reaper_synrcvd:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0
+    bl      timer_now
+    mov     x20, x0
+    mov     x1, #121
+    mul     x1, x22, x1
+    sub     x21, x20, x1                    /* past = now - 121*freq */
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_SYN_RCVD
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rsyr
+
+    ldr     x0, =name_tcp_rsyr
+    bl      test_pass
+    b       .Ldone_tcp_rsyr
+.Lfail_tcp_rsyr:
+    ldr     x0, =name_tcp_rsyr
+    bl      test_fail
+.Ldone_tcp_rsyr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_reaper_finwait1 — Reaper closes idle FIN_WAIT_1
+ *
+ * Exercises tcp_idle_reaper_cb b.eq .Lreap_finwait for FIN_WAIT_1 state.
+ * FIN_WAIT_1 uses FINWAIT2 timeout (60s).
+ * ======================================================================== */
+test_tcp_reaper_finwait1:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    bl      timer_freq
+    mov     x22, x0
+    bl      timer_now
+    mov     x20, x0
+    mov     x1, #61
+    mul     x1, x22, x1
+    sub     x21, x20, x1
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_FIN_WAIT_1
+    strb    w0, [x19, #TCONN_STATE]
+    str     x21, [x19, #TCONN_LAST_ACTIVE]
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_rfw1
+
+    ldr     x0, =name_tcp_rfw1
+    bl      test_pass
+    b       .Ldone_tcp_rfw1
+.Lfail_tcp_rfw1:
+    ldr     x0, =name_tcp_rfw1
+    bl      test_fail
+.Ldone_tcp_rfw1:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_start_reaper — tcp_start_reaper with timer pool arms timer
+ *
+ * Exercises tcp_start_reaper not-taken (pool set) path.
+ * Also exercises tcp_idle_reaper_cb re-arm path (not-taken at cbz).
+ * ======================================================================== */
+test_tcp_start_reaper:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+
+    /* Init and set timer pool */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Call tcp_start_reaper */
+    bl      tcp_start_reaper
+
+    /* Verify a timer was armed: check that slot 0 has a callback set */
+    ldr     x0, =test_tcp_timer_pool
+    ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
+    cbz     x1, .Lfail_tcp_sr
+
+    /* Verify callback is tcp_idle_reaper_cb */
+    ldr     x2, =tcp_idle_reaper_cb
+    cmp     x1, x2
+    b.ne    .Lfail_tcp_sr
+
+    /* Now test the reaper re-arm path: call reaper with pool set.
+     * First, cancel the timer in slot 0 so we can see it re-armed. */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #0
+    bl      timer_cancel
+
+    /* Verify callback cleared */
+    ldr     x0, =test_tcp_timer_pool
+    ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
+    cbnz    x1, .Lfail_tcp_sr
+
+    /* Call reaper — should re-arm itself */
+    mov     x0, xzr
+    bl      tcp_idle_reaper_cb
+
+    /* Verify callback re-armed */
+    ldr     x0, =test_tcp_timer_pool
+    ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
+    cbz     x1, .Lfail_tcp_sr
+
+    ldr     x0, =name_tcp_sr
+    bl      test_pass
+    b       .Ldone_tcp_sr
+.Lfail_tcp_sr:
+    ldr     x0, =name_tcp_sr
+    bl      test_fail
+.Ldone_tcp_sr:
+    /* Clear timer pool so other tests aren't affected */
+    mov     x0, xzr
+    bl      tcp_set_timer_pool
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_start_reaper_no_pool — tcp_start_reaper with no pool bails
+ *
+ * Exercises tcp_start_reaper cbz (taken) path.
+ * ======================================================================== */
+test_tcp_start_reaper_no_pool:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+
+    /* Ensure no timer pool is set */
+    mov     x0, xzr
+    bl      tcp_set_timer_pool
+
+    /* Call tcp_start_reaper — should not crash */
+    bl      tcp_start_reaper
+
+    /* If we reached here, the NULL guard worked */
+    ldr     x0, =name_tcp_srnp
+    bl      test_pass
+
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_persist_cb_send — Persist callback sends probe and increments shift
+ *
+ * Exercises tcp_persist_cb happy path: state=ESTABLISHED, SND_WND=0,
+ * send_fn set → sends probe, increments PERSIST_SHIFT, re-arms.
+ * ======================================================================== */
+test_tcp_persist_cb_send:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pcs
+    mov     x21, x0
+
+    /* Set SND_WND = 0, PERSIST_SHIFT = 1 */
+    strh    wzr, [x21, #TCONN_SND_WND]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_send_test_buf
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Reset mock counters */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Call tcp_persist_cb(conn) */
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    /* Verify mock was called (probe sent) */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_pcs
+
+    /* Verify PERSIST_SHIFT incremented to 2 */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #2
+    b.ne    .Lfail_tcp_pcs
+
+    ldr     x0, =name_tcp_pcs
+    bl      test_pass
+    b       .Ldone_tcp_pcs
+.Lfail_tcp_pcs:
+    ldr     x0, =name_tcp_pcs
+    bl      test_fail
+.Ldone_tcp_pcs:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_persist_cb_not_estab — Persist callback bails if not ESTABLISHED
+ *
+ * Exercises tcp_persist_cb b.ne .Lpersist_done (state != ESTABLISHED).
+ * ======================================================================== */
+test_tcp_persist_cb_not_estab:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pcne
+    mov     x21, x0
+
+    /* Change state to CLOSE_WAIT (not ESTABLISHED) */
+    mov     w0, #TCPS_CLOSE_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+    strh    wzr, [x21, #TCONN_SND_WND]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Set up mock */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_send_test_buf
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    /* Mock should NOT have been called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_pcne
+
+    ldr     x0, =name_tcp_pcne
+    bl      test_pass
+    b       .Ldone_tcp_pcne
+.Lfail_tcp_pcne:
+    ldr     x0, =name_tcp_pcne
+    bl      test_fail
+.Ldone_tcp_pcne:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_persist_cb_wnd_open — Persist callback bails if window opened
+ *
+ * Exercises tcp_persist_cb cbnz w1 (SND_WND != 0) taken path.
+ * ======================================================================== */
+test_tcp_persist_cb_wnd_open:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pcwo
+    mov     x21, x0
+
+    /* State=ESTABLISHED but SND_WND > 0 (window opened since timer was set) */
+    mov     w0, #1000
+    strh    w0, [x21, #TCONN_SND_WND]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_send_test_buf
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    /* Mock should NOT have been called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_tcp_pcwo
+
+    ldr     x0, =name_tcp_pcwo
+    bl      test_pass
+    b       .Ldone_tcp_pcwo
+.Lfail_tcp_pcwo:
+    ldr     x0, =name_tcp_pcwo
+    bl      test_fail
+.Ldone_tcp_pcwo:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_persist_cb_no_send_fn — Persist callback bails if no send_fn
+ *
+ * Exercises tcp_persist_cb cbz x1 (send_fn NULL) taken path.
+ * ======================================================================== */
+test_tcp_persist_cb_no_send_fn:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pcns
+    mov     x21, x0
+
+    strh    wzr, [x21, #TCONN_SND_WND]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Clear send context */
+    mov     x0, #0
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    bl      tcp_set_send_ctx
+
+    /* Should not crash */
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    ldr     x0, =name_tcp_pcns
+    bl      test_pass
+    b       .Ldone_tcp_pcns
+.Lfail_tcp_pcns:
+    ldr     x0, =name_tcp_pcns
+    bl      test_fail
+.Ldone_tcp_pcns:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_persist_cb_shift_cap — Persist callback caps shift at 5
+ *
+ * Exercises tcp_persist_cb csel: shift >= 5 → cap at 5.
+ * ======================================================================== */
+test_tcp_persist_cb_shift_cap:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pcsc
+    mov     x21, x0
+
+    strh    wzr, [x21, #TCONN_SND_WND]
+    /* Set PERSIST_SHIFT = 4 (after increment → 5, should be capped) */
+    mov     w0, #4
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_send_test_buf
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    /* PERSIST_SHIFT should be 5 (capped) */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_pcsc
+
+    /* Call again — shift should still be 5 (capped, not 6) */
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_pcsc
+
+    ldr     x0, =name_tcp_pcsc
+    bl      test_pass
+    b       .Ldone_tcp_pcsc
+.Lfail_tcp_pcsc:
+    ldr     x0, =name_tcp_pcsc
+    bl      test_fail
+.Ldone_tcp_pcsc:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
+ * test_tcp_persist_arm_with_pool — Persist arm actually sets timer
+ *
+ * Exercises tcp_persist_arm not-taken (pool set) path and timeout
+ * computation.
+ * ======================================================================== */
+test_tcp_persist_arm_with_pool:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pawp
+    mov     x21, x0
+
+    /* Init and set timer pool */
+    ldr     x0, =test_tcp_timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+    ldr     x0, =test_tcp_timer_pool
+    bl      tcp_set_timer_pool
+
+    /* Set PERSIST_SHIFT = 1 */
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Call tcp_persist_arm */
+    mov     x0, x21
+    bl      tcp_persist_arm
+
+    /* Verify a timer was armed with tcp_persist_cb callback */
+    ldr     x0, =test_tcp_timer_pool
+    add     x0, x0, #TPOOL_SLOTS           /* scan from first slot */
+    mov     w1, #TPOOL_DEFAULT_CAP
+    ldr     x2, =tcp_persist_cb
+.Lpawp_scan:
+    cbz     w1, .Lfail_tcp_pawp             /* no slot found */
+    ldr     x3, [x0, #SLOT_CALLBACK]
+    cmp     x3, x2
+    b.eq    .Lpawp_found
+    add     x0, x0, #SLOT_SIZE
+    sub     w1, w1, #1
+    b       .Lpawp_scan
+
+.Lpawp_found:
+    /* Verify context == conn */
+    ldr     x3, [x0, #SLOT_CONTEXT]
+    cmp     x3, x21
+    b.ne    .Lfail_tcp_pawp
+
+    ldr     x0, =name_tcp_pawp
+    bl      test_pass
+    b       .Ldone_tcp_pawp
+.Lfail_tcp_pawp:
+    ldr     x0, =name_tcp_pawp
+    bl      test_fail
+.Ldone_tcp_pawp:
+    /* Clean up timer pool */
+    mov     x0, xzr
+    bl      tcp_set_timer_pool
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -10638,6 +11501,22 @@ name_tcp_frtx:      .asciz "tcp_fast_retransmit"
 name_tcp_dabt:      .asciz "tcp_dupack_below_thresh"
 name_tcp_pa:        .asciz "tcp_persist_arm"
 name_tcp_pc:        .asciz "tcp_persist_cancel"
+name_tcp_dnr:       .asciz "tcp_dupack_no_rtxdata"
+name_tcp_paa:       .asciz "tcp_persist_already_armed"
+name_tcp_fns:       .asciz "tcp_frtx_no_send_fn"
+name_tcp_fcf:       .asciz "tcp_frtx_cwnd_floor"
+name_tcp_rsl:       .asciz "tcp_reaper_skip_listen"
+name_tcp_rst2:      .asciz "tcp_reaper_skip_timewait"
+name_tcp_rsyr:      .asciz "tcp_reaper_synrcvd"
+name_tcp_rfw1:      .asciz "tcp_reaper_finwait1"
+name_tcp_sr:        .asciz "tcp_start_reaper"
+name_tcp_srnp:      .asciz "tcp_start_reaper_no_pool"
+name_tcp_pcs:       .asciz "tcp_persist_cb_send"
+name_tcp_pcne:      .asciz "tcp_persist_cb_not_estab"
+name_tcp_pcwo:      .asciz "tcp_persist_cb_wnd_open"
+name_tcp_pcns:      .asciz "tcp_persist_cb_no_send_fn"
+name_tcp_pcsc:      .asciz "tcp_persist_cb_shift_cap"
+name_tcp_pawp:      .asciz "tcp_persist_arm_with_pool"
 
 tcp_send_payload:
     .ascii  "World"
