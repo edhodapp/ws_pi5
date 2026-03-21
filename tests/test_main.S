@@ -110,6 +110,7 @@ _start:
     bl      test_ip_handle_bad_ver
     bl      test_ip_handle_totlen_short
     bl      test_ip_handle_totlen_overrun
+    bl      test_ip_handle_ttl_zero
     bl      test_net_recv_arp
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown
@@ -120,6 +121,9 @@ _start:
     bl      test_ntp
     bl      test_ip_reasm_two_frags
     bl      test_ip_reasm_timeout
+    bl      test_ip_reasm_overlap
+    bl      test_ip_reasm_nonaligned
+    bl      test_ip_reasm_min_ttl
     bl      test_md5
     bl      test_tcp
 

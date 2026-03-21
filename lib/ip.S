@@ -98,14 +98,18 @@ ip_handle:
     bl      ip_checksum
     cbnz    w0, .Lip_drop
 
-    /* 6. IP.DST == net_our_ip (wire-format compare, no rev) */
+    /* 6. TTL > 0 (RFC 1122 §3.2.1.7) */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_TTL)]
+    cbz     w0, .Lip_drop
+
+    /* 7. IP.DST == net_our_ip (wire-format compare, no rev) */
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
     ldr     x1, =net_our_ip
     ldr     w1, [x1]
     cmp     w0, w1
     b.ne    .Lip_drop
 
-    /* 6.5 Check for IP fragments: MF flag or non-zero offset */
+    /* 8. Check for IP fragments: MF flag or non-zero offset */
     ldrh    w0, [x19, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
     rev16   w0, w0
     uxth    w0, w0
@@ -125,7 +129,7 @@ ip_handle:
     uxth    w21, w0
 
 .Lip_dispatch:
-    /* 7. Dispatch on IP.Protocol */
+    /* 9. Dispatch on IP.Protocol */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_PROTO)]
     cmp     w0, #IP_PROTO_ICMP
     b.eq    .Lip_icmp

@@ -25,8 +25,12 @@
 .global test_ip_handle_bad_ver
 .global test_ip_handle_totlen_short
 .global test_ip_handle_totlen_overrun
+.global test_ip_handle_ttl_zero
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
+.global test_ip_reasm_overlap
+.global test_ip_reasm_nonaligned
+.global test_ip_reasm_min_ttl
 
 .section .text
 
@@ -457,6 +461,179 @@ test_ip_reasm_timeout:
     ret
 
 /* ========================================================================
+ * test_ip_handle_ttl_zero — TTL=0 with valid checksum → returns 0
+ * ======================================================================== */
+test_ip_handle_ttl_zero:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_ttl_zero_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_ttl_zero
+
+    ldr     x0, =name_ip_ttl_zero
+    bl      test_pass
+    b       .Ldone_ip_ttl_zero
+
+.Lfail_ip_ttl_zero:
+    ldr     x0, =name_ip_ttl_zero
+    bl      test_fail
+
+.Ldone_ip_ttl_zero:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_overlap — overlapping fragment dropped
+ *
+ * Frag1: offset=0, MF=1, 16 bytes (sets bitmap bits 0-1)
+ * Frag2: offset=1 (8 bytes), MF=0, 8 bytes (bit 1 already set → overlap)
+ * ======================================================================== */
+test_ip_reasm_overlap:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Send frag1 (offset=0, 16 bytes, MF=1) — returns 0 (incomplete) */
+    ldr     x0, =ip_frag1_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lro_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lro_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_overlap
+
+    /* Send overlapping frag (offset=1, 8 bytes) — should return 0 (dropped) */
+    ldr     x0, =ip_frag_overlap
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lro_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lro_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_overlap
+
+    ldr     x0, =name_ip_overlap
+    bl      test_pass
+    b       .Ldone_ip_overlap
+
+.Lfail_ip_overlap:
+    ldr     x0, =name_ip_overlap
+    bl      test_fail
+
+.Ldone_ip_overlap:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_nonaligned — MF=1 with payload not multiple of 8 → dropped
+ * ======================================================================== */
+test_ip_reasm_nonaligned:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Send fragment with MF=1, payload=13 bytes (not aligned) */
+    ldr     x0, =ip_frag_nonaligned
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #47
+.Lrna_copy:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrna_copy
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #47
+    bl      ip_reasm_input
+
+    /* Should return 0 (dropped) */
+    cbnz    x0, .Lfail_ip_nonaligned
+
+    ldr     x0, =name_ip_nonaligned
+    bl      test_pass
+    b       .Ldone_ip_nonaligned
+
+.Lfail_ip_nonaligned:
+    ldr     x0, =name_ip_nonaligned
+    bl      test_fail
+
+.Ldone_ip_nonaligned:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_min_ttl — reassembled datagram uses min(fragment TTLs)
+ *
+ * Frag1: TTL=32, offset=0, MF=1, 16 bytes
+ * Frag2: TTL=10, offset=2 (16 bytes), MF=0, 8 bytes
+ * Expected: reassembled TTL=10
+ * ======================================================================== */
+test_ip_reasm_min_ttl:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Frag1 (TTL=32) */
+    ldr     x0, =ip_frag_ttl32
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lrmt_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrmt_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_min_ttl
+
+    /* Frag2 (TTL=10) — should complete reassembly */
+    ldr     x0, =ip_frag_ttl10
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lrmt_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrmt_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+    cbz     x0, .Lfail_ip_min_ttl
+
+    /* Verify reassembled TTL == 10 (min of 32 and 10) */
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_TTL)]
+    cmp     w1, #10
+    b.ne    .Lfail_ip_min_ttl
+
+    ldr     x0, =name_ip_min_ttl
+    bl      test_pass
+    b       .Ldone_ip_min_ttl
+
+.Lfail_ip_min_ttl:
+    ldr     x0, =name_ip_min_ttl
+    bl      test_fail
+
+.Ldone_ip_min_ttl:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -611,6 +788,52 @@ ip_reasm_expected_payload:
     .byte   0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50
     .byte   0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58
 
+/* TTL=0, valid checksum (0x9D90), rest same as ip_icmp_template */
+.balign 4
+ip_ttl_zero_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x00, 0x01, 0x90, 0x9D                   /* TTL=0, cksum=0x9D90 */
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* Overlapping fragment: id=0xABCD, offset=1 (8 bytes), MF=0, 8-byte payload */
+.balign 4
+ip_frag_overlap:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C, 0xAB, 0xCD, 0x00, 0x01, 0x40, 0x01, 0xB7, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F
+    .byte   0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68
+
+/* Non-aligned fragment: MF=1, offset=0, totlen=33 (payload=13), id=0xABCD */
+.balign 4
+ip_frag_nonaligned:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x21, 0xAB, 0xCD, 0x20, 0x00, 0x40, 0x01, 0x96, 0xFE
+    .byte   0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F
+    .byte   0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D
+
+/* Frag1 for min-TTL test: TTL=32, id=0xBEEF, offset=0, MF=1, 16-byte payload */
+.balign 4
+ip_frag_ttl32:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x24, 0xBE, 0xEF, 0x20, 0x00, 0x20, 0x01, 0xA3, 0xD9
+    .byte   0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F
+    .byte   0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50
+
+/* Frag2 for min-TTL test: TTL=10, id=0xBEEF, offset=2 (16 bytes), MF=0, 8-byte payload */
+.balign 4
+ip_frag_ttl10:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C, 0xBE, 0xEF, 0x00, 0x02, 0x0A, 0x01, 0xD9, 0xDF
+    .byte   0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F
+    .byte   0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58
+
 name_ip_cksum:      .asciz "ip_checksum"
 name_ip_carry:      .asciz "ip_checksum_carry"
 name_ip_icmp:       .asciz "ip_handle_icmp"
@@ -621,8 +844,12 @@ name_ip_unknown:    .asciz "ip_handle_unknown_proto"
 name_ip_bad_ver:    .asciz "ip_handle_bad_ver"
 name_ip_totlen_short:   .asciz "ip_handle_totlen_short"
 name_ip_totlen_overrun: .asciz "ip_handle_totlen_overrun"
+name_ip_ttl_zero:   .asciz "ip_handle_ttl_zero"
 name_ip_reasm:      .asciz "ip_reasm_two_frags"
 name_ip_timeout:    .asciz "ip_reasm_timeout"
+name_ip_overlap:    .asciz "ip_reasm_overlap"
+name_ip_nonaligned: .asciz "ip_reasm_nonaligned"
+name_ip_min_ttl:    .asciz "ip_reasm_min_ttl"
 
 .section .data
 .balign 4

@@ -89,6 +89,7 @@
 .equ REASM_FLAGS,        11     /* u8:  bit 0=have_last, bit 7=active */
 .equ REASM_TOTAL_LEN,    12     /* u16: total payload bytes (valid when have_last) */
 .equ REASM_TIMER_SLOT,   14     /* u8:  timer pool slot (0xFF=none) */
+.equ REASM_MIN_TTL,      15     /* u8:  minimum TTL across fragments */
 .equ REASM_HDR_SIZE,     32     /* padded to 32 */
 .equ REASM_BITMAP,       32     /* 32-byte bitmap (256 bits, 1 per 8-byte unit) */
 .equ REASM_BITMAP_SIZE,  32

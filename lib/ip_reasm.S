@@ -101,6 +101,12 @@ ip_reasm_input:
     cmp     w0, w1
     b.hi    .Lri_drop
 
+    /* Non-final fragments (MF=1) must have payload_len aligned to 8 */
+    cbz     w21, .Lri_align_ok
+    tst     w23, #7
+    b.ne    .Lri_drop
+.Lri_align_ok:
+
     /* ---- Find matching slot or first free slot ---- */
     ldr     w3, [x19, #(ETH_PAYLOAD + IP_SRC)]
     ldr     w4, [x19, #(ETH_PAYLOAD + IP_DST)]
@@ -163,6 +169,7 @@ ip_reasm_input:
     strh    wzr, [x24, #REASM_TOTAL_LEN]
     mov     w0, #0xFF
     strb    w0, [x24, #REASM_TIMER_SLOT]
+    strb    w0, [x24, #REASM_MIN_TTL]  /* init min TTL to 255 */
 
     /* Zero bitmap (4 doublewords) */
     add     x0, x24, #REASM_BITMAP
@@ -198,6 +205,35 @@ ip_reasm_input:
 
 .Lri_have_slot:
     /* x24 = slot, w22 = frag_off, w23 = payload_len, w21 = MF */
+
+    /* ---- Check for overlapping fragments (RFC 5722) ---- */
+    lsr     w0, w22, #3             /* start_bit = frag_off / 8 */
+    add     w1, w22, w23
+    sub     w1, w1, #1
+    lsr     w1, w1, #3             /* end_bit = (frag_off + payload_len - 1) / 8 */
+    add     x2, x24, #REASM_BITMAP
+
+.Lri_overlap_chk:
+    cmp     w0, w1
+    b.hi    .Lri_no_overlap
+    lsr     w9, w0, #3             /* byte index */
+    and     w3, w0, #7             /* bit within byte */
+    mov     w4, #1
+    lsl     w4, w4, w3
+    ldrb    w5, [x2, w9, uxtw]
+    tst     w5, w4
+    b.ne    .Lri_drop              /* overlap detected → drop */
+    add     w0, w0, #1
+    b       .Lri_overlap_chk
+
+.Lri_no_overlap:
+
+    /* ---- Track minimum TTL (RFC 1122 §3.2.1.11) ---- */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_TTL)]
+    ldrb    w1, [x24, #REASM_MIN_TTL]
+    cmp     w0, w1
+    csel    w0, w0, w1, lo         /* w0 = min(fragment_ttl, current_min) */
+    strb    w0, [x24, #REASM_MIN_TTL]
 
     /* ---- Copy payload to slot->data[frag_off] ---- */
     add     x0, x24, #REASM_DATA
@@ -302,7 +338,7 @@ ip_reasm_input:
     strh    w2, [x1, #IP_ID]
     strh    wzr, [x1, #IP_FLAGS_FRAG]
 
-    mov     w2, #IP_DEFAULT_TTL
+    ldrb    w2, [x24, #REASM_MIN_TTL]
     strb    w2, [x1, #IP_TTL]
     ldrb    w2, [x24, #REASM_PROTO]
     strb    w2, [x1, #IP_PROTO]
