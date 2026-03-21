@@ -386,6 +386,97 @@ tcp_rtt_update:
     ldp     x19, x30, [sp], #16
     ret
 
+/*
+ * tcp_sndbuf_build_frame — Build a TCP frame from circular send buffer data
+ *
+ * Reads up to MSS bytes starting from the tail of the send buffer
+ * (the oldest unACKed data) and builds a PSH+ACK frame.
+ *
+ * x0: connection pointer
+ * x1: frame buffer (output)
+ * Returns: w0 = frame length, or 0 if no data to send
+ * Clobbers: x0-x6, x19-x24, x30
+ */
+.global tcp_sndbuf_build_frame
+tcp_sndbuf_build_frame:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0                 /* conn */
+    mov     x23, x1                 /* frame buf */
+
+    /* How much data is in flight? */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    ldr     w1, [x19, #TCONN_SND_UNA]
+    sub     w21, w0, w1             /* w21 = in_flight */
+    cbz     w21, .Lsbf_none
+
+    /* Segment size = min(in_flight, MSS) */
+    ldrh    w0, [x19, #TCONN_PEER_MSS]
+    cmp     w21, w0
+    csel    w21, w21, w0, lo        /* w21 = segment size */
+
+    /* Copy from send buffer to a temp area on stack */
+    sub     sp, sp, w21, uxtw       /* allocate stack space for payload */
+    mov     x22, sp                 /* x22 = payload temp */
+
+    /* Compute send buffer base + tail */
+    ldr     x0, =tcp_conn_table
+    sub     x0, x19, x0
+    lsr     x0, x0, #TCONN_SHIFT
+    ldr     x1, =tcp_sndbuf_pool
+    add     x1, x1, x0, lsl #TCP_SNDBUF_SHIFT  /* buf base */
+    ldr     w2, [x19, #TCONN_SND_BUF_TAIL]
+
+    /* Circular copy: tail to temp */
+    mov     w3, #0
+.Lsbf_copy:
+    cmp     w3, w21
+    b.hs    .Lsbf_copy_done
+    add     w4, w2, w3
+    and     w4, w4, #TCP_SNDBUF_MASK
+    ldrb    w5, [x1, x4]
+    strb    w5, [x22, x3]
+    add     w3, w3, #1
+    b       .Lsbf_copy
+.Lsbf_copy_done:
+
+    /* Temporarily set SND_NXT = SND_UNA (so tcp_build_frame uses UNA as SEQ) */
+    ldr     w24, [x19, #TCONN_SND_NXT]  /* save real SND_NXT */
+    ldr     w0, [x19, #TCONN_SND_UNA]
+    str     w0, [x19, #TCONN_SND_NXT]
+
+    /* Build frame: tcp_build_frame(conn, frame, PSH+ACK, payload, len) */
+    mov     x0, x19
+    mov     x1, x23
+    mov     w2, #TCP_PSH_ACK
+    mov     x3, x22
+    mov     w4, w21
+    bl      tcp_build_frame
+
+    mov     w22, w0                 /* frame_len */
+
+    /* Restore SND_NXT */
+    str     w24, [x19, #TCONN_SND_NXT]
+
+    /* Deallocate stack payload temp */
+    add     sp, sp, w21, uxtw
+
+    mov     w0, w22
+    b       .Lsbf_done
+
+.Lsbf_none:
+    mov     w0, #0
+
+.Lsbf_done:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
 tcp_rtx_arm:
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
@@ -598,26 +689,36 @@ tcp_retransmit_cb:
     ldr     x1, [x20, #TSCTX_SEND_FN]
     cbz     x1, .Lrtxcb_done       /* send_fn not set up → return */
 
-    /* Compute slot index: (conn - tcp_conn_table) >> 7 */
+    /* Try send buffer first (data segments) */
+    mov     x0, x19
+    ldr     x1, [x20, #TSCTX_TX_BUF]
+    bl      tcp_sndbuf_build_frame
+    cbnz    w0, .Lrtxcb_have_frame
+
+    /* No data in send buffer — fall back to rtxbuf (SYN-ACK/FIN) */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbz     w0, .Lrtxcb_done       /* nothing to retransmit */
+
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
     lsr     x2, x2, #TCONN_SHIFT
-
-    /* Copy rtxbuf → tx_buf (RTXLEN bytes) */
     ldr     x3, =tcp_rtxbuf_pool
-    add     x3, x3, x2, lsl #TCP_RTXBUF_SHIFT  /* src */
-    ldr     x4, [x20, #TSCTX_TX_BUF]            /* dst */
-    ldrh    w21, [x19, #TCONN_RTXLEN]
-    mov     w5, w21
-.Lrtxcb_copy:
-    cbz     w5, .Lrtxcb_send
+    add     x3, x3, x2, lsl #TCP_RTXBUF_SHIFT
+    ldr     x4, [x20, #TSCTX_TX_BUF]
+    mov     w5, w0
+.Lrtxcb_rtxcopy:
+    cbz     w5, .Lrtxcb_have_frame_w0
     ldrb    w6, [x3], #1
     strb    w6, [x4], #1
     sub     w5, w5, #1
-    b       .Lrtxcb_copy
+    b       .Lrtxcb_rtxcopy
+.Lrtxcb_have_frame_w0:
+    /* w0 still has RTXLEN = frame_len */
 
-.Lrtxcb_send:
-    /* Call send_fn(dwc2_base, ecm_state, tx_buf, frame_len) */
+.Lrtxcb_have_frame:
+    mov     w21, w0                 /* frame_len */
+
+    /* Send */
     ldr     x0, [x20, #TSCTX_DWC2_BASE]
     ldr     x1, [x20, #TSCTX_ECM_STATE]
     ldr     x2, [x20, #TSCTX_TX_BUF]
@@ -1639,14 +1740,15 @@ tcp_estab_ack_handler:
     ret
 
 .Leak_pure_ack:
-    /* Check for duplicate ACK: seg_ack == SND_UNA and RTXLEN > 0 */
+    /* Check for duplicate ACK: seg_ack == SND_UNA and data in flight */
     ldr     w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4                  /* seg_ack host order */
     ldr     w5, [x19, #TCONN_SND_UNA]
     cmp     w4, w5
     b.ne    .Leak_not_dup
-    ldrh    w6, [x19, #TCONN_RTXLEN]
-    cbz     w6, .Leak_not_dup       /* no outstanding data → ignore */
+    ldr     w6, [x19, #TCONN_SND_NXT]
+    cmp     w6, w5
+    b.eq    .Leak_not_dup           /* SND_NXT == SND_UNA → no data in flight */
 
     /* Increment DUP_ACK_CNT */
     ldrb    w7, [x19, #TCONN_DUP_ACK_CNT]
@@ -2053,21 +2155,22 @@ tcp_send:
     cmp     w0, #TCPS_ESTABLISHED
     b.ne    .Lts_err
 
-    /* Gate: retransmit pending → can't send new data */
-    ldrh    w0, [x19, #TCONN_RTXLEN]
-    cbnz    w0, .Lts_err
-
     /* Check 1 <= payload_len <= peer MSS */
     cbz     w21, .Lts_err
     ldrh    w0, [x19, #TCONN_PEER_MSS]
     cmp     w21, w0
     b.hi    .Lts_err
 
-    /* Check payload_len <= min(SND_WND, cwnd) */
+    /* Check payload_len <= available_window - in_flight */
     ldr     w0, [x19, #TCONN_SND_WND]
     ldr     w1, [x19, #TCONN_CWND]
     cmp     w0, w1
     csel    w0, w0, w1, lo          /* min(SND_WND, cwnd) */
+    ldr     w1, [x19, #TCONN_SND_NXT]
+    ldr     w2, [x19, #TCONN_SND_UNA]
+    sub     w1, w1, w2              /* in_flight */
+    subs    w0, w0, w1              /* available = window - in_flight */
+    b.ls    .Lts_err                /* no room */
     cmp     w21, w0
     b.hi    .Lts_err
 
@@ -2115,11 +2218,9 @@ tcp_send:
     sub     w0, w0, w21
     str     w0, [x19, #TCONN_SND_WND]
 
-    /* Save frame to retransmit buffer */
-    mov     x0, x19                 /* conn */
-    mov     x1, x23                 /* frame */
-    mov     w2, w22                 /* frame_len */
-    bl      tcp_rtx_save
+    /* Arm retransmit timer (data is in send buffer, no rtxbuf copy) */
+    mov     x0, x19
+    bl      tcp_rtx_arm
 
     mov     w0, w22                 /* return frame length */
 
@@ -2204,16 +2305,20 @@ tcp_send_ready:
     ldrb    w1, [x0, #TCONN_STATE]
     cmp     w1, #TCPS_ESTABLISHED
     b.ne    .Ltsr_zero
-    /* Gate: retransmit pending → not ready */
-    ldrh    w1, [x0, #TCONN_RTXLEN]
-    cbnz    w1, .Ltsr_zero
-    ldrh    w1, [x0, #TCONN_PEER_MSS]
-    ldr     w2, [x0, #TCONN_CWND]
-    ldr     w0, [x0, #TCONN_SND_WND]
-    cmp     w0, w1
-    csel    w0, w0, w1, lo          /* min(SND_WND, peer_mss) */
-    cmp     w0, w2
-    csel    w0, w0, w2, lo          /* min(above, cwnd) */
+    /* Compute available = min(SND_WND, CWND) - in_flight */
+    ldr     w2, [x0, #TCONN_SND_WND]
+    ldr     w3, [x0, #TCONN_CWND]
+    cmp     w2, w3
+    csel    w2, w2, w3, lo          /* min(SND_WND, cwnd) */
+    ldr     w3, [x0, #TCONN_SND_NXT]
+    ldr     w4, [x0, #TCONN_SND_UNA]
+    sub     w3, w3, w4              /* in_flight */
+    subs    w1, w2, w3              /* available */
+    b.ls    .Ltsr_zero
+    /* Cap at peer MSS */
+    ldrh    w2, [x0, #TCONN_PEER_MSS]
+    cmp     w1, w2
+    csel    w0, w1, w2, lo
     ret
 .Ltsr_zero:
     mov     w0, #0
@@ -2711,28 +2816,17 @@ tcp_fast_retransmit:
     csel    w0, w0, w3, lo
     str     w0, [x19, #TCONN_CWND]
 
-    /* Copy rtxbuf → tx_buf and send */
+    /* Rebuild and send from send buffer */
     ldr     x20, =tcp_send_ctx
     ldr     x1, [x20, #TSCTX_SEND_FN]
     cbz     x1, .Lfrtx_done
 
-    ldr     x2, =tcp_conn_table
-    sub     x2, x19, x2
-    lsr     x2, x2, #TCONN_SHIFT
+    mov     x0, x19
+    ldr     x1, [x20, #TSCTX_TX_BUF]
+    bl      tcp_sndbuf_build_frame
+    cbz     w0, .Lfrtx_done
+    mov     w21, w0
 
-    ldr     x3, =tcp_rtxbuf_pool
-    add     x3, x3, x2, lsl #TCP_RXBUF_SHIFT
-    ldr     x4, [x20, #TSCTX_TX_BUF]
-    ldrh    w21, [x19, #TCONN_RTXLEN]
-    mov     w5, w21
-.Lfrtx_copy:
-    cbz     w5, .Lfrtx_send
-    ldrb    w6, [x3], #1
-    strb    w6, [x4], #1
-    sub     w5, w5, #1
-    b       .Lfrtx_copy
-
-.Lfrtx_send:
     ldr     x0, [x20, #TSCTX_DWC2_BASE]
     ldr     x1, [x20, #TSCTX_ECM_STATE]
     ldr     x2, [x20, #TSCTX_TX_BUF]

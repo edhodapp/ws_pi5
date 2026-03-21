@@ -5725,8 +5725,9 @@ test_tcp_send_window_exhaustion:
     ldr     w0, [x21, #TCONN_SND_WND]
     cmp     w0, #10
     b.ne    .Lfail_tcp_swe
-    /* Clear retransmit state to allow next send (simulates ACK) */
-    strh    wzr, [x21, #TCONN_RTXLEN]
+    /* Simulate ACK: advance SND_UNA to SND_NXT (clears in-flight) */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    str     w0, [x21, #TCONN_SND_UNA]
 
     /* Step 2: tcp_send 5 bytes → ret=59, SND_WND=5 */
     mov     x0, x21
@@ -5739,8 +5740,9 @@ test_tcp_send_window_exhaustion:
     ldr     w0, [x21, #TCONN_SND_WND]
     cmp     w0, #5
     b.ne    .Lfail_tcp_swe
-    /* Clear retransmit state to allow next send */
-    strh    wzr, [x21, #TCONN_RTXLEN]
+    /* Simulate ACK: advance SND_UNA to SND_NXT (clears in-flight) */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    str     w0, [x21, #TCONN_SND_UNA]
 
     /* Step 3: tcp_send 5 bytes → ret=59, SND_WND=0 */
     mov     x0, x21
@@ -5753,8 +5755,9 @@ test_tcp_send_window_exhaustion:
     ldr     w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_swe
 
-    /* Clear retransmit gate so step 4 tests window exhaustion specifically */
-    strh    wzr, [x21, #TCONN_RTXLEN]
+    /* Simulate ACK: advance SND_UNA to SND_NXT (clears in-flight) */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    str     w0, [x21, #TCONN_SND_UNA]
 
     /* Step 4: tcp_send 5 bytes → rejected (ret=0), SND_WND still 0 */
     mov     x0, x21
@@ -6270,10 +6273,10 @@ test_tcp_snd_una_pure_ack:
     .ltorg
 
 /* ========================================================================
- * test_tcp_rtx_save_on_send — tcp_send saves frame to retransmit buffer
+ * test_tcp_rtx_save_on_send — tcp_send writes payload to send buffer
  *
- * Handshake → tcp_send 5 bytes → verify RTXLEN == frame_len (59),
- * first byte of rtxbuf matches first byte of sent frame
+ * Handshake → tcp_send 5 bytes → verify SND_BUF_USED == 5,
+ * first byte of sndbuf matches first byte of payload
  * ======================================================================== */
 test_tcp_rtx_save_on_send:
     stp     x29, x30, [sp, #-48]!
@@ -6285,8 +6288,8 @@ test_tcp_rtx_save_on_send:
     mov     x21, x0                 /* conn */
     mov     w22, w1                 /* ISN */
 
-    /* Verify RTXLEN starts at 0 */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
+    /* Verify SND_BUF_USED starts at 0 */
+    ldr     w0, [x21, #TCONN_SND_BUF_USED]
     cbnz    w0, .Lfail_tcp_rtxs
 
     /* Send 5 bytes */
@@ -6297,23 +6300,19 @@ test_tcp_rtx_save_on_send:
     bl      tcp_send
     cbz     w0, .Lfail_tcp_rtxs
 
-    /* Verify RTXLEN == 59 (54 + 5) */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
-    cmp     w0, #59
+    /* Verify SND_BUF_USED == 5 */
+    ldr     w0, [x21, #TCONN_SND_BUF_USED]
+    cmp     w0, #5
     b.ne    .Lfail_tcp_rtxs
 
-    /* Verify RTXCOUNT == 0 */
-    ldrb    w0, [x21, #TCONN_RTXCOUNT]
-    cbnz    w0, .Lfail_tcp_rtxs
-
-    /* Verify first byte of rtxbuf matches send_test_buf */
+    /* Verify first byte of sndbuf matches payload */
     ldr     x0, =tcp_conn_table
     sub     x0, x21, x0
     lsr     x0, x0, #TCONN_SHIFT   /* slot index */
-    ldr     x1, =tcp_rtxbuf_pool
-    add     x1, x1, x0, lsl #TCP_RXBUF_SHIFT
+    ldr     x1, =tcp_sndbuf_pool
+    add     x1, x1, x0, lsl #TCP_SNDBUF_SHIFT
     ldrb    w2, [x1]
-    ldr     x3, =tcp_send_test_buf
+    ldr     x3, =tcp_send_payload
     ldrb    w4, [x3]
     cmp     w2, w4
     b.ne    .Lfail_tcp_rtxs
@@ -6333,9 +6332,9 @@ test_tcp_rtx_save_on_send:
 
 /* ========================================================================
  * test_tcp_rtx_clear_on_ack — ACK that advances SND_UNA == SND_NXT clears
- * retransmit state
+ * send buffer
  *
- * Handshake → tcp_send 5 bytes → ACK all → verify RTXLEN == 0
+ * Handshake → tcp_send 5 bytes → ACK all → verify SND_BUF_USED == 0
  * ======================================================================== */
 test_tcp_rtx_clear_on_ack:
     stp     x29, x30, [sp, #-48]!
@@ -6355,8 +6354,8 @@ test_tcp_rtx_clear_on_ack:
     bl      tcp_send
     cbz     w0, .Lfail_tcp_rtxc
 
-    /* Verify RTXLEN != 0 */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
+    /* Verify SND_BUF_USED != 0 */
+    ldr     w0, [x21, #TCONN_SND_BUF_USED]
     cbz     w0, .Lfail_tcp_rtxc
 
     /* Peer ACKs all: ACK = ISN+6 */
@@ -6371,8 +6370,8 @@ test_tcp_rtx_clear_on_ack:
     mov     w1, #54
     bl      tcp_handle
 
-    /* Verify RTXLEN == 0 */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
+    /* Verify SND_BUF_USED == 0 */
+    ldr     w0, [x21, #TCONN_SND_BUF_USED]
     cbnz    w0, .Lfail_tcp_rtxc
 
     /* Verify RTXCOUNT == 0 */
@@ -6393,9 +6392,9 @@ test_tcp_rtx_clear_on_ack:
     .ltorg
 
 /* ========================================================================
- * test_tcp_send_gate_rtx — tcp_send returns 0 when RTXLEN != 0
+ * test_tcp_send_gate_rtx — tcp_send returns 0 when in-flight exhausts window
  *
- * Handshake → tcp_send 5 bytes (RTXLEN set) → second tcp_send → returns 0
+ * Handshake → SND_WND=5 → tcp_send 5 bytes → second tcp_send → returns 0
  * ======================================================================== */
 test_tcp_send_gate_rtx:
     stp     x29, x30, [sp, #-48]!
@@ -6406,7 +6405,11 @@ test_tcp_send_gate_rtx:
     cbz     x0, .Lfail_tcp_sgate
     mov     x21, x0                 /* conn */
 
-    /* First send succeeds */
+    /* Shrink window so one send exhausts it */
+    mov     w0, #5
+    str     w0, [x21, #TCONN_SND_WND]
+
+    /* First send succeeds (in_flight=0 < window=5) */
     mov     x0, x21
     ldr     x1, =tcp_send_test_buf
     ldr     x2, =tcp_send_payload
@@ -6414,11 +6417,7 @@ test_tcp_send_gate_rtx:
     bl      tcp_send
     cbz     w0, .Lfail_tcp_sgate
 
-    /* RTXLEN should be non-zero */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
-    cbz     w0, .Lfail_tcp_sgate
-
-    /* Second send should return 0 (gated) */
+    /* Second send should return 0 (window exhausted by in-flight) */
     mov     x0, x21
     ldr     x1, =tcp_send_test_buf
     ldr     x2, =tcp_send_payload
@@ -6440,9 +6439,9 @@ test_tcp_send_gate_rtx:
     .ltorg
 
 /* ========================================================================
- * test_tcp_send_ready_gate_rtx — tcp_send_ready returns 0 when RTXLEN != 0
+ * test_tcp_send_ready_gate_rtx — tcp_send_ready returns 0 when window exhausted
  *
- * Handshake → tcp_send 5 bytes → tcp_send_ready → returns 0
+ * Handshake → SND_WND=5 → tcp_send 5 bytes → tcp_send_ready → returns 0
  * ======================================================================== */
 test_tcp_send_ready_gate_rtx:
     stp     x29, x30, [sp, #-48]!
@@ -6453,6 +6452,10 @@ test_tcp_send_ready_gate_rtx:
     cbz     x0, .Lfail_tcp_srgate
     mov     x21, x0                 /* conn */
 
+    /* Shrink window so one send exhausts it */
+    mov     w0, #5
+    str     w0, [x21, #TCONN_SND_WND]
+
     /* Send 5 bytes */
     mov     x0, x21
     ldr     x1, =tcp_send_test_buf
@@ -6461,7 +6464,7 @@ test_tcp_send_ready_gate_rtx:
     bl      tcp_send
     cbz     w0, .Lfail_tcp_srgate
 
-    /* tcp_send_ready should return 0 */
+    /* tcp_send_ready should return 0 (window exhausted) */
     mov     x0, x21
     bl      tcp_send_ready
     cbnz    w0, .Lfail_tcp_srgate
@@ -6991,9 +6994,9 @@ test_tcp_dup_data_ack:
     .ltorg
 
 /* ========================================================================
- * test_tcp_rst_clears_rtx — RST clears retransmit state
+ * test_tcp_rst_clears_rtx — RST clears connection (in-flight → 0)
  *
- * Handshake → tcp_send (RTXLEN set) → RST → CLOSED, RTXLEN == 0
+ * Handshake → tcp_send (SND_BUF_USED > 0) → RST → CLOSED, in_flight == 0
  * ======================================================================== */
 test_tcp_rst_clears_rtx:
     stp     x29, x30, [sp, #-48]!
@@ -7005,7 +7008,7 @@ test_tcp_rst_clears_rtx:
     mov     x21, x0
     mov     w22, w1                 /* ISN */
 
-    /* Send 5 bytes to set RTXLEN */
+    /* Send 5 bytes (creates in-flight data) */
     mov     x0, x21
     ldr     x1, =tcp_send_test_buf
     ldr     x2, =tcp_send_payload
@@ -7013,8 +7016,8 @@ test_tcp_rst_clears_rtx:
     bl      tcp_send
     cbz     w0, .Lfail_tcp_rcr
 
-    /* Verify RTXLEN != 0 */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
+    /* Verify SND_BUF_USED != 0 */
+    ldr     w0, [x21, #TCONN_SND_BUF_USED]
     cbz     w0, .Lfail_tcp_rcr
 
     /* Inject RST: flags=RST+ACK, SEQ=2, ACK=ISN+1 */
@@ -7042,9 +7045,14 @@ test_tcp_rst_clears_rtx:
     ldrb    w0, [x21, #TCONN_STATE]
     cbnz    w0, .Lfail_tcp_rcr
 
-    /* Verify RTXLEN == 0 */
-    ldrh    w0, [x21, #TCONN_RTXLEN]
+    /* Verify RTXCOUNT == 0 (tcp_rtx_clear was called) */
+    ldrb    w0, [x21, #TCONN_RTXCOUNT]
     cbnz    w0, .Lfail_tcp_rcr
+
+    /* Verify TIMER_SLOT == -1 (timer cancelled) */
+    ldr     w0, [x21, #TCONN_TIMER_SLOT]
+    cmn     w0, #1
+    b.ne    .Lfail_tcp_rcr
 
     ldr     x0, =name_tcp_rcr
     bl      test_pass
@@ -9183,13 +9191,11 @@ test_tcp_cwnd_gate:
     cmp     w0, #59
     b.ne    .Lfail_tcp_cwga
 
-    /* tcp_send_ready should return 10 (min of SND_WND=2000-5=1995, cwnd=10, peer_mss=536)) */
-    /* Actually cwnd=10 is smallest, but SND_WND was decremented to 1995 by send,
-       and rtx pending gates send_ready to 0. Clear rtx first. */
-    strh    wzr, [x19, #TCONN_RTXLEN]
+    /* tcp_send_ready should return 5 (min of cwnd=10 - in_flight=5, peer_mss=536)) */
+    /* cwnd=10, in_flight=5, SND_WND=1995. available = min(1995,10)-5 = 5 */
     mov     x0, x19
     bl      tcp_send_ready
-    cmp     w0, #10
+    cmp     w0, #5
     b.ne    .Lfail_tcp_cwga
 
     ldr     x0, =name_tcp_cwga
