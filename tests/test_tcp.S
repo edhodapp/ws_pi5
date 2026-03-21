@@ -193,6 +193,7 @@ test_tcp:
     bl      test_tcp_cwnd_grow
     bl      test_tcp_cwnd_rtx_reset
     bl      test_tcp_cwnd_gate
+    bl      test_tcp_ooo_merge
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2194,12 +2195,18 @@ test_tcp_estab_data_bad_seq:
     mov     w1, #59
     bl      tcp_handle
 
-    /* Verify return = 0 (drop) */
-    cbnz    w0, .Lfail_tcp_edb
+    /* Verify return = 54 (dup ACK sent, OOO segment buffered) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_edb
 
-    /* Verify RCV_NXT unchanged */
+    /* Verify RCV_NXT unchanged (OOO doesn't advance RCV_NXT) */
     ldr     w0, [x21, #TCONN_RCV_NXT]
     cmp     w0, w22
+    b.ne    .Lfail_tcp_edb
+
+    /* Verify OOO_COUNT = 1 (segment was buffered) */
+    ldrb    w0, [x21, #TCONN_OOO_COUNT]
+    cmp     w0, #1
     b.ne    .Lfail_tcp_edb
 
     ldr     x0, =name_tcp_edb
@@ -9023,6 +9030,118 @@ test_tcp_cwnd_gate:
     ret
 
 /* ========================================================================
+ * test_tcp_ooo_merge — OOO segment buffered, gap fill merges
+ *
+ * 1. Handshake → ESTABLISHED (RCV_NXT=2)
+ * 2. Send data SEQ=7 (5-byte gap) → OOO buffered, dup ACK, OOO_COUNT=1
+ * 3. Send data SEQ=2 (fills gap) → accepted + OOO merged, RCV_NXT=12
+ * ======================================================================== */
+test_tcp_ooo_merge:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_oom
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Step 1: Send OOO data with SEQ=7 (gap of 5 from RCV_NXT=2) */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+
+    ldr     x21, =tcp_test_buf
+    /* Patch SEQ = 7 */
+    mov     w0, #7
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* Patch ACK = ISN + 1 */
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x21
+    mov     w1, #25                 /* TCP segment: 20 hdr + 5 data */
+    bl      tcp_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x21
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Should return 54 (dup ACK) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_oom
+
+    /* OOO_COUNT = 1 */
+    ldrb    w0, [x19, #TCONN_OOO_COUNT]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_oom
+
+    /* RCV_NXT unchanged = 2 */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    cmp     w0, #2
+    b.ne    .Lfail_tcp_oom
+
+    /* Step 2: Send in-order data with SEQ=2 (fills gap) */
+    ldr     x0, =tcp_data_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #59
+    bl      ttcp_fill_checksum
+
+    ldr     x21, =tcp_test_buf
+    /* SEQ=2 is already the template default */
+    /* Patch ACK = ISN + 1 */
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x21
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x21
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Should return 54 (data ACK) */
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_oom
+
+    /* RCV_NXT should be 12 (2 + 5 in-order + 5 OOO merged) */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    cmp     w0, #12
+    b.ne    .Lfail_tcp_oom
+
+    /* RXLEN should be 10 */
+    ldrh    w0, [x19, #TCONN_RXLEN]
+    cmp     w0, #10
+    b.ne    .Lfail_tcp_oom
+
+    /* OOO_COUNT should be 0 (merged) */
+    ldrb    w0, [x19, #TCONN_OOO_COUNT]
+    cbnz    w0, .Lfail_tcp_oom
+
+    ldr     x0, =name_tcp_oom
+    bl      test_pass
+    b       .Ldone_tcp_oom
+
+.Lfail_tcp_oom:
+    ldr     x0, =name_tcp_oom
+    bl      test_fail
+
+.Ldone_tcp_oom:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -9631,6 +9750,7 @@ name_tcp_tstt:      .asciz "tcp_tsopt_trunc_ts"
 name_tcp_cwg:       .asciz "tcp_cwnd_grow"
 name_tcp_crr:       .asciz "tcp_cwnd_rtx_reset"
 name_tcp_cwga:      .asciz "tcp_cwnd_gate"
+name_tcp_oom:       .asciz "tcp_ooo_merge"
 
 tcp_send_payload:
     .ascii  "World"

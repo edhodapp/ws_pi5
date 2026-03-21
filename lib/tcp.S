@@ -1166,7 +1166,46 @@ tcp_estab_ack_handler:
     cmp     w5, w6
     b.eq    .Leak_seq_ok
     b.lo    .Leak_dup_data          /* SEQ < RCV_NXT → duplicate, re-ACK */
-    b       .Leak_pure_ack          /* SEQ > RCV_NXT → future, drop */
+
+    /* SEQ > RCV_NXT → out-of-order segment, try to buffer */
+    ldrb    w7, [x19, #TCONN_OOO_COUNT]
+    cmp     w7, #4
+    b.hs    .Leak_dup_data          /* OOO slots full → dup ACK */
+
+    /* Check rx buffer room: RXLEN + gap + data_len <= RXBUF_SIZE */
+    sub     w8, w5, w6              /* gap = SEQ - RCV_NXT */
+    ldrh    w9, [x19, #TCONN_RXLEN]
+    add     w10, w9, w8
+    add     w10, w10, w4            /* end offset = RXLEN + gap + data_len */
+    cmp     w10, #TCP_RXBUF_SIZE
+    b.hi    .Leak_dup_data          /* won't fit → dup ACK */
+
+    /* Copy data to rxbuf at offset RXLEN + gap */
+    ldr     x2, =tcp_conn_table
+    sub     x2, x19, x2
+    lsr     x2, x2, #7             /* slot index */
+    ldr     x0, =tcp_rxbuf_pool
+    add     x0, x0, x2, lsl #TCP_RXBUF_SHIFT
+    add     x0, x0, w9, uxtw       /* + RXLEN */
+    add     x0, x0, w8, uxtw       /* + gap */
+    add     x1, x20, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x1, x1, x22            /* skip TCP header */
+    mov     w2, w4
+.Leak_ooo_copy:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Leak_ooo_copy
+
+    /* Record in OOO slot[ooo_count] */
+    add     x0, x19, #TCONN_OOO_SLOTS
+    add     x0, x0, x7, lsl #3     /* slot[ooo_count], 8 bytes each */
+    str     w5, [x0]               /* SEQ */
+    strh    w4, [x0, #4]           /* LEN */
+    add     w7, w7, #1
+    strb    w7, [x19, #TCONN_OOO_COUNT]
+
+    b       .Leak_dup_data          /* send dup ACK */
 .Leak_seq_ok:
 
     /* Check rx buffer overflow */
@@ -1209,6 +1248,44 @@ tcp_estab_ack_handler:
     ldr     w6, [x19, #TCONN_RCV_NXT]
     add     w6, w6, w4
     str     w6, [x19, #TCONN_RCV_NXT]
+
+    /* OOO merge: check if buffered segments are now contiguous */
+    ldrb    w8, [x19, #TCONN_OOO_COUNT]
+    cbz     w8, .Leak_ooo_done
+.Leak_ooo_scan:
+    /* Scan OOO slots for SEQ == new RCV_NXT (w6) */
+    add     x0, x19, #TCONN_OOO_SLOTS
+    mov     w9, #0                  /* index */
+.Leak_ooo_check:
+    cmp     w9, w8
+    b.hs    .Leak_ooo_done          /* scanned all, no match */
+    ldr     w10, [x0]              /* slot[i].SEQ */
+    cmp     w10, w6
+    b.eq    .Leak_ooo_merge
+    add     x0, x0, #8
+    add     w9, w9, #1
+    b       .Leak_ooo_check
+.Leak_ooo_merge:
+    /* Match: advance RCV_NXT by slot[i].LEN, advance RXLEN */
+    ldrh    w10, [x0, #4]          /* slot[i].LEN */
+    add     w6, w6, w10
+    str     w6, [x19, #TCONN_RCV_NXT]
+    ldrh    w5, [x19, #TCONN_RXLEN]
+    add     w5, w5, w10
+    strh    w5, [x19, #TCONN_RXLEN]
+    /* Remove slot[i]: copy last slot over it, decrement count */
+    sub     w8, w8, #1
+    strb    w8, [x19, #TCONN_OOO_COUNT]
+    cbz     w8, .Leak_ooo_scan     /* was last slot, nothing to copy */
+    /* If i != new count, copy slot[count] → slot[i] */
+    cmp     w9, w8
+    b.eq    .Leak_ooo_scan          /* removed last, no copy needed */
+    add     x1, x19, #TCONN_OOO_SLOTS
+    add     x1, x1, x8, lsl #3     /* slot[new_count] (the old last) */
+    ldr     x2, [x1]               /* 8-byte copy */
+    str     x2, [x0]
+    b       .Leak_ooo_scan          /* rescan with updated count */
+.Leak_ooo_done:
 
     /* Build ACK reply: SEQ=SND_NXT(NBO), ACK=new_RCV_NXT(NBO) */
     ldr     w0, [x19, #TCONN_SND_NXT]
@@ -1686,6 +1763,7 @@ tcp_rx_peek:
  */
 tcp_rx_flush:
     strh    wzr, [x0, #TCONN_RXLEN]
+    strb    wzr, [x0, #TCONN_OOO_COUNT]
     ret
 
 /*
