@@ -255,6 +255,9 @@ test_tcp:
     bl      test_tcp_sndbuf_ack_advance
     bl      test_tcp_sack_perm_negotiate
     bl      test_tcp_sack_perm_absent
+    bl      test_tcp_sack_parse_1block
+    bl      test_tcp_sack_find_hole
+    bl      test_tcp_sndbuf_build_at
     ldp     x29, x30, [sp], #16
     ret
 
@@ -12443,6 +12446,183 @@ test_tcp_sack_perm_absent:
     ret
 
 /* ========================================================================
+ * test_tcp_sack_parse_1block — Parse 1 SACK block from TCP options
+ * ======================================================================== */
+.global test_tcp_sack_parse_1block
+test_tcp_sack_parse_1block:
+    stp     x29, x30, [sp, #-48]!
+    str     x19, [sp, #16]
+
+    /* Build a minimal TCP header with SACK option at offset 20:
+     * NOP NOP Kind=5 Len=10 LeftEdge(4) RightEdge(4)
+     * Total options = 12 bytes, doff = 8 words (32 bytes) */
+    ldr     x0, =tcp_test_buf
+    /* Zero first 46 bytes (ETH+IP+TCP_base+options) */
+    mov     w1, #46
+.Lsp1_zero:
+    strb    wzr, [x0], #1
+    subs    w1, w1, #1
+    b.ne    .Lsp1_zero
+
+    ldr     x0, =tcp_test_buf
+    /* NOP NOP at TCP+20 */
+    mov     w1, #1
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    /* Kind=5 Len=10 */
+    mov     w1, #TCP_OPT_SACK
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w1, #10
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+    /* LeftEdge = 100 (NBO) */
+    mov     w1, #100
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]
+    /* RightEdge = 200 (NBO) */
+    mov     w1, #200
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 28)]
+
+    /* Parse with header_len = 32 */
+    sub     sp, sp, #32             /* output buffer */
+    mov     x2, sp
+    mov     w1, #32
+    bl      tcp_parse_sack_blocks
+
+    /* Should return 1 block */
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_sp1
+
+    /* Block[0].left should be 100 */
+    ldr     w0, [sp]
+    cmp     w0, #100
+    b.ne    .Lfail_tcp_sp1
+
+    /* Block[0].right should be 200 */
+    ldr     w0, [sp, #4]
+    cmp     w0, #200
+    b.ne    .Lfail_tcp_sp1
+
+    add     sp, sp, #32
+    ldr     x0, =name_tcp_sp1
+    bl      test_pass
+    b       .Ldone_tcp_sp1
+.Lfail_tcp_sp1:
+    add     sp, sp, #32
+    ldr     x0, =name_tcp_sp1
+    bl      test_fail
+.Ldone_tcp_sp1:
+    ldr     x19, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_sack_find_hole — SACK block covering first segment → skip to hole
+ * ======================================================================== */
+.global test_tcp_sack_find_hole
+test_tcp_sack_find_hole:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sfh
+    mov     x19, x0
+
+    /* Simulate 2 MSS-sized segments in flight:
+     * SND_UNA = ISN+1, SND_NXT = ISN+1 + 2*536 */
+    ldr     w0, [x19, #TCONN_SND_UNA]
+    ldrh    w1, [x19, #TCONN_PEER_MSS]
+    lsl     w2, w1, #1              /* 2*MSS */
+    add     w2, w0, w2
+    str     w2, [x19, #TCONN_SND_NXT]
+
+    /* Build SACK block covering the first segment: [SND_UNA, SND_UNA+MSS) */
+    sub     sp, sp, #32
+    str     w0, [sp]                /* left = SND_UNA */
+    add     w0, w0, w1              /* right = SND_UNA + MSS */
+    str     w0, [sp, #4]
+
+    mov     x0, x19
+    mov     x1, sp
+    mov     w2, #1                  /* 1 SACK block */
+    bl      tcp_sack_find_hole
+
+    /* Should return MSS (skip first SACKed segment) */
+    ldrh    w1, [x19, #TCONN_PEER_MSS]
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sfh2
+
+    add     sp, sp, #32
+    ldr     x0, =name_tcp_sfh
+    bl      test_pass
+    b       .Ldone_tcp_sfh
+.Lfail_tcp_sfh2:
+    add     sp, sp, #32
+.Lfail_tcp_sfh:
+    ldr     x0, =name_tcp_sfh
+    bl      test_fail
+.Ldone_tcp_sfh:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_sndbuf_build_at — Build frame at non-zero offset
+ * ======================================================================== */
+.global test_tcp_sndbuf_build_at
+test_tcp_sndbuf_build_at:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sba2
+    mov     x19, x0
+
+    /* Send 10 bytes in two chunks to populate send buffer */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sba2
+
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sba2
+
+    /* Build frame at offset 5 (second segment) */
+    mov     x0, x19
+    ldr     x1, =tcp_test_buf
+    mov     w2, #5                  /* offset = 5 bytes */
+    bl      tcp_sndbuf_build_frame_at
+
+    /* Should return > 0 (frame built) */
+    cbz     w0, .Lfail_tcp_sba2
+
+    /* Verify the frame's SEQ = SND_UNA + 5 */
+    ldr     x1, =tcp_test_buf
+    ldr     w1, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w1
+    ldr     w2, [x19, #TCONN_SND_UNA]
+    add     w2, w2, #5
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_sba2
+
+    ldr     x0, =name_tcp_sba2
+    bl      test_pass
+    b       .Ldone_tcp_sba2
+.Lfail_tcp_sba2:
+    ldr     x0, =name_tcp_sba2
+    bl      test_fail
+.Ldone_tcp_sba2:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -13105,6 +13285,9 @@ name_tcp_sbw:       .asciz "tcp_sndbuf_write"
 name_tcp_sba:       .asciz "tcp_sndbuf_ack_advance"
 name_tcp_spn:       .asciz "tcp_sack_perm_negotiate"
 name_tcp_spa:       .asciz "tcp_sack_perm_absent"
+name_tcp_sp1:       .asciz "tcp_sack_parse_1block"
+name_tcp_sfh:       .asciz "tcp_sack_find_hole"
+name_tcp_sba2:      .asciz "tcp_sndbuf_build_at"
 
 tcp_send_payload:
     .ascii  "World"

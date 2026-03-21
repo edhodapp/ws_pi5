@@ -477,6 +477,155 @@ tcp_sndbuf_build_frame:
     ldp     x29, x30, [sp], #64
     ret
 
+/*
+ * tcp_sndbuf_build_frame_at — Build frame from send buffer at given offset
+ *
+ * x0: connection pointer
+ * x1: frame buffer (output)
+ * w2: byte offset from SND_UNA into in-flight data
+ * Returns: w0 = frame length, or 0 if no data at that offset
+ * Clobbers: x0-x6, x19-x24, x30
+ */
+.global tcp_sndbuf_build_frame_at
+tcp_sndbuf_build_frame_at:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0                 /* conn */
+    mov     x23, x1                 /* frame buf */
+    mov     w24, w2                 /* offset */
+
+    /* available = (SND_NXT - SND_UNA) - offset */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    ldr     w1, [x19, #TCONN_SND_UNA]
+    sub     w0, w0, w1              /* in_flight */
+    subs    w21, w0, w24            /* available */
+    b.ls    .Lsbfa_none
+
+    /* segment size = min(available, MSS) */
+    ldrh    w0, [x19, #TCONN_PEER_MSS]
+    cmp     w21, w0
+    csel    w21, w21, w0, lo
+
+    /* Copy from send buffer to stack temp */
+    sub     sp, sp, w21, uxtw
+    mov     x22, sp
+
+    ldr     x0, =tcp_conn_table
+    sub     x0, x19, x0
+    lsr     x0, x0, #TCONN_SHIFT
+    ldr     x1, =tcp_sndbuf_pool
+    add     x1, x1, x0, lsl #TCP_SNDBUF_SHIFT
+    ldr     w2, [x19, #TCONN_SND_BUF_TAIL]
+    add     w2, w2, w24             /* start at tail + offset */
+
+    mov     w3, #0
+.Lsbfa_copy:
+    cmp     w3, w21
+    b.hs    .Lsbfa_copy_done
+    add     w4, w2, w3
+    and     w4, w4, #TCP_SNDBUF_MASK
+    ldrb    w5, [x1, x4]
+    strb    w5, [x22, x3]
+    add     w3, w3, #1
+    b       .Lsbfa_copy
+.Lsbfa_copy_done:
+
+    /* Set SEQ = SND_UNA + offset for this segment */
+    ldr     w0, [x19, #TCONN_SND_UNA]
+    add     w0, w0, w24
+    /* Temporarily override SND_NXT so tcp_build_frame emits correct SEQ */
+    ldr     w20, [x19, #TCONN_SND_NXT]
+    str     w0, [x19, #TCONN_SND_NXT]
+
+    mov     x0, x19
+    mov     x1, x23
+    mov     w2, #TCP_PSH_ACK
+    mov     x3, x22
+    mov     w4, w21
+    bl      tcp_build_frame
+
+    mov     w22, w0
+    str     w20, [x19, #TCONN_SND_NXT]   /* restore */
+    add     sp, sp, w21, uxtw
+
+    mov     w0, w22
+    b       .Lsbfa_done
+
+.Lsbfa_none:
+    mov     w0, #0
+
+.Lsbfa_done:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/*
+ * tcp_sack_find_hole — Find offset of first un-SACKed segment
+ *
+ * Walks in-flight data in MSS-sized chunks from SND_UNA.
+ * Returns offset of first chunk NOT covered by any SACK block.
+ *
+ * x0: connection pointer
+ * x1: SACK block buffer (array of {left u32, right u32} in host order)
+ * w2: number of SACK blocks (1-4)
+ * Returns: w0 = byte offset from SND_UNA, or 0 if no blocks / first segment is the hole
+ * Clobbers: w0-w6
+ */
+.global tcp_sack_find_hole
+tcp_sack_find_hole:
+    cbz     w2, .Lsfh_zero
+
+    ldr     w3, [x0, #TCONN_SND_UNA]
+    ldr     w4, [x0, #TCONN_SND_NXT]
+    sub     w4, w4, w3              /* in_flight */
+    ldrh    w5, [x0, #TCONN_PEER_MSS]
+
+    mov     w0, #0                  /* offset */
+
+.Lsfh_check:
+    cmp     w0, w4
+    b.hs    .Lsfh_zero              /* past in_flight → fallback to offset 0 */
+
+    /* seg_start = SND_UNA + offset */
+    add     w6, w3, w0
+
+    /* Check if seg_start is covered by any SACK block */
+    mov     w7, #0
+.Lsfh_block_loop:
+    cmp     w7, w2
+    b.hs    .Lsfh_found_hole        /* not covered → this is the hole */
+
+    add     x9, x1, x7, lsl #3     /* &block[i] */
+    ldr     w8, [x9]                /* block[i].left */
+    ldr     w9, [x9, #4]           /* block[i].right */
+
+    /* Covered if left <= seg_start < right */
+    sub     w10, w6, w8             /* seg_start - left (unsigned) */
+    sub     w11, w9, w8             /* right - left */
+    cmp     w10, w11
+    b.lo    .Lsfh_covered           /* within block */
+
+    add     w7, w7, #1
+    b       .Lsfh_block_loop
+
+.Lsfh_covered:
+    /* This segment is SACKed, skip to next */
+    add     w0, w0, w5              /* offset += MSS */
+    b       .Lsfh_check
+
+.Lsfh_found_hole:
+    /* w0 = offset of the hole */
+    ret
+
+.Lsfh_zero:
+    mov     w0, #0
+    ret
+
 tcp_rtx_arm:
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
@@ -1765,8 +1914,10 @@ tcp_estab_ack_handler:
     cmp     w7, #TCP_DUPACK_THRESH
     b.ne    .Leak_not_dup           /* not at threshold yet */
 
-    /* Fast retransmit: retransmit immediately */
+    /* Fast retransmit: retransmit immediately (SACK-aware) */
     mov     x0, x19
+    mov     x1, x20                 /* frame (for SACK parsing) */
+    mov     w2, w22                 /* tcp_header_len */
     bl      tcp_fast_retransmit
     strb    wzr, [x19, #TCONN_DUP_ACK_CNT]  /* reset counter */
 
@@ -2753,6 +2904,89 @@ tcp_parse_sack_permitted:
     mov     w0, #0
     ret
 
+/*
+ * tcp_parse_sack_blocks — Parse SACK blocks from TCP options (Kind=5)
+ *
+ * x0: frame pointer, w1: tcp_header_len
+ * x2: output buffer (32 bytes: up to 4 × {LeftEdge u32, RightEdge u32} host order)
+ * Returns: w0 = number of blocks found (0-4)
+ * Clobbers: x0-x5
+ */
+.global tcp_parse_sack_blocks
+tcp_parse_sack_blocks:
+    stp     x19, x20, [sp, #-16]!
+    mov     x19, x2                 /* save output buffer */
+
+    cmp     w1, #TCP_HDR_MIN
+    b.le    .Lsb_none
+
+    add     x2, x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_HDR_MIN)
+    add     x3, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x3, x3, x1
+
+.Lsb_loop:
+    cmp     x2, x3
+    b.hs    .Lsb_none
+    ldrb    w4, [x2]
+    cbz     w4, .Lsb_none           /* EOL */
+    cmp     w4, #TCP_OPT_NOP
+    b.eq    .Lsb_nop
+
+    add     x0, x2, #1
+    cmp     x0, x3
+    b.hs    .Lsb_none
+    ldrb    w5, [x2, #1]           /* length */
+    cmp     w5, #2
+    b.lt    .Lsb_none
+
+    cmp     w4, #TCP_OPT_SACK
+    b.ne    .Lsb_skip
+
+    /* Found SACK option. n_blocks = (length - 2) / 8 */
+    sub     w0, w5, #2
+    lsr     w0, w0, #3             /* n_blocks */
+    cmp     w0, #4
+    csel    w20, w0, w4, lo
+    mov     w4, #4
+    csel    w20, w20, w4, lo       /* cap at 4 */
+
+    /* Verify enough bytes remain */
+    add     x0, x2, x5
+    cmp     x0, x3
+    b.hi    .Lsb_none
+
+    /* Extract blocks: each is 4-byte LeftEdge + 4-byte RightEdge (NBO) */
+    add     x2, x2, #2             /* skip kind+len */
+    mov     w0, #0                  /* block counter */
+.Lsb_extract:
+    cmp     w0, w20
+    b.hs    .Lsb_done
+    ldr     w4, [x2], #4           /* LeftEdge NBO */
+    rev     w4, w4
+    add     x5, x19, x0, lsl #3
+    str     w4, [x5]               /* out[i].left */
+    ldr     w4, [x2], #4           /* RightEdge NBO */
+    rev     w4, w4
+    str     w4, [x5, #4]           /* out[i].right */
+    add     w0, w0, #1
+    b       .Lsb_extract
+
+.Lsb_done:
+    mov     w0, w20
+    ldp     x19, x20, [sp], #16
+    ret
+
+.Lsb_nop:
+    add     x2, x2, #1
+    b       .Lsb_loop
+.Lsb_skip:
+    add     x2, x2, x5
+    b       .Lsb_loop
+.Lsb_none:
+    mov     w0, #0
+    ldp     x19, x20, [sp], #16
+    ret
+
 tcp_parse_tsopt:
     /* If header_len <= 20, no options */
     cmp     w1, #TCP_HDR_MIN
@@ -2854,41 +3088,75 @@ tcp_isn:
  * tcp_fast_retransmit — Retransmit immediately on 3 duplicate ACKs
  *
  * x0: connection pointer
+ * x1: frame pointer (for SACK block parsing)
+ * w2: tcp_header_len
  * Performs: multiplicative decrease (cwnd halved + 3*MSS inflate),
- *           copy rtxbuf → tx_buf, send, reset RTO timer.
- * Clobbers: x0-x6, x19-x22, x30
+ *           SACK-aware retransmit from send buffer, reset RTO timer.
+ * Clobbers: x0-x6, x19-x24, x30
  */
 tcp_fast_retransmit:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
-    mov     x19, x0
+    stp     x23, x24, [sp, #48]
+    mov     x19, x0                 /* conn */
+    mov     x23, x1                 /* frame (for SACK parsing) */
+    mov     w24, w2                 /* tcp_header_len */
+
+    /* Record recovery point */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    str     w0, [x19, #TCONN_SACK_RECOVER]
 
     /* Multiplicative decrease: ssthresh = max(cwnd/2, 2*MSS) */
     ldr     w0, [x19, #TCONN_CWND]
-    lsr     w0, w0, #1              /* cwnd / 2 */
+    lsr     w0, w0, #1
     ldrh    w1, [x19, #TCONN_PEER_MSS]
-    lsl     w2, w1, #1              /* 2 * MSS */
+    lsl     w2, w1, #1
     cmp     w0, w2
-    csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
+    csel    w0, w0, w2, hs
     str     w0, [x19, #TCONN_SSTHRESH]
-    /* cwnd = ssthresh + 3*MSS (RFC 5681: inflate for 3 dup ACKs in flight) */
     mov     w2, #3
     mul     w2, w1, w2
     add     w0, w0, w2
-    mov     w3, #0x40000                /* 256 KB cap */
+    mov     w3, #0x40000
     cmp     w0, w3
     csel    w0, w0, w3, lo
     str     w0, [x19, #TCONN_CWND]
 
-    /* Rebuild and send from send buffer */
+    /* Load send context */
     ldr     x20, =tcp_send_ctx
     ldr     x1, [x20, #TSCTX_SEND_FN]
     cbz     x1, .Lfrtx_done
 
+    /* SACK-aware retransmit: find first un-SACKed segment */
+    mov     w22, #0                 /* default offset = 0 */
+    ldrb    w0, [x19, #TCONN_SACK_ENABLED]
+    cbz     w0, .Lfrtx_build
+
+    /* Parse SACK blocks from triggering ACK */
+    sub     sp, sp, #32            /* 4 blocks × 8 bytes */
+    mov     x0, x23                /* frame */
+    mov     w1, w24                /* header_len */
+    mov     x2, sp
+    bl      tcp_parse_sack_blocks
+    cbz     w0, .Lfrtx_no_sack
+
+    /* Find first hole */
+    mov     x1, sp                 /* sack blocks */
+    mov     w2, w0                 /* n_blocks */
+    mov     x0, x19                /* conn */
+    bl      tcp_sack_find_hole
+    mov     w22, w0                /* offset of hole */
+
+.Lfrtx_no_sack:
+    add     sp, sp, #32
+
+.Lfrtx_build:
+    /* Build frame at offset (0 for non-SACK, hole offset for SACK) */
     mov     x0, x19
     ldr     x1, [x20, #TSCTX_TX_BUF]
-    bl      tcp_sndbuf_build_frame
+    mov     w2, w22
+    bl      tcp_sndbuf_build_frame_at
     cbz     w0, .Lfrtx_done
     mov     w21, w0
 
@@ -2905,9 +3173,10 @@ tcp_fast_retransmit:
     bl      tcp_rtx_arm
 
 .Lfrtx_done:
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 /*
