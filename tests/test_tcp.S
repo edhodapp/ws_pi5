@@ -190,6 +190,9 @@ test_tcp:
     bl      test_tcp_tsopt_wrong_tslen
     bl      test_tcp_paws_no_tsopt
     bl      test_tcp_tsopt_trunc_ts
+    bl      test_tcp_cwnd_grow
+    bl      test_tcp_cwnd_rtx_reset
+    bl      test_tcp_cwnd_gate
     ldp     x29, x30, [sp], #16
     ret
 
@@ -8822,6 +8825,204 @@ test_tcp_tsopt_trunc_ts:
     ret
 
 /* ========================================================================
+ * test_tcp_cwnd_grow — cwnd grows on new ACK (slow start: cwnd += MSS)
+ *
+ * 1. Handshake → ESTABLISHED (cwnd = 536, ssthresh = 0xFFFF)
+ * 2. tcp_send 5 bytes → frame built
+ * 3. Inject ACK acknowledging those bytes → cwnd grows to 536+536 = 1072
+ * ======================================================================== */
+test_tcp_cwnd_grow:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_cwg
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Verify initial cwnd = 536 (default MSS) */
+    ldrh    w0, [x19, #TCONN_CWND]
+    cmp     w0, #TCP_DEFAULT_MSS
+    b.ne    .Lfail_tcp_cwg
+
+    /* Send 5 bytes */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_cwg
+
+    /* Inject ACK for the 5 bytes: ACK = ISN + 1 + 5 = ISN + 6 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x21, =tcp_test_buf
+    add     w0, w20, #6
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Set SEQ = 2 (peer's next byte after handshake) */
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x21
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x21
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* cwnd should have grown: 536 + 536 = 1072 */
+    ldrh    w0, [x19, #TCONN_CWND]
+    mov     w1, #1072
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_cwg
+
+    ldr     x0, =name_tcp_cwg
+    bl      test_pass
+    b       .Ldone_tcp_cwg
+
+.Lfail_tcp_cwg:
+    ldr     x0, =name_tcp_cwg
+    bl      test_fail
+
+.Ldone_tcp_cwg:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_cwnd_rtx_reset — retransmit timeout resets cwnd to MSS
+ *
+ * 1. Handshake → ESTABLISHED
+ * 2. Manually set cwnd=2000, ssthresh=0xFFFF
+ * 3. tcp_send → saves retransmit frame
+ * 4. Call tcp_retransmit_cb → cwnd should reset to MSS (536)
+ *    ssthresh = max(2000/2, 2*536) = max(1000, 1072) = 1072
+ * ======================================================================== */
+test_tcp_cwnd_rtx_reset:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_crr
+    mov     x19, x0                 /* conn */
+
+    /* Set cwnd = 2000 */
+    mov     w0, #2000
+    strh    w0, [x19, #TCONN_CWND]
+    mov     w0, #0xFFFF
+    strh    w0, [x19, #TCONN_SSTHRESH]
+
+    /* Send 5 bytes to create retransmit state */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_crr
+
+    /* Call tcp_retransmit_cb(conn) */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* cwnd should be MSS (536) */
+    ldrh    w0, [x19, #TCONN_CWND]
+    cmp     w0, #TCP_DEFAULT_MSS
+    b.ne    .Lfail_tcp_crr
+
+    /* ssthresh = max(2000/2, 2*536) = max(1000, 1072) = 1072 */
+    ldrh    w0, [x19, #TCONN_SSTHRESH]
+    mov     w1, #1072
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_crr
+
+    ldr     x0, =name_tcp_crr
+    bl      test_pass
+    b       .Ldone_tcp_crr
+
+.Lfail_tcp_crr:
+    ldr     x0, =name_tcp_crr
+    bl      test_fail
+
+.Ldone_tcp_crr:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_cwnd_gate — send gated by cwnd (lower cwnd blocks large sends)
+ *
+ * 1. Handshake → ESTABLISHED
+ * 2. Set cwnd=10, SND_WND=2000
+ * 3. tcp_send 11 bytes → rejected (exceeds cwnd)
+ * 4. tcp_send 5 bytes → accepted (within cwnd)
+ * ======================================================================== */
+test_tcp_cwnd_gate:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_cwga
+    mov     x19, x0                 /* conn */
+
+    /* Set cwnd=10, SND_WND=2000 */
+    mov     w0, #10
+    strh    w0, [x19, #TCONN_CWND]
+    mov     w0, #2000
+    strh    w0, [x19, #TCONN_SND_WND]
+
+    /* tcp_send 11 bytes → should fail (exceeds cwnd=10) */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #11
+    bl      tcp_send
+    cbnz    w0, .Lfail_tcp_cwga
+
+    /* tcp_send 5 bytes → should succeed (within cwnd=10) */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cmp     w0, #59
+    b.ne    .Lfail_tcp_cwga
+
+    /* tcp_send_ready should return 10 (min of SND_WND=2000-5=1995, cwnd=10, peer_mss=536)) */
+    /* Actually cwnd=10 is smallest, but SND_WND was decremented to 1995 by send,
+       and rtx pending gates send_ready to 0. Clear rtx first. */
+    strh    wzr, [x19, #TCONN_RTXLEN]
+    mov     x0, x19
+    bl      tcp_send_ready
+    cmp     w0, #10
+    b.ne    .Lfail_tcp_cwga
+
+    ldr     x0, =name_tcp_cwga
+    bl      test_pass
+    b       .Ldone_tcp_cwga
+
+.Lfail_tcp_cwga:
+    ldr     x0, =name_tcp_cwga
+    bl      test_fail
+
+.Ldone_tcp_cwga:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -9427,6 +9628,9 @@ name_tcp_tssk:      .asciz "tcp_tsopt_skip"
 name_tcp_tswt:      .asciz "tcp_tsopt_wrong_tslen"
 name_tcp_pnt:       .asciz "tcp_paws_no_tsopt"
 name_tcp_tstt:      .asciz "tcp_tsopt_trunc_ts"
+name_tcp_cwg:       .asciz "tcp_cwnd_grow"
+name_tcp_crr:       .asciz "tcp_cwnd_rtx_reset"
+name_tcp_cwga:      .asciz "tcp_cwnd_gate"
 
 tcp_send_payload:
     .ascii  "World"

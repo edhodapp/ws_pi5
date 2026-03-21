@@ -425,6 +425,16 @@ tcp_retransmit_cb:
     cmp     w0, #TCP_MAX_RETRIES
     b.hs    .Lrtxcb_giveup
 
+    /* Multiplicative decrease: ssthresh = max(cwnd/2, 2*MSS), cwnd = MSS */
+    ldrh    w0, [x19, #TCONN_CWND]
+    lsr     w0, w0, #1              /* cwnd / 2 */
+    ldrh    w1, [x19, #TCONN_PEER_MSS]
+    lsl     w2, w1, #1              /* 2 * MSS */
+    cmp     w0, w2
+    csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
+    strh    w0, [x19, #TCONN_SSTHRESH]
+    strh    w1, [x19, #TCONN_CWND]  /* restart slow start */
+
     /* Load send context */
     ldr     x20, =tcp_send_ctx
     ldr     x1, [x20, #TSCTX_SEND_FN]
@@ -1100,6 +1110,31 @@ tcp_estab_ack_handler:
     cmp     w4, w6
     b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
     str     w4, [x19, #TCONN_SND_UNA]
+
+    /* Congestion control: grow cwnd on new ACK (RFC 5681) */
+    ldrh    w7, [x19, #TCONN_CWND]
+    ldrh    w8, [x19, #TCONN_SSTHRESH]
+    ldrh    w9, [x19, #TCONN_PEER_MSS]
+    cmp     w7, w8
+    b.hs    .Leak_cong_avoid
+    /* Slow start: cwnd += MSS */
+    add     w7, w7, w9
+    b       .Leak_cwnd_store
+.Leak_cong_avoid:
+    /* Congestion avoidance: cwnd += MSS * MSS / cwnd */
+    mul     w10, w9, w9
+    udiv    w10, w10, w7
+    /* Ensure at least +1 so cwnd always grows */
+    cmp     w10, #0
+    cinc    w10, w10, eq
+    add     w7, w7, w10
+.Leak_cwnd_store:
+    mov     w10, #0xFFFF
+    cmp     w7, w10
+    csel    w7, w7, w10, lo         /* cap at 65535 */
+    strh    w7, [x19, #TCONN_CWND]
+    strb    wzr, [x19, #TCONN_DUP_ACK_CNT]
+
     /* If SND_UNA == SND_NXT, all data ACKed → clear retransmit */
     cmp     w4, w6
     b.ne    .Leak_una_done
@@ -1570,8 +1605,11 @@ tcp_send:
     cmp     w21, w0
     b.hi    .Lts_err
 
-    /* Check payload_len <= SND_WND */
+    /* Check payload_len <= min(SND_WND, cwnd) */
     ldrh    w0, [x19, #TCONN_SND_WND]
+    ldrh    w1, [x19, #TCONN_CWND]
+    cmp     w0, w1
+    csel    w0, w0, w1, lo          /* min(SND_WND, cwnd) */
     cmp     w21, w0
     b.hi    .Lts_err
 
@@ -1687,9 +1725,12 @@ tcp_send_ready:
     ldrh    w1, [x0, #TCONN_RTXLEN]
     cbnz    w1, .Ltsr_zero
     ldrh    w1, [x0, #TCONN_PEER_MSS]
+    ldrh    w2, [x0, #TCONN_CWND]
     ldrh    w0, [x0, #TCONN_SND_WND]
     cmp     w0, w1
     csel    w0, w0, w1, lo          /* min(SND_WND, peer_mss) */
+    cmp     w0, w2
+    csel    w0, w0, w2, lo          /* min(above, cwnd) */
     ret
 .Ltsr_zero:
     mov     w0, #0
