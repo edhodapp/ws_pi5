@@ -93,6 +93,37 @@ def build_frame(sport, dport, seq, ack_num, flags, window, payload=b''):
     return eth + ip_hdr + tcp_seg
 
 
+def build_frame_ts(sport, dport, seq, ack_num, flags, window, tsval, tsecr,
+                   payload=b''):
+    """Build ETH+IP+TCP frame with TCP Timestamps option."""
+    tcp_hdr_len = 32    # 20 + 12 (NOP NOP Kind=8 Len=10 TSval TSecr)
+    tcp_len = tcp_hdr_len + len(payload)
+    ip_total = 20 + tcp_len
+
+    tcp_hdr = struct.pack('!HHIIBBHHH',
+        sport, dport,
+        seq, ack_num,
+        0x80,           # data offset = 8 words (32 bytes)
+        flags,
+        window,
+        0, 0)
+    ts_opt = struct.pack('!BBBBII', 1, 1, 8, 10, tsval, tsecr)
+    tcp_seg = tcp_hdr + ts_opt + payload
+
+    cksum = tcp_checksum(PEER_IP, OUR_IP, tcp_seg)
+    tcp_seg = tcp_seg[:16] + struct.pack('!H', cksum) + tcp_seg[18:]
+
+    ip_hdr = struct.pack('!BBHHHBBH4s4s',
+        0x45, 0x00, ip_total,
+        0x1234, 0x0000, 64, 6, 0,
+        PEER_IP, OUR_IP)
+    ip_cksum = ip_checksum(ip_hdr)
+    ip_hdr = ip_hdr[:10] + struct.pack('!H', ip_cksum) + ip_hdr[12:]
+
+    eth = OUR_MAC + PEER_MAC + struct.pack('!H', 0x0800)
+    return eth + ip_hdr + tcp_seg
+
+
 def pack_sequence(frames):
     """Pack a list of frames into length-prefixed format."""
     out = b''
@@ -193,6 +224,62 @@ def main():
                                 payload=b'Future')
     seeds['tcp_bad_seq_data.bin'] = pack_sequence([
         syn, handshake_ack, bad_seq_frame])
+
+    # Close sentinel: empty frame → flen=0 → triggers tcp_close in harness
+    CLOSE = b''
+
+    # 11. tcp_active_close.bin — Active close: ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT
+    #     After handshake: server SND_NXT=1, peer next seq=peer_seq+1=2
+    #     Close sentinel → tcp_close → FIN_WAIT_1, server SND_NXT=2
+    #     Peer ACK of FIN: ack=2 → FIN_WAIT_2
+    #     Peer FIN+ACK: → TIME_WAIT
+    ack_our_fin = build_frame(PEER_PORT, LISTEN_PORT,
+                              seq=peer_seq + 1, ack_num=SERVER_ISN + 2,
+                              flags=ACK, window=65535)
+    peer_fin = build_frame(PEER_PORT, LISTEN_PORT,
+                           seq=peer_seq + 1, ack_num=SERVER_ISN + 2,
+                           flags=FIN | ACK, window=65535)
+    seeds['tcp_active_close.bin'] = pack_sequence([
+        syn, handshake_ack, CLOSE, ack_our_fin, peer_fin])
+
+    # 12. tcp_last_ack.bin — Passive close then our close:
+    #     ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED
+    #     Peer FIN+ACK → CLOSE_WAIT (RCV_NXT = peer_seq+2 = 3)
+    #     Close sentinel → tcp_close → LAST_ACK (SND_NXT = 2)
+    #     Peer ACK: ack=2 → CLOSED
+    peer_fin_passive = build_frame(PEER_PORT, LISTEN_PORT,
+                                   seq=peer_seq + 1, ack_num=SERVER_ISN + 1,
+                                   flags=FIN | ACK, window=65535)
+    ack_last = build_frame(PEER_PORT, LISTEN_PORT,
+                           seq=peer_seq + 2, ack_num=SERVER_ISN + 2,
+                           flags=ACK, window=65535)
+    seeds['tcp_last_ack.bin'] = pack_sequence([
+        syn, handshake_ack, peer_fin_passive, CLOSE, ack_last])
+
+    # 13. tcp_simultaneous_close.bin — Both sides FIN at same time:
+    #     ESTABLISHED → FIN_WAIT_1 → CLOSING → TIME_WAIT
+    #     Close sentinel → FIN_WAIT_1 (SND_NXT=2)
+    #     Peer FIN (ack=1, doesn't ack our FIN yet) → CLOSING (RCV_NXT=3)
+    #     Peer ACK (ack=2, acks our FIN) → TIME_WAIT
+    peer_fin_simul = build_frame(PEER_PORT, LISTEN_PORT,
+                                 seq=peer_seq + 1, ack_num=SERVER_ISN + 1,
+                                 flags=FIN | ACK, window=65535)
+    peer_ack_closing = build_frame(PEER_PORT, LISTEN_PORT,
+                                   seq=peer_seq + 2, ack_num=SERVER_ISN + 2,
+                                   flags=ACK, window=65535)
+    seeds['tcp_simultaneous_close.bin'] = pack_sequence([
+        syn, handshake_ack, CLOSE, peer_fin_simul, peer_ack_closing])
+
+    # 14. tcp_ts_handshake.bin — SYN with TS option → exercises timestamp paths
+    #     Server echoes TSval; fuzz harness timer_now returns 0 → server TSval=0
+    syn_ts = build_frame_ts(PEER_PORT, LISTEN_PORT,
+                            seq=peer_seq, ack_num=0, flags=SYN, window=65535,
+                            tsval=1000, tsecr=0)
+    ack_ts = build_frame_ts(PEER_PORT, LISTEN_PORT,
+                            seq=peer_seq + 1, ack_num=SERVER_ISN + 1,
+                            flags=ACK, window=65535,
+                            tsval=1001, tsecr=0)
+    seeds['tcp_ts_handshake.bin'] = pack_sequence([syn_ts, ack_ts])
 
     for name, data in seeds.items():
         path = os.path.join(outdir, name)

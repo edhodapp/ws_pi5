@@ -116,7 +116,12 @@ tcp_init:
     subs    w1, w1, #1
     b.ne    .Ltcp_init_zero
 
-    /* Initialize ISN secret from hardware counter */
+    /* Tail-call weak ISN secret seeder (overridable in fuzz harnesses) */
+    b       tcp_init_secret
+
+/* Weak ISN secret seeder — overridden in fuzz harnesses */
+.weak tcp_init_secret
+tcp_init_secret:
     mrs     x0, CNTPCT_EL0
     ldr     x1, =tcp_isn_secret
     str     x0, [x1]
@@ -242,8 +247,9 @@ tcp_rtx_save:
  * Clobbers: x0-x6, x30
  */
 tcp_rtx_arm:
-    stp     x29, x30, [sp, #-32]!
+    stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
 
     mov     x19, x0                 /* conn */
 
@@ -266,11 +272,12 @@ tcp_rtx_arm:
     mov     w4, #60
     csel    w3, w3, w4, lo          /* w3 = min(shifted, 60) */
 
-    /* Convert to ticks: rto_ticks = rto_secs × CNTFRQ */
-    mrs     x0, CNTFRQ_EL0
-    mul     x1, x0, x3             /* x1 = rto_ticks */
-    mrs     x0, CNTPCT_EL0
-    add     x1, x0, x1             /* x1 = expiry tick */
+    /* Convert to ticks: rto_ticks = rto_secs × freq */
+    mov     w21, w3                 /* save rto_secs (clobbered by bl) */
+    bl      timer_freq              /* x0 = freq */
+    mul     x21, x0, x21           /* x21 = rto_ticks */
+    bl      timer_now               /* x0 = now */
+    add     x1, x0, x21            /* x1 = expiry tick */
 
     /* timer_set(pool, expiry, callback, conn) */
     mov     x0, x20
@@ -281,8 +288,9 @@ tcp_rtx_arm:
     str     w0, [x19, #TCONN_TIMER_SLOT]
 
 .Lrtxa_done:
+    ldr     x21, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
 
 /*
@@ -563,9 +571,9 @@ tcp_build_reply:
     mov     w3, #TCP_OPT_TS_LEN
     strb    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]     /* Len=10 */
 
-    /* TSval = CNTPCT_EL0 >> 16, then rev to NBO */
-    mrs     x3, CNTPCT_EL0
-    lsr     x3, x3, #16
+    /* TSval = timer_now() >> 16, then rev to NBO */
+    bl      timer_now
+    lsr     x3, x0, #16
     rev     w3, w3
     str     w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]     /* TSval (NBO) */
 
@@ -1373,7 +1381,7 @@ tcp_build_frame:
     strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]     /* Kind=8 */
     mov     w0, #TCP_OPT_TS_LEN
     strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]     /* Len=10 */
-    mrs     x0, CNTPCT_EL0
+    bl      timer_now               /* x0 = counter */
     lsr     x0, x0, #16
     rev     w0, w0
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]     /* TSval (NBO) */
@@ -1785,21 +1793,26 @@ tcp_finwait2_fin_handler:
     bl      tcp_build_reply
     mov     w22, w0                 /* save return value (54 or 66) */
 
-    /* Arm 2MSL timer (60 seconds) */
-    mrs     x0, CNTFRQ_EL0
-    mov     x1, #60
-    mul     x1, x0, x1             /* x1 = 60 * freq = expiry delta */
-    mrs     x0, CNTPCT_EL0
-    add     x1, x0, x1             /* x1 = now + 60s = expiry tick */
-
+    /* Guard: skip timer if no pool */
     ldr     x0, =tcp_timer_pool_ptr
-    ldr     x0, [x0]               /* x0 = timer pool */
-    /* x1 = expiry tick */
+    ldr     x0, [x0]
+    cbz     x0, .Lfw2f_skip_timer
+    mov     x19, x0                 /* x19 = pool (free after build_reply) */
+
+    /* Arm 2MSL timer (60 seconds) */
+    bl      timer_freq
+    mov     x1, #60
+    mul     x20, x0, x1            /* x20 = delta ticks */
+    bl      timer_now
+    add     x1, x0, x20            /* x1 = expiry */
+
+    mov     x0, x19                 /* pool */
     ldr     x2, =tcp_timewait_cb   /* callback */
     mov     x3, x21                 /* context = conn ptr */
     bl      timer_set
     str     w0, [x21, #TCONN_TIMER_SLOT]
 
+.Lfw2f_skip_timer:
     mov     w0, w22                 /* restore return value */
 
     ldp     x21, x22, [sp, #32]
@@ -1826,20 +1839,26 @@ tcp_closing_ack_handler:
     cmp     w4, w5
     b.ne    .Lcla_bad
 
-    /* Arm 2MSL timer (60 seconds) */
-    mrs     x0, CNTFRQ_EL0
-    mov     x1, #60
-    mul     x1, x0, x1
-    mrs     x0, CNTPCT_EL0
-    add     x1, x0, x1
-
+    /* Guard: skip timer if no pool */
     ldr     x0, =tcp_timer_pool_ptr
     ldr     x0, [x0]
+    cbz     x0, .Lcla_skip_timer
+
+    /* Arm 2MSL timer (60 seconds) */
+    bl      timer_freq
+    mov     x1, #60
+    mul     x20, x0, x1            /* x20 = delta ticks */
+    bl      timer_now
+    add     x1, x0, x20            /* x1 = expiry */
+
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]               /* reload pool */
     ldr     x2, =tcp_timewait_cb
     mov     x3, x19
     bl      timer_set
     str     w0, [x19, #TCONN_TIMER_SLOT]
 
+.Lcla_skip_timer:
     mov     w0, #0
     b       .Lcla_done
 

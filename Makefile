@@ -211,8 +211,8 @@ $(BUILD)/fuzz_net.o: fuzz/fuzz_net.c | $(BUILD)
 $(BUILD)/fuzz_net: $(BUILD)/fuzz_net.o $(FUZZ_ASM_OBJS)
 	$(CC_AARCH64) -static -o $@ $^
 
-fuzz-corpus: fuzz/gen_corpus.sh
-	bash fuzz/gen_corpus.sh
+fuzz-corpus: fuzz/gen_corpus.py
+	python3 fuzz/gen_corpus.py
 
 # Multi-packet TCP sequence fuzz harness
 fuzz-seq: $(BUILD)/fuzz_tcp_seq

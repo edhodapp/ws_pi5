@@ -5,8 +5,8 @@
  * logic so lib/ contains only pure computation.
  */
 
-.global timer_now
-.global timer_freq
+.weak timer_now
+.weak timer_freq
 
 .section .text
 
