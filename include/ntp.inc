@@ -45,5 +45,12 @@
 .equ NTPC_SEND_FN,      32      /* u64 — send function pointer */
 .equ NTPC_SIZE,          40
 
+/* NTP authentication (RFC 5905 §7.6, symmetric key with MD5) */
+.equ NTP_AUTH_PKT_LEN,  68      /* 48 + 4 (key ID) + 16 (MD5 digest) */
+.equ NTP_AUTH_FRAME_LEN, 110    /* 90 + 20 */
+.equ NTP_KEY_ID_OFF,    48      /* key ID offset in NTP payload */
+.equ NTP_DIGEST_OFF,    52      /* MD5 digest offset in NTP payload */
+.equ NTP_AUTH_KEY_LEN,  16      /* MD5 key length */
+
 /* NTP source port for outbound requests */
 .equ NTP_SPORT,         12345

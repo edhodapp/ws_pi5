@@ -17,6 +17,8 @@
 .global ntp_timer_cb
 .global ntp_state
 .global ntp_send_ctx
+.global ntp_auth_key
+.global ntp_auth_key_id
 
 .section .text
 
@@ -39,11 +41,11 @@ ntp_init:
  *
  * x0: buffer pointer (>= 90 bytes)
  * x1: gateway MAC pointer (6 bytes)
- * Returns: w0 = 90 (frame length)
+ * Returns: w0 = 90 (no auth) or 110 (with auth)
  * Clobbers: x0-x9, x19-x22, x30
  */
 ntp_build_request:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-128]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
 
@@ -135,9 +137,76 @@ ntp_build_request:
 
     mov     w0, #NTP_FRAME_LEN
 
+    /* Check if auth is configured */
+    ldr     x1, =ntp_auth_key_id
+    ldr     w1, [x1]
+    cbz     w1, .Lnbr_done
+
+    /* --- Auth path: append key_id + MD5 digest --- */
+
+    /* Append key_id (big-endian) at NTP + 48 */
+    add     x2, x22, #UDP_HDR_LEN          /* NTP payload start */
+    rev     w1, w1                          /* host → big-endian */
+    str     w1, [x2, #NTP_KEY_ID_OFF]
+
+    /* Build MD5 input on stack: key(16) + NTP(48) = 64 bytes at sp+48 */
+    add     x3, sp, #48
+    ldr     x4, =ntp_auth_key
+    ldp     x5, x6, [x4]
+    stp     x5, x6, [x3]                   /* key bytes 0-15 */
+    ldp     x5, x6, [x2]
+    stp     x5, x6, [x3, #16]              /* NTP bytes 0-15 */
+    ldp     x5, x6, [x2, #16]
+    stp     x5, x6, [x3, #32]              /* NTP bytes 16-31 */
+    ldp     x5, x6, [x2, #32]
+    stp     x5, x6, [x3, #48]              /* NTP bytes 32-47 */
+
+    /* md5_hash(sp+48, 64, sp+112) */
+    add     x0, sp, #48
+    mov     w1, #64
+    add     x2, sp, #112
+    bl      md5_hash
+
+    /* Copy 16-byte digest to NTP + 52 */
+    add     x2, x22, #UDP_HDR_LEN
+    add     x2, x2, #NTP_DIGEST_OFF
+    add     x0, sp, #112
+    ldp     x3, x4, [x0]
+    stp     x3, x4, [x2]
+
+    /* Update IP total length: 76 → 96 */
+    mov     w0, #96
+    rev16   w0, w0
+    strh    w0, [x21, #IP_TOTLEN]
+
+    /* Update UDP length: 56 → 76 */
+    mov     w0, #76
+    rev16   w0, w0
+    strh    w0, [x22, #UDP_LENGTH]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x21, #IP_CHECKSUM]
+    mov     x0, x21
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x21, #IP_CHECKSUM]
+
+    /* Recompute UDP checksum */
+    strh    wzr, [x22, #UDP_CHECKSUM]
+    mov     x0, x19                         /* frame buf */
+    mov     w1, #76                         /* new UDP segment length */
+    bl      udp_checksum
+    cmp     w0, #0
+    csinv   w0, w0, wzr, ne
+    uxth    w0, w0
+    strh    w0, [x22, #UDP_CHECKSUM]
+
+    mov     w0, #NTP_AUTH_FRAME_LEN
+
+.Lnbr_done:
     ldp     x19, x20, [sp, #16]
     ldp     x21, x22, [sp, #32]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #128
     ret
 
 /*
@@ -147,29 +216,81 @@ ntp_build_request:
  * w1: payload length (UDP payload, i.e. UDP len - 8)
  * x2: current_ticks (CNTPCT_EL0 value)
  * Returns: w0 = 1 (synced) or 0 (ignored)
- * Clobbers: x0-x5
+ * Clobbers: x0-x6, x19-x21, x30
  */
 ntp_handle:
+    stp     x29, x30, [sp, #-128]!
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    mov     x19, x0                 /* NTP payload ptr */
+    mov     w20, w1                 /* payload length */
+    mov     x21, x2                 /* current_ticks */
+
     /* Validate length >= 48 */
-    cmp     w1, #NTP_PKT_LEN
+    cmp     w20, #NTP_PKT_LEN
     b.lt    .Lntp_ignore
 
     /* Validate mode == 4 (server): flags & 0x07 */
-    ldrb    w3, [x0, #NTP_FLAGS]
+    ldrb    w3, [x19, #NTP_FLAGS]
     and     w3, w3, #0x07
     cmp     w3, #NTP_SERVER_MODE
     b.ne    .Lntp_ignore
 
     /* Reject Kiss of Death: stratum == 0 */
-    ldrb    w3, [x0, #NTP_STRATUM]
+    ldrb    w3, [x19, #NTP_STRATUM]
     cbz     w3, .Lntp_ignore
 
     /* Reject stratum > 15 (invalid per RFC 5905) */
     cmp     w3, #16
     b.hs    .Lntp_ignore
 
+    /* Auth verification if configured */
+    ldr     x0, =ntp_auth_key_id
+    ldr     w0, [x0]
+    cbz     w0, .Lntp_auth_ok          /* no auth → accept */
+
+    /* Auth required: payload must be >= 68 */
+    cmp     w20, #NTP_AUTH_PKT_LEN
+    b.lt    .Lntp_ignore
+
+    /* Verify key ID matches (big-endian at NTP+48) */
+    ldr     w1, [x19, #NTP_KEY_ID_OFF]
+    rev     w0, w0                      /* our key_id → big-endian */
+    cmp     w0, w1
+    b.ne    .Lntp_ignore
+
+    /* Build MD5 input at sp+48: key(16) + NTP(48) = 64 bytes */
+    add     x2, sp, #48
+    ldr     x3, =ntp_auth_key
+    ldp     x4, x5, [x3]
+    stp     x4, x5, [x2]               /* key bytes 0-15 */
+    ldp     x4, x5, [x19]
+    stp     x4, x5, [x2, #16]          /* NTP bytes 0-15 */
+    ldp     x4, x5, [x19, #16]
+    stp     x4, x5, [x2, #32]          /* NTP bytes 16-31 */
+    ldp     x4, x5, [x19, #32]
+    stp     x4, x5, [x2, #48]          /* NTP bytes 32-47 */
+
+    /* md5_hash(sp+48, 64, sp+112) */
+    add     x0, sp, #48
+    mov     w1, #64
+    add     x2, sp, #112
+    bl      md5_hash
+
+    /* Compare 16-byte digest: computed (sp+112) vs received (NTP+52) */
+    add     x0, sp, #112
+    ldp     x2, x3, [x0]
+    add     x6, x19, #NTP_DIGEST_OFF
+    ldp     x4, x5, [x6]
+    cmp     x2, x4
+    b.ne    .Lntp_ignore
+    cmp     x3, x5
+    b.ne    .Lntp_ignore
+
+.Lntp_auth_ok:
     /* Extract TX timestamp seconds (offset 40, 4 bytes big-endian) */
-    ldr     w3, [x0, #NTP_TX_TS]
+    ldr     w3, [x19, #NTP_TX_TS]
     rev     w3, w3                  /* big-endian → host order */
 
     /* Convert NTP epoch → Unix epoch: subtract 0x83AA7E80 */
@@ -182,15 +303,20 @@ ntp_handle:
     /* Zero-extend w3 to x3 for 64-bit store */
     mov     x5, x3
     str     x5, [x4, #NTPS_SYNC_SECS]
-    str     x2, [x4, #NTPS_SYNC_TICKS]
+    str     x21, [x4, #NTPS_SYNC_TICKS]
     mov     w5, #1
     str     w5, [x4, #NTPS_SYNCED]
 
     mov     w0, #1
-    ret
+    b       .Lntp_ret
 
 .Lntp_ignore:
     mov     w0, #0
+
+.Lntp_ret:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #128
     ret
 
 /*
@@ -319,3 +445,11 @@ ntp_state:
 .balign 8
 ntp_send_ctx:
     .space  NTPC_SIZE
+
+.balign 8
+ntp_auth_key:
+    .space  NTP_AUTH_KEY_LEN
+
+.balign 4
+ntp_auth_key_id:
+    .word   0

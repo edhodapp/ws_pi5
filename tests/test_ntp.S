@@ -37,6 +37,9 @@ test_ntp:
     bl      test_ntp_timer_cb_no_gw
     bl      test_ntp_timer_cb_send
     bl      test_ntp_handle_stratum16
+    bl      test_ntp_auth_build
+    bl      test_ntp_auth_accept
+    bl      test_ntp_auth_reject
     ldp     x29, x30, [sp], #16
     ret
 
@@ -669,6 +672,166 @@ test_ntp_handle_stratum16:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ---- Helper: set auth key = 16 × 'A' (0x41), key_id = 1 ---- */
+tntp_set_auth:
+    ldr     x0, =ntp_auth_key
+    ldr     x1, =tntp_auth_key_data
+    ldp     x2, x3, [x1]
+    stp     x2, x3, [x0]
+    ldr     x0, =ntp_auth_key_id
+    mov     w1, #1
+    str     w1, [x0]
+    ret
+
+/* ---- Helper: clear auth key_id ---- */
+tntp_clear_auth:
+    ldr     x0, =ntp_auth_key_id
+    str     wzr, [x0]
+    ret
+
+/* ========================================================================
+ * 14. test_ntp_auth_build — authenticated request is 110 bytes, valid
+ * ======================================================================== */
+test_ntp_auth_build:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_set_auth
+
+    /* Build request into auth frame buffer */
+    ldr     x0, =tntp_auth_frame_buf
+    ldr     x1, =tntp_gw_mac
+    bl      ntp_build_request
+
+    /* Returns 110 */
+    cmp     w0, #NTP_AUTH_FRAME_LEN
+    b.ne    .Lfail_nab
+
+    /* Check IP total length = 96 */
+    ldr     x0, =tntp_auth_frame_buf
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w1, #96
+    b.ne    .Lfail_nab
+
+    /* Check UDP length = 76 */
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_LENGTH)]
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w1, #76
+    b.ne    .Lfail_nab
+
+    /* Check key_id at NTP+48 = 1 (big-endian) */
+    ldr     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN + NTP_KEY_ID_OFF)]
+    rev     w1, w1
+    cmp     w1, #1
+    b.ne    .Lfail_nab
+
+    /* Check digest at NTP+52 matches expected */
+    add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_HDR_LEN + NTP_DIGEST_OFF)
+    ldr     x1, =tntp_expected_client_digest
+    ldp     x2, x3, [x0]
+    ldp     x4, x5, [x1]
+    cmp     x2, x4
+    b.ne    .Lfail_nab
+    cmp     x3, x5
+    b.ne    .Lfail_nab
+
+    /* Verify IP checksum */
+    ldr     x0, =tntp_auth_frame_buf
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    cbnz    w0, .Lfail_nab
+
+    /* Verify UDP checksum */
+    ldr     x0, =tntp_auth_frame_buf
+    mov     w1, #76
+    bl      udp_checksum
+    cbnz    w0, .Lfail_nab
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_nab
+    bl      test_pass
+    b       .Ldone_nab
+.Lfail_nab:
+    bl      tntp_clear_auth
+    ldr     x0, =name_nab
+    bl      test_fail
+.Ldone_nab:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 15. test_ntp_auth_accept — valid authenticated response → synced
+ * ======================================================================== */
+test_ntp_auth_accept:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+    bl      tntp_set_auth
+
+    ldr     x0, =tntp_ntp_auth_valid
+    mov     w1, #NTP_AUTH_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+
+    /* Should return 1 */
+    cmp     w0, #1
+    b.ne    .Lfail_naa
+
+    /* Check synced */
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_SYNCED]
+    cmp     w1, #1
+    b.ne    .Lfail_naa
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_naa
+    bl      test_pass
+    b       .Ldone_naa
+.Lfail_naa:
+    bl      tntp_clear_auth
+    ldr     x0, =name_naa
+    bl      test_fail
+.Ldone_naa:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * 16. test_ntp_auth_reject — bad digest → ignored
+ * ======================================================================== */
+test_ntp_auth_reject:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+    bl      tntp_set_auth
+
+    ldr     x0, =tntp_ntp_auth_bad
+    mov     w1, #NTP_AUTH_PKT_LEN
+    mov     x2, #5000
+    bl      ntp_handle
+
+    /* Should return 0 */
+    cbnz    w0, .Lfail_nar
+
+    /* synced should still be 0 */
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_SYNCED]
+    cbnz    w1, .Lfail_nar
+
+    bl      tntp_clear_auth
+    ldr     x0, =name_nar
+    bl      test_pass
+    b       .Ldone_nar
+.Lfail_nar:
+    bl      tntp_clear_auth
+    ldr     x0, =name_nar
+    bl      test_fail
+.Ldone_nar:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* ========================================================================
  * Test data
  * ======================================================================== */
@@ -813,6 +976,52 @@ name_und:   .asciz "udp_ntp_dispatch"
 name_ntcng: .asciz "ntp_timer_cb_no_gw"
 name_ntcs:  .asciz "ntp_timer_cb_send"
 name_nhs16: .asciz "ntp_handle_stratum16"
+name_nab:   .asciz "ntp_auth_build"
+name_naa:   .asciz "ntp_auth_accept"
+name_nar:   .asciz "ntp_auth_reject"
+
+/* Auth key for tests: 16 × 'A' (0x41) */
+.balign 4
+tntp_auth_key_data:
+    .byte   0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41
+    .byte   0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41
+
+/* Expected MD5 digest for client request: MD5(key || 0x23,0x00×47) */
+.balign 4
+tntp_expected_client_digest:
+    .byte   0xaa, 0x3c, 0x80, 0xed, 0x4c, 0x1c, 0xf6, 0x8a
+    .byte   0xe9, 0xf5, 0xbf, 0x69, 0xb7, 0x2e, 0x97, 0x99
+
+/*
+ * Authenticated NTP server response (68 bytes):
+ * valid_ntp(48) + key_id(4, BE) + MD5_digest(16)
+ * MD5 = MD5(key(16×'A') || NTP(48)) = 09974e02449ecaaf963777e708a65dd8
+ */
+.balign 4
+tntp_ntp_auth_valid:
+    .byte   0x24                        /* flags: server mode */
+    .byte   0x01                        /* stratum: 1 */
+    .byte   0x06                        /* poll */
+    .byte   0xEC                        /* precision */
+    .space  36                          /* root delay thru receive TS */
+    .byte   0x83, 0xB9, 0xC0, 0xC0     /* TX timestamp seconds (BE) */
+    .byte   0x00, 0x00, 0x00, 0x00     /* TX timestamp fraction */
+    .byte   0x00, 0x00, 0x00, 0x01     /* key_id (BE) = 1 */
+    .byte   0x09, 0x97, 0x4e, 0x02, 0x44, 0x9e, 0xca, 0xaf
+    .byte   0x96, 0x37, 0x77, 0xe7, 0x08, 0xa6, 0x5d, 0xd8
+
+/* Same but with wrong digest (all zeros) */
+.balign 4
+tntp_ntp_auth_bad:
+    .byte   0x24
+    .byte   0x01
+    .byte   0x06
+    .byte   0xEC
+    .space  36
+    .byte   0x83, 0xB9, 0xC0, 0xC0
+    .byte   0x00, 0x00, 0x00, 0x00
+    .byte   0x00, 0x00, 0x00, 0x01     /* key_id (BE) = 1 */
+    .space  16                          /* all zeros = bad digest */
 
 .section .data
 .balign 16
@@ -841,4 +1050,8 @@ tntp_send_count:
 
 .balign 16
 tntp_cb_tx_buf:
-    .space  NTP_FRAME_LEN
+    .space  NTP_AUTH_FRAME_LEN
+
+.balign 16
+tntp_auth_frame_buf:
+    .space  NTP_AUTH_FRAME_LEN
