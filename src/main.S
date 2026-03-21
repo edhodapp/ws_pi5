@@ -4,6 +4,7 @@
 .include "timer.inc"
 .include "ntp.inc"
 .include "tcp.inc"
+.include "http.inc"
 
 .section .text
 
@@ -105,6 +106,14 @@ main:
     ldr     x4, =cdc_ecm_send
     bl      ntp_start
 
+    /* Initialize HTTP server */
+    bl      http_init
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =http_tx_buf
+    ldr     x3, =cdc_ecm_send
+    bl      http_set_send_ctx
+
     mov     w0, #0
     b       .Ldone
 
@@ -148,6 +157,7 @@ net_loop:
     mov     x1, x0
     ldr     x0, =timer_pool
     bl      timer_check
+    bl      http_poll
     b       net_loop
 
 .section .data
@@ -162,6 +172,10 @@ rx_buf:
 .balign 16
 timer_pool:
     .space  TPOOL_DEFAULT_SIZE
+
+.balign 16
+http_tx_buf:
+    .space  ETH_FRAME_MAX
 
 .balign 16
 icmp_tx_buf:

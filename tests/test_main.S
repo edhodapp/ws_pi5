@@ -132,6 +132,7 @@ _start:
     bl      test_ip_reasm_min_ttl
     bl      test_md5
     bl      test_tcp
+    bl      test_http
 
     /* === Print summary === */
     ldr     x0, =fail_count
