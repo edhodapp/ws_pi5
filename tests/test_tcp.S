@@ -251,6 +251,8 @@ test_tcp:
     bl      test_tcp_wscale_negotiate
     bl      test_tcp_wscale_no_opt
     bl      test_tcp_wscale_window_apply
+    bl      test_tcp_sndbuf_write
+    bl      test_tcp_sndbuf_ack_advance
     ldp     x29, x30, [sp], #16
     ret
 
@@ -12184,6 +12186,128 @@ test_tcp_wscale_window_apply:
     ret
 
 /* ========================================================================
+ * test_tcp_sndbuf_write — tcp_send writes payload to circular send buffer
+ * ======================================================================== */
+.global test_tcp_sndbuf_write
+test_tcp_sndbuf_write:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sbw
+    mov     x19, x0
+
+    /* Send 5 bytes "Hello" */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sbw
+
+    /* SND_BUF_HEAD should be 5 */
+    ldr     w0, [x19, #TCONN_SND_BUF_HEAD]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_sbw
+
+    /* SND_BUF_USED should be 5 */
+    ldr     w0, [x19, #TCONN_SND_BUF_USED]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_sbw
+
+    /* Verify first byte in send buffer == 'W' (from "World" payload) */
+    /* Actually tcp_send_payload is "World" — let me check */
+    ldr     x0, =tcp_conn_table
+    sub     x0, x19, x0
+    lsr     x0, x0, #TCONN_SHIFT
+    ldr     x1, =tcp_sndbuf_pool
+    add     x1, x1, x0, lsl #TCP_SNDBUF_SHIFT
+    ldrb    w0, [x1]
+    ldr     x2, =tcp_send_payload
+    ldrb    w2, [x2]
+    cmp     w0, w2
+    b.ne    .Lfail_tcp_sbw
+
+    ldr     x0, =name_tcp_sbw
+    bl      test_pass
+    b       .Ldone_tcp_sbw
+.Lfail_tcp_sbw:
+    ldr     x0, =name_tcp_sbw
+    bl      test_fail
+.Ldone_tcp_sbw:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_sndbuf_ack_advance — ACK frees send buffer space
+ * ======================================================================== */
+.global test_tcp_sndbuf_ack_advance
+test_tcp_sndbuf_ack_advance:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sba
+    mov     x19, x0
+
+    /* Send 5 bytes */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sba
+
+    /* SND_BUF_USED should be 5 */
+    ldr     w0, [x19, #TCONN_SND_BUF_USED]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_sba
+
+    /* Build ACK acknowledging all 5 bytes: ACK = SND_NXT */
+    ldr     w3, [x19, #TCONN_RCV_NXT]     /* SEQ = RCV_NXT (pure ACK) */
+    ldr     w4, [x19, #TCONN_SND_NXT]     /* ACK = SND_NXT */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #0                          /* 0 bytes payload = pure ACK */
+    mov     w2, #0
+    bl      ttcp_build_data_frame
+
+    /* Patch flags to ACK only (no PSH) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #TCP_ACK_FLAG
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    /* Recompute TCP checksum for 20-byte TCP section */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =tcp_test_buf
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* After ACK: SND_BUF_USED should be 0 (all data ACKed) */
+    ldr     w0, [x19, #TCONN_SND_BUF_USED]
+    cbnz    w0, .Lfail_tcp_sba
+
+    /* SND_BUF_TAIL should have advanced by 5 */
+    ldr     w0, [x19, #TCONN_SND_BUF_TAIL]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_sba
+
+    ldr     x0, =name_tcp_sba
+    bl      test_pass
+    b       .Ldone_tcp_sba
+.Lfail_tcp_sba:
+    ldr     x0, =name_tcp_sba
+    bl      test_fail
+.Ldone_tcp_sba:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -12842,6 +12966,8 @@ name_tcp_rk:        .asciz "tcp_rtt_karn"
 name_tcp_wsn:       .asciz "tcp_wscale_negotiate"
 name_tcp_wno:       .asciz "tcp_wscale_no_opt"
 name_tcp_wwa:       .asciz "tcp_wscale_window_apply"
+name_tcp_sbw:       .asciz "tcp_sndbuf_write"
+name_tcp_sba:       .asciz "tcp_sndbuf_ack_advance"
 
 tcp_send_payload:
     .ascii  "World"

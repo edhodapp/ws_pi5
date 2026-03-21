@@ -1378,6 +1378,16 @@ tcp_estab_ack_handler:
     b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
     str     w4, [x19, #TCONN_SND_UNA]
 
+    /* Advance send buffer tail by acked bytes */
+    sub     w0, w4, w5             /* acked = new_UNA - old_UNA */
+    ldr     w1, [x19, #TCONN_SND_BUF_TAIL]
+    add     w1, w1, w0
+    and     w1, w1, #TCP_SNDBUF_MASK
+    str     w1, [x19, #TCONN_SND_BUF_TAIL]
+    ldr     w1, [x19, #TCONN_SND_BUF_USED]
+    sub     w1, w1, w0
+    str     w1, [x19, #TCONN_SND_BUF_USED]
+
     /* RTT measurement (RFC 6298, Karn's algorithm) */
     ldrb    w0, [x19, #TCONN_RTXCOUNT]
     cbnz    w0, .Leak_no_rtt            /* retransmitted → skip sample */
@@ -2060,6 +2070,30 @@ tcp_send:
     csel    w0, w0, w1, lo          /* min(SND_WND, cwnd) */
     cmp     w21, w0
     b.hi    .Lts_err
+
+    /* Write payload to circular send buffer */
+    ldr     x0, =tcp_conn_table
+    sub     x0, x19, x0
+    lsr     x0, x0, #TCONN_SHIFT           /* slot index */
+    ldr     x1, =tcp_sndbuf_pool
+    add     x1, x1, x0, lsl #TCP_SNDBUF_SHIFT  /* buf base */
+    ldr     w2, [x19, #TCONN_SND_BUF_HEAD]
+    mov     w3, #0
+.Lts_sndbuf_copy:
+    cmp     w3, w21
+    b.hs    .Lts_sndbuf_done
+    and     w4, w2, #TCP_SNDBUF_MASK
+    ldrb    w5, [x20, x3]
+    strb    w5, [x1, x4]
+    add     w2, w2, #1
+    add     w3, w3, #1
+    b       .Lts_sndbuf_copy
+.Lts_sndbuf_done:
+    and     w2, w2, #TCP_SNDBUF_MASK
+    str     w2, [x19, #TCONN_SND_BUF_HEAD]
+    ldr     w0, [x19, #TCONN_SND_BUF_USED]
+    add     w0, w0, w21
+    str     w0, [x19, #TCONN_SND_BUF_USED]
 
     /* Build PSH+ACK frame via tcp_build_frame */
     mov     x0, x19                 /* conn */
@@ -3128,6 +3162,11 @@ tcp_rxbuf_pool:
 .balign 16
 tcp_rtxbuf_pool:
     .space  TCP_RTXBUF_POOL_SIZE
+
+.balign 16
+.global tcp_sndbuf_pool
+tcp_sndbuf_pool:
+    .space  TCP_SNDBUF_POOL_SIZE
 
 .balign 8
 tcp_send_ctx:

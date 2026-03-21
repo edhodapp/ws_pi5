@@ -125,6 +125,12 @@
 .equ TCP_RTXBUF_SHIFT,     11      /* log2(2048) — retransmit buffer per conn */
 .equ TCP_RTXBUF_POOL_SIZE, 262144  /* 128 × 2048 */
 
+/* Circular send buffer (per connection) */
+.equ TCP_SNDBUF_SIZE,      262144  /* 256 KB per connection */
+.equ TCP_SNDBUF_SHIFT,     18      /* log2(262144) */
+.equ TCP_SNDBUF_MASK,      0x3FFFF /* 256 KB - 1, for circular wrap */
+.equ TCP_SNDBUF_POOL_SIZE, 33554432 /* 128 × 256 KB = 32 MB */
+
 /* TCP send context struct (for retransmit callback) */
 .equ TSCTX_DWC2_BASE,  0       /* u64 */
 .equ TSCTX_ECM_STATE,  8       /* u64 */
