@@ -94,7 +94,7 @@ test_func_multiport:
     bl      tcp_handle
 
     /* Verify return = 58 (SYN-ACK reply: 54 + 4 MSS option) */
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfmp_fail
 
     /* Verify reply flags = SYN|ACK (0x12) */
@@ -227,8 +227,8 @@ test_func_ts_synack:
     mov     w1, #66
     bl      tcp_handle
 
-    /* Verify return = 70 (SYN-ACK with TSopt + MSS: 54 + 12 + 4) */
-    cmp     w0, #70
+    /* Verify return = 74 (SYN-ACK with TSopt + MSS + WSCALE: 54+12+4+4) */
+    cmp     w0, #74
     b.ne    .Lfts_fail
 
     /* Verify reply flags = SYN|ACK */
@@ -236,14 +236,14 @@ test_func_ts_synack:
     cmp     w0, #TCP_SYN_ACK
     b.ne    .Lfts_fail
 
-    /* Verify reply doff = 0x90 (36 bytes: 20 base + 12 TS + 4 MSS) */
+    /* Verify reply doff = 0xA0 (40 bytes: 20 base + 12 TS + 4 MSS + 4 WSCALE) */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
-    cmp     w0, #0x90
+    cmp     w0, #0xA0
     b.ne    .Lfts_fail
 
-    /* Verify reply IP TotalLength = 56 (0x0038 NBO = 0x3800 LE) */
+    /* Verify reply IP TotalLength = 60 (0x003C NBO = 0x3C00 LE) */
     ldrh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
-    mov     w1, #0x3800
+    mov     w1, #0x3C00
     cmp     w0, w1
     b.ne    .Lfts_fail
 
@@ -680,8 +680,8 @@ test_func_handshake_ts:
     mov     w1, #66
     bl      tcp_handle
 
-    /* Verify SYN-ACK returned (54 + 12 TS + 4 MSS = 70) */
-    cmp     w0, #70
+    /* Verify SYN-ACK returned (54 + 12 TS + 4 MSS + 4 WSCALE = 74) */
+    cmp     w0, #74
     b.ne    .Lfhts_fail
 
     /* Extract server ISN from SYN-ACK SEQ field (NBO) */

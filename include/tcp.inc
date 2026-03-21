@@ -144,6 +144,9 @@
 /* MSS option constants */
 .equ TCP_OPT_MSS,        2
 .equ TCP_OPT_MSS_LEN,    4
+.equ TCP_OPT_WSCALE,     3
+.equ TCP_OPT_WSCALE_LEN, 3
+.equ TCP_OUR_WSCALE,     0       /* Our shift = 0 (rxbuf 2 KB fits in 16 bits) */
 .equ TCP_DEFAULT_MSS,     536   /* RFC 1122 */
 .equ TCP_OUR_MSS,         1460  /* ETH_MTU(1500) - IP(20) - TCP(20) */
 

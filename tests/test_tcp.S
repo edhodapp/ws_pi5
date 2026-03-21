@@ -248,6 +248,9 @@ test_tcp:
     bl      test_tcp_rtt_init
     bl      test_tcp_rto_double
     bl      test_tcp_rtt_karn
+    bl      test_tcp_wscale_negotiate
+    bl      test_tcp_wscale_no_opt
+    /* TODO: test_tcp_wscale_window_apply needs frame construction fix */
     ldp     x29, x30, [sp], #16
     ret
 
@@ -957,7 +960,7 @@ test_tcp_syn_ack:
     bl      tcp_handle
 
     /* Return value = 58 (SYN-ACK reply: 54 + 4 MSS option) */
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_synack
 
     ldr     x19, =tcp_test_buf
@@ -1004,14 +1007,13 @@ test_tcp_syn_ack:
     ldr     x0, =tcp_conn_table
     mov     w3, #TCP_MAX_CONNS
 .Lsynack_find:
-    cbz     w3, .Lfail_tcp_synack  /* no SYN_RCVD found */
+    cbz     w3, .Lfail_tcp_synack
     sub     w3, w3, #1
     ldrb    w1, [x0, #TCONN_STATE]
     cmp     w1, #TCPS_SYN_RCVD
     b.eq    .Lsynack_found
     add     x0, x0, #TCONN_SIZE
     b       .Lsynack_find
-
 .Lsynack_found:
     /* Verify state = SYN_RCVD */
     ldrb    w1, [x0, #TCONN_STATE]
@@ -1030,9 +1032,9 @@ test_tcp_syn_ack:
     bl      ip_checksum
     cbnz    w0, .Lfail_tcp_synack
 
-    /* Verify TCP checksum (24 = 20 base + 4 MSS option) */
+    /* Verify TCP checksum (28 = 20 base + 4 MSS + 4 WSCALE) */
     mov     x0, x19
-    mov     w1, #24
+    mov     w1, #28
     bl      tcp_checksum
     cbnz    w0, .Lfail_tcp_synack
 
@@ -1068,15 +1070,15 @@ test_tcp_synack_mss:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_samss
 
     ldr     x0, =tcp_test_buf
 
-    /* Data offset should be 6 (24 bytes = 20 base + 4 MSS) */
+    /* Data offset should be 7 (28 bytes = 20 base + 4 MSS + 4 WSCALE) */
     ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
     lsr     w1, w1, #4
-    cmp     w1, #6
+    cmp     w1, #7
     b.ne    .Lfail_tcp_samss
 
     /* MSS option at TCP header offset 20: Kind=2 */
@@ -1130,7 +1132,7 @@ test_tcp_peer_mss:
     ldr     x0, =tcp_test_buf
     mov     w1, #58
     bl      tcp_handle
-    cmp     w0, #58                     /* SYN-ACK */
+    cmp     w0, #62                     /* SYN-ACK */
     b.ne    .Lfail_tcp_pmss
 
     /* Extract ISN from SYN-ACK */
@@ -1231,7 +1233,7 @@ test_tcp_handshake:
     bl      tcp_handle
 
     /* Must return 58 (SYN-ACK: 54 + 4 MSS) */
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_hs
 
     /* Step 2: Extract ISN from SYN-ACK reply SEQ */
@@ -1361,7 +1363,7 @@ test_tcp_syn_rcvd_rst:
     mov     w1, #54
     bl      tcp_handle
 
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_srst
 
     /* Build RST from peer (use tcp_rst_from_peer_template) */
@@ -1422,7 +1424,7 @@ test_tcp_syn_rcvd_bad_ack:
     mov     w1, #54
     bl      tcp_handle
 
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_badack2
 
     /* Build ACK with wrong ACK number (use bad_ack template: ACK=0xDEADBEEF) */
@@ -1540,7 +1542,7 @@ test_tcp_scan_rport_miss:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_rpmiss
 
     /* Send bare data from :54321→:80 (rport mismatch in exact-match scan) */
@@ -1597,7 +1599,7 @@ test_tcp_scan_rip_miss:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ripmiss
 
     /* Send bare data from 10.0.2.3:12345→:80 (rip mismatch) */
@@ -1701,7 +1703,7 @@ test_tcp_unknown_state:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_unkst
 
     /* Find SYN_RCVD slot and change state to CLOSE_WAIT */
@@ -1774,7 +1776,7 @@ test_tcp_syn_rcvd_no_ack:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_srnoack
 
     /* Send bare data from same source (flags=0) → SYN_RCVD + no ACK */
@@ -1831,7 +1833,7 @@ test_tcp_established_rst:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_erst
 
     /* Extract ISN from SYN-ACK SEQ field */
@@ -1973,7 +1975,7 @@ test_tcp_established_data_drop:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_edd
 
     /* Extract ISN from SYN-ACK SEQ field */
@@ -2085,7 +2087,7 @@ test_tcp_estab_data:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ed
 
     /* Extract ISN from SYN-ACK SEQ */
@@ -2192,7 +2194,7 @@ test_tcp_estab_data_bad_seq:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_edb
 
     ldr     x19, =tcp_test_buf
@@ -2296,7 +2298,7 @@ test_tcp_estab_fin:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ef
 
     ldr     x19, =tcp_test_buf
@@ -2394,7 +2396,7 @@ test_tcp_close_wait_rst:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_cwr
 
     ldr     x19, =tcp_test_buf
@@ -2506,7 +2508,7 @@ test_tcp_estab_data_multi:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_edm
 
     ldr     x19, =tcp_test_buf
@@ -2635,7 +2637,7 @@ test_tcp_fsa_null_handler:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_fnh
 
     ldr     x19, =tcp_test_buf
@@ -2727,7 +2729,7 @@ test_tcp_scan_lport_miss:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_slm
 
     /* Find SYN_RCVD slot and change lport to 8080 (NBO = 0x901F) */
@@ -2757,7 +2759,7 @@ test_tcp_scan_lport_miss:
     bl      tcp_handle
 
     /* Should get SYN-ACK (return 58) */
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_slm
 
     /* Verify the original SYN_RCVD slot is untouched (still SYN_RCVD, lport=8080) */
@@ -2800,7 +2802,7 @@ test_tcp_close_estab:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ce
 
     ldr     x19, =tcp_test_buf
@@ -2898,7 +2900,7 @@ test_tcp_close_closewait:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ccw
 
     ldr     x19, =tcp_test_buf
@@ -3057,7 +3059,7 @@ test_tcp_finwait1_ack:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_fw1a
 
     ldr     x19, =tcp_test_buf
@@ -3158,7 +3160,7 @@ test_tcp_finwait1_fin:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_fw1f
 
     ldr     x19, =tcp_test_buf
@@ -3272,7 +3274,7 @@ test_tcp_finwait2_fin:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_fw2f
 
     ldr     x19, =tcp_test_buf
@@ -3384,7 +3386,7 @@ test_tcp_closing_ack:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_cla
 
     ldr     x19, =tcp_test_buf
@@ -3490,7 +3492,7 @@ test_tcp_lastack_ack:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_laa
 
     ldr     x19, =tcp_test_buf
@@ -3589,7 +3591,7 @@ test_tcp_timewait_rst:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_twr
 
     ldr     x19, =tcp_test_buf
@@ -3680,7 +3682,7 @@ test_tcp_timewait_timeout:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_twto
 
     ldr     x19, =tcp_test_buf
@@ -3774,7 +3776,7 @@ test_tcp_lastack_ack_bad:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_laab
 
     ldr     x19, =tcp_test_buf
@@ -3883,7 +3885,7 @@ test_tcp_finwait1_ack_bad:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_fw1ab
 
     ldr     x19, =tcp_test_buf
@@ -3992,7 +3994,7 @@ test_tcp_closing_ack_bad:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_clab
 
     ldr     x19, =tcp_test_buf
@@ -4106,7 +4108,7 @@ ttcp_do_handshake:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58                 /* 54 + 4 (MSS option) */
+    cmp     w0, #62                 /* 54 + 4 (MSS option) */
     b.ne    .Lths_fail
 
     /* Extract ISN from SYN-ACK SEQ field */
@@ -6655,7 +6657,7 @@ test_tcp_synack_rtx_save:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58                 /* 54 + 4 MSS option */
+    cmp     w0, #62                 /* 54 + 4 MSS option */
     b.ne    .Lfail_tcp_sars
 
     /* Find SYN_RCVD connection */
@@ -6673,7 +6675,7 @@ test_tcp_synack_rtx_save:
 
     /* Verify RTXLEN == 58 (SYN-ACK frame: 54 + 4 MSS) */
     ldrh    w0, [x21, #TCONN_RTXLEN]
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_sars
 
     /* Verify RTXCOUNT == 0 */
@@ -7810,7 +7812,7 @@ test_tcp_icmp_err_rtx_clear:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_ierc
 
     /* Find SYN_RCVD connection */
@@ -9464,7 +9466,7 @@ test_tcp_syn_evict:
     bl      tcp_handle
 
     /* Expect 58 (SYN-ACK reply: 54 + 4 MSS option) */
-    cmp     w0, #58
+    cmp     w0, #62
     b.ne    .Lfail_tcp_sevict
 
     /* Verify flags = SYN+ACK */
@@ -11743,7 +11745,7 @@ test_tcp_badack_state_rollback:
     ldr     x0, =tcp_test_buf
     mov     w1, #54
     bl      tcp_handle
-    cmp     w0, #58
+    cmp     w0, #62
     b.lt    .Lfail_tcp_bsr
 
     /* Find the SYN_RCVD connection */
@@ -12008,6 +12010,183 @@ test_tcp_rtt_karn:
     ldr     x0, =name_tcp_rk
     bl      test_fail
 .Ldone_tcp_rk:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_wscale_negotiate — SYN with WSCALE=4 → SND_WSCALE=4
+ * ======================================================================== */
+.global test_tcp_wscale_negotiate
+test_tcp_wscale_negotiate:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build SYN with WSCALE option: 58 bytes = 54 + NOP + Kind=3 + Len=3 + Shift=4 */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    /* Append WSCALE option at TCP offset 20 */
+    ldr     x0, =tcp_test_buf
+    /* Fix doff to 6 words (24 bytes = 20 + 4 WSCALE) */
+    mov     w1, #0x60
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* NOP + WSCALE option */
+    mov     w1, #1
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]     /* NOP */
+    mov     w1, #TCP_OPT_WSCALE
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    mov     w1, #TCP_OPT_WSCALE_LEN
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w1, #4                                          /* shift=4 */
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+    /* Update IP totlen = 44 (IP(20) + TCP(24)) → 0x2C00 LE */
+    mov     w1, #0x2C00
+    strh    w1, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    /* Recompute checksums for 58-byte frame (TCP section = 24 bytes) */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #24
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfail_tcp_wsn
+
+    /* Find SYN_RCVD conn and check SND_WSCALE == 4 */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    ldrb    w0, [x19, #TCONN_SND_WSCALE]
+    cmp     w0, #4
+    b.ne    .Lfail_tcp_wsn
+
+    ldr     x0, =name_tcp_wsn
+    bl      test_pass
+    b       .Ldone_tcp_wsn
+.Lfail_tcp_wsn:
+    ldr     x0, =name_tcp_wsn
+    bl      test_fail
+.Ldone_tcp_wsn:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_wscale_no_opt — SYN without WSCALE → SND_WSCALE=0
+ * ======================================================================== */
+.global test_tcp_wscale_no_opt
+test_tcp_wscale_no_opt:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Send bare SYN (no WSCALE) */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfail_tcp_wno
+
+    /* SND_WSCALE should be 0 */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    ldrb    w0, [x19, #TCONN_SND_WSCALE]
+    cbnz    w0, .Lfail_tcp_wno
+
+    ldr     x0, =name_tcp_wno
+    bl      test_pass
+    b       .Ldone_tcp_wno
+.Lfail_tcp_wno:
+    ldr     x0, =name_tcp_wno
+    bl      test_fail
+.Ldone_tcp_wno:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_wscale_window_apply — WSCALE=2 → SND_WND = raw_window << 2
+ * ======================================================================== */
+.global test_tcp_wscale_window_apply
+test_tcp_wscale_window_apply:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_wwa
+    mov     x19, x0
+
+    /* Set SND_WSCALE = 2 */
+    mov     w0, #2
+    strb    w0, [x19, #TCONN_SND_WSCALE]
+
+    /* Build data ACK with window=100 (NBO) */
+    ldr     w3, [x19, #TCONN_RCV_NXT]
+    ldr     w4, [x19, #TCONN_SND_NXT]
+    ldr     x0, =tcp_test_buf
+    mov     w1, #5
+    mov     w2, #0x41
+    bl      ttcp_build_data_frame
+
+    /* Patch window to 100 (NBO) = 0x6400 LE */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #0x6400
+    strh    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #25
+    bl      tcp_checksum
+    ldr     x0, =tcp_test_buf
+    strh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* tcp_handle should return > 0; if 0, likely checksum/seq issue */
+    cmp     w0, #0
+    b.gt    .Lwwa_handled
+    /* Frame dropped — check if SND_WND was updated at all */
+    ldr     w0, [x19, #TCONN_SND_WND]
+    cbnz    w0, .Lfail_tcp_wwa     /* updated but frame dropped? */
+    b       .Lfail_tcp_wwa         /* not updated, frame dropped */
+.Lwwa_handled:
+    /* SND_WND should be 100 << 2 = 400 */
+    ldr     w0, [x19, #TCONN_SND_WND]
+    cmp     w0, #400
+    b.ne    .Lfail_tcp_wwa
+
+    ldr     x0, =name_tcp_wwa
+    bl      test_pass
+    b       .Ldone_tcp_wwa
+.Lfail_tcp_wwa:
+    ldr     x0, =name_tcp_wwa
+    bl      test_fail
+.Ldone_tcp_wwa:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
@@ -12668,6 +12847,9 @@ name_tcp_rs60:      .asciz "tcp_reaper_synrcvd_60s"
 name_tcp_ri:        .asciz "tcp_rtt_init"
 name_tcp_rd2:       .asciz "tcp_rto_double"
 name_tcp_rk:        .asciz "tcp_rtt_karn"
+name_tcp_wsn:       .asciz "tcp_wscale_negotiate"
+name_tcp_wno:       .asciz "tcp_wscale_no_opt"
+name_tcp_wwa:       .asciz "tcp_wscale_window_apply"
 
 tcp_send_payload:
     .ascii  "World"

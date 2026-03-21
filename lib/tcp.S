@@ -1208,6 +1208,31 @@ tcp_listen_syn_handler:
     str     w0, [x21, #TCONN_CWND]
 .Llsyn_mss_done:
 
+    /* Parse WSCALE option from incoming SYN */
+    ldrb    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    lsr     w1, w1, #4
+    lsl     w1, w1, #2
+    mov     x0, x19
+    bl      tcp_parse_wscale
+    cmn     w0, #1
+    b.eq    .Llsyn_no_wscale
+
+    /* Store peer's WSCALE and our WSCALE */
+    strb    w0, [x21, #TCONN_SND_WSCALE]
+    mov     w1, #TCP_OUR_WSCALE
+    strb    w1, [x21, #TCONN_RCV_WSCALE]
+
+    /* Apply WSCALE to the already-stored SND_WND */
+    ldr     w1, [x21, #TCONN_SND_WND]
+    lsl     w1, w1, w0
+    str     w1, [x21, #TCONN_SND_WND]
+    b       .Llsyn_wscale_done
+
+.Llsyn_no_wscale:
+    strb    wzr, [x21, #TCONN_SND_WSCALE]
+    strb    wzr, [x21, #TCONN_RCV_WSCALE]
+.Llsyn_wscale_done:
+
     /* Initialize activity timestamp */
     bl      timer_now
     str     x0, [x21, #TCONN_LAST_ACTIVE]
@@ -1320,6 +1345,9 @@ tcp_estab_ack_handler:
     ldrh    w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
     rev16   w4, w4
     uxth    w4, w4
+    /* Apply WSCALE (RFC 7323): SND_WND = raw_window << peer_shift */
+    ldrb    w5, [x19, #TCONN_SND_WSCALE]
+    lsl     w4, w4, w5
     cbz     w4, .Leak_zero_window
     str     w4, [x19, #TCONN_SND_WND]
     /* Non-zero window: cancel persist if active */
@@ -1749,12 +1777,12 @@ tcp_build_frame:
     mov     w25, #TCP_TSOPT_SIZE    /* 12 bytes overhead */
 .Lbf_ts_decided:
 
-    /* Determine if MSS option needed: w26 = 0 or 4 */
+    /* Determine if SYN options needed: w26 = 0 or 8 (MSS=4 + WSCALE=4) */
     mov     w26, #0
     tst     w21, #TCP_SYN
-    b.eq    .Lbf_mss_decided
-    mov     w26, #TCP_OPT_MSS_LEN  /* 4 bytes for MSS option */
-.Lbf_mss_decided:
+    b.eq    .Lbf_syn_opts_decided
+    mov     w26, #(TCP_OPT_MSS_LEN + 4) /* MSS(4) + NOP+WSCALE(4) */
+.Lbf_syn_opts_decided:
 
     /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
     mov     x0, x20                 /* frame */
@@ -1871,6 +1899,16 @@ tcp_build_frame:
     rev16   w1, w1
     uxth    w1, w1
     strh    w1, [x0, #2]          /* MSS value (NBO) */
+
+    /* WSCALE option: NOP(1) + Kind=3(1) + Len=3(1) + Shift(1) = 4 bytes */
+    mov     w1, #TCP_OPT_NOP
+    strb    w1, [x0, #4]
+    mov     w1, #TCP_OPT_WSCALE
+    strb    w1, [x0, #5]
+    mov     w1, #TCP_OPT_WSCALE_LEN
+    strb    w1, [x0, #6]
+    ldrb    w1, [x19, #TCONN_RCV_WSCALE]
+    strb    w1, [x0, #7]
 .Lbf_no_mss:
 
     /* Copy payload if present */
@@ -2441,6 +2479,65 @@ tcp_parse_mss:
 
 .Lmss_not_found:
     mov     w0, #0
+    ret
+
+/*
+ * tcp_parse_wscale — Parse Window Scale option from TCP header
+ *
+ * x0: frame buffer pointer
+ * w1: TCP header length (bytes)
+ * Returns: w0 = shift count (0-14), or -1 if not found
+ * Clobbers: x0-x4
+ */
+.global tcp_parse_wscale
+tcp_parse_wscale:
+    cmp     w1, #TCP_HDR_MIN
+    b.le    .Lwsc_not_found
+
+    add     x2, x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_HDR_MIN)
+    add     x3, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x3, x3, x1
+
+.Lwsc_loop:
+    cmp     x2, x3
+    b.hs    .Lwsc_not_found
+    ldrb    w4, [x2]
+    cbz     w4, .Lwsc_not_found     /* EOL */
+    cmp     w4, #TCP_OPT_NOP
+    b.eq    .Lwsc_nop
+
+    add     x0, x2, #1
+    cmp     x0, x3
+    b.hs    .Lwsc_not_found
+    ldrb    w0, [x2, #1]           /* length */
+    cmp     w0, #2
+    b.lt    .Lwsc_not_found
+
+    cmp     w4, #TCP_OPT_WSCALE
+    b.ne    .Lwsc_skip
+    cmp     w0, #TCP_OPT_WSCALE_LEN
+    b.ne    .Lwsc_skip
+
+    add     x0, x2, #TCP_OPT_WSCALE_LEN
+    cmp     x0, x3
+    b.hi    .Lwsc_not_found
+
+    /* Shift count at offset +2, capped at 14 (RFC 7323 §2.3) */
+    ldrb    w0, [x2, #2]
+    cmp     w0, #14
+    csel    w0, w0, w4, lo
+    mov     w4, #14
+    csel    w0, w0, w4, lo
+    ret
+
+.Lwsc_nop:
+    add     x2, x2, #1
+    b       .Lwsc_loop
+.Lwsc_skip:
+    add     x2, x2, x0
+    b       .Lwsc_loop
+.Lwsc_not_found:
+    mov     w0, #-1
     ret
 
 /*

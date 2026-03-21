@@ -379,7 +379,7 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
     if handler == 'listen_syn':
         reply_seq = to_nbo_ldr(ISN)
         reply_ack = to_nbo_ldr(tcp_seq_host + 1)
-        return (58, TCPS_SYN_RCVD, TCP_SYN_ACK, reply_seq, reply_ack,
+        return (62, TCPS_SYN_RCVD, TCP_SYN_ACK, reply_seq, reply_ack,
                 0, 0, 0)
 
     if handler == 'conn_close':
