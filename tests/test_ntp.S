@@ -36,6 +36,7 @@ test_ntp:
     bl      test_udp_ntp_dispatch
     bl      test_ntp_timer_cb_no_gw
     bl      test_ntp_timer_cb_send
+    bl      test_ntp_handle_stratum16
     ldp     x29, x30, [sp], #16
     ret
 
@@ -639,6 +640,36 @@ test_ntp_timer_cb_send:
     ret
 
 /* ========================================================================
+ * 13. test_ntp_handle_stratum16 — stratum=16 (invalid per RFC 5905) → 0
+ * ======================================================================== */
+test_ntp_handle_stratum16:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tntp_reset_state
+
+    ldr     x0, =tntp_ntp_stratum16
+    mov     w1, #NTP_PKT_LEN
+    mov     x2, #1000
+    bl      ntp_handle
+
+    cbnz    w0, .Lfail_nhs16
+
+    /* synced should still be 0 */
+    ldr     x0, =ntp_state
+    ldr     w1, [x0, #NTPS_SYNCED]
+    cbnz    w1, .Lfail_nhs16
+
+    ldr     x0, =name_nhs16
+    bl      test_pass
+    b       .Ldone_nhs16
+.Lfail_nhs16:
+    ldr     x0, =name_nhs16
+    bl      test_fail
+.Ldone_nhs16:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -675,6 +706,13 @@ tntp_ntp_wrong_mode:
     .byte   0x23                        /* flags: LI=0, VN=4, Mode=3 */
     .byte   0x01                        /* stratum: 1 */
     .space  46                          /* rest doesn't matter */
+
+/* NTP response with stratum=16 (invalid per RFC 5905) */
+.balign 4
+tntp_ntp_stratum16:
+    .byte   0x24                        /* flags: LI=0, VN=4, Mode=4 */
+    .byte   0x10                        /* stratum: 16 */
+    .space  46
 
 /* NTP response with stratum=0 (Kiss of Death) */
 .balign 4
@@ -774,6 +812,7 @@ name_angc:  .asciz "arp_non_gw_no_cache"
 name_und:   .asciz "udp_ntp_dispatch"
 name_ntcng: .asciz "ntp_timer_cb_no_gw"
 name_ntcs:  .asciz "ntp_timer_cb_send"
+name_nhs16: .asciz "ntp_handle_stratum16"
 
 .section .data
 .balign 16

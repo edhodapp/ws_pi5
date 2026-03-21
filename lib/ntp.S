@@ -164,6 +164,10 @@ ntp_handle:
     ldrb    w3, [x0, #NTP_STRATUM]
     cbz     w3, .Lntp_ignore
 
+    /* Reject stratum > 15 (invalid per RFC 5905) */
+    cmp     w3, #16
+    b.hs    .Lntp_ignore
+
     /* Extract TX timestamp seconds (offset 40, 4 bytes big-endian) */
     ldr     w3, [x0, #NTP_TX_TS]
     rev     w3, w3                  /* big-endian → host order */
