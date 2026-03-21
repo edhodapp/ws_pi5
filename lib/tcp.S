@@ -946,8 +946,8 @@ tcp_listen_syn_handler:
 
     str     w22, [x21, #TCONN_SND_UNA]
 
-    add     w0, w22, #1
-    str     w0, [x21, #TCONN_SND_NXT]
+    /* SND_NXT = ISN (tcp_build_frame reads SND_NXT as SEQ) */
+    str     w22, [x21, #TCONN_SND_NXT]
 
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
     rev     w0, w0
@@ -971,21 +971,19 @@ tcp_listen_syn_handler:
     strb    wzr, [x21, #TCONN_TS_ENABLED]
 .Llsyn_ts_done:
 
-    /* Build SYN-ACK reply */
-    mov     x0, x19                 /* frame */
-    rev     w1, w22                 /* SEQ = rev(ISN) (NBO) */
-    ldr     w2, [x21, #TCONN_RCV_NXT]
-    rev     w2, w2                  /* ACK = rev(RCV_NXT) (NBO) */
-    mov     w3, #TCP_SYN_ACK
-    /* Dynamic window from TCONN_RXLEN (just zeroed → window = TCP_RXBUF_SIZE) */
-    ldrh    w4, [x21, #TCONN_RXLEN]
-    mov     w6, #TCP_RXBUF_SIZE
-    sub     w4, w6, w4
-    rev16   w4, w4
-    uxth    w4, w4
-    mov     x5, x21                 /* conn → timestamps if negotiated */
-    bl      tcp_build_reply
-    mov     w22, w0                 /* save return value (54 or 66) */
+    /* Build SYN-ACK via tcp_build_frame (includes MSS option) */
+    mov     x0, x21                 /* conn */
+    mov     x1, x19                 /* frame buf */
+    mov     w2, #TCP_SYN_ACK        /* flags (SYN set → triggers MSS option) */
+    mov     x3, #0                  /* no payload */
+    mov     w4, #0
+    bl      tcp_build_frame
+    mov     w22, w0                 /* save frame length */
+
+    /* Advance SND_NXT past SYN */
+    ldr     w0, [x21, #TCONN_SND_NXT]
+    add     w0, w0, #1
+    str     w0, [x21, #TCONN_SND_NXT]
 
     /* Save SYN-ACK to retransmit buffer */
     mov     x0, x21                 /* conn */
@@ -1280,7 +1278,7 @@ tcp_build_frame:
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
-    str     x25, [sp, #64]
+    stp     x25, x26, [sp, #64]
 
     mov     x19, x0                 /* x19 = conn */
     mov     x20, x1                 /* x20 = frame buf */
@@ -1296,6 +1294,13 @@ tcp_build_frame:
     mov     w25, #TCP_TSOPT_SIZE    /* 12 bytes overhead */
 .Lbf_ts_decided:
 
+    /* Determine if MSS option needed: w26 = 0 or 4 */
+    mov     w26, #0
+    tst     w21, #TCP_SYN
+    b.eq    .Lbf_mss_decided
+    mov     w26, #TCP_OPT_MSS_LEN  /* 4 bytes for MSS option */
+.Lbf_mss_decided:
+
     /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
     mov     x0, x20                 /* frame */
     add     x1, x19, #TCONN_RMAC   /* dst = peer MAC from conn */
@@ -1308,9 +1313,10 @@ tcp_build_frame:
     strb    w0, [x20, #ETH_PAYLOAD]
     strb    wzr, [x20, #(ETH_PAYLOAD + 1)]
 
-    /* totlen = 40 + ts_overhead + payload_len (NBO via rev16) */
+    /* totlen = 40 + ts_overhead + mss_overhead + payload_len (NBO via rev16) */
     add     w0, w23, #40
     add     w0, w0, w25
+    add     w0, w0, w26
     rev16   w0, w0
     uxth    w0, w0
     strh    w0, [x20, #(ETH_PAYLOAD + IP_TOTLEN)]
@@ -1360,13 +1366,11 @@ tcp_build_frame:
     rev     w0, w0
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
 
-    /* data offset: 0x80 (32 bytes) if TS, 0x50 (20 bytes) if not */
-    cbnz    w25, .Lbf_ts_doff
-    mov     w0, #0x50
-    b       .Lbf_doff_set
-.Lbf_ts_doff:
-    mov     w0, #0x80
-.Lbf_doff_set:
+    /* data offset: (20 + ts_overhead + mss_overhead) / 4 words, high nibble */
+    add     w0, w25, w26           /* total option bytes */
+    lsr     w0, w0, #2             /* option words */
+    add     w0, w0, #5             /* + 5 base header words */
+    lsl     w0, w0, #4             /* shift to high nibble */
     strb    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
     strb    w21, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
@@ -1399,10 +1403,25 @@ tcp_build_frame:
     str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + 28)]     /* TSecr (NBO) */
 .Lbf_no_tsopt:
 
+    /* Insert MSS option if SYN (w26 != 0) */
+    cbz     w26, .Lbf_no_mss
+    add     x0, x20, #(ETH_PAYLOAD + IP_HDR_MIN + 20)
+    add     x0, x0, x25           /* skip TS options if present */
+    mov     w1, #TCP_OPT_MSS      /* Kind=2 */
+    strb    w1, [x0]
+    mov     w1, #TCP_OPT_MSS_LEN  /* Len=4 */
+    strb    w1, [x0, #1]
+    mov     w1, #TCP_OUR_MSS       /* 1460 */
+    rev16   w1, w1
+    uxth    w1, w1
+    strh    w1, [x0, #2]          /* MSS value (NBO) */
+.Lbf_no_mss:
+
     /* Copy payload if present */
     cbz     w23, .Lbf_no_payload
-    add     x0, x20, #54           /* dest = frame + 54 + ts_overhead */
+    add     x0, x20, #54           /* dest = frame + 54 + ts_overhead + mss_overhead */
     add     x0, x0, x25
+    add     x0, x0, x26
     mov     x1, x22                /* src = payload ptr */
     mov     w2, w23
 .Lbf_copy:
@@ -1412,19 +1431,21 @@ tcp_build_frame:
     b.ne    .Lbf_copy
 
 .Lbf_no_payload:
-    /* TCP checksum over (20 + ts_overhead + payload_len) bytes */
+    /* TCP checksum over (20 + ts_overhead + mss_overhead + payload_len) bytes */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x20
     add     w1, w23, #TCP_HDR_MIN
     add     w1, w1, w25
+    add     w1, w1, w26
     bl      tcp_checksum
     strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
-    /* Return 54 + ts_overhead + payload_len */
+    /* Return 54 + ts_overhead + mss_overhead + payload_len */
     add     w0, w23, #54
     add     w0, w0, w25
+    add     w0, w0, w26
 
-    ldr     x25, [sp, #64]
+    ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
