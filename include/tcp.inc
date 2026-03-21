@@ -47,7 +47,14 @@
 .equ TCP_FIN_ACK,      0x11    /* FIN + ACK */
 .equ TCP_PSH_ACK,      0x18    /* PSH + ACK */
 
-/* Connection struct (128 bytes, Phase 2+) */
+/* Connection struct (256 bytes)
+ *
+ * Offsets 0-63: identity, sequence numbers, MAC, timestamps (unchanged)
+ * Offsets 64-127: window/congestion (widened to u32), OOO, activity
+ * Offsets 128-255: send buffer state, RTT, WSCALE, reserved
+ */
+
+/* --- Identity and sequence numbers (0-63, unchanged) --- */
 .equ TCONN_STATE,      0       /* u8  */
 .equ TCONN_PAD1,       1
 .equ TCONN_LPORT,      2       /* u16 — network byte order */
@@ -59,8 +66,7 @@
 .equ TCONN_RXLEN,      20      /* u16 — rx buffer fill */
 .equ TCONN_SND_NXT,    24      /* u32 — next seq to send */
 .equ TCONN_RCV_NXT,    32      /* u32 — next expected seq from peer */
-.equ TCONN_SND_WND,    40      /* u16 — peer's advertised window */
-.equ TCONN_RCV_WND,    42      /* u16 — our advertised window */
+.equ TCONN_SND_WND,    40      /* u32 — peer's advertised window (SCALED) */
 .equ TCONN_TIMER_SLOT, 44      /* w32 — retransmit timer slot (-1=none) */
 .equ TCONN_RMAC,       48      /* 6 bytes — peer MAC (captured from SYN) */
 .equ TCONN_PAD4,       54
@@ -68,21 +74,36 @@
 .equ TCONN_RTXCOUNT,   58      /* u8  — retry count (incremented each timeout) */
 .equ TCONN_TS_ENABLED, 59      /* u8  — 0=disabled, 1=enabled (negotiated from SYN) */
 .equ TCONN_TS_RECENT,  60      /* u32 — last received TSval from peer (host order) */
+
+/* --- Window, congestion, OOO (64-127, widened) --- */
 .equ TCONN_PEER_MSS,   64      /* u16 — peer's advertised MSS (host order, default 536) */
-.equ TCONN_CWND,       66      /* u16 — congestion window (bytes) */
-.equ TCONN_SSTHRESH,   68      /* u16 — slow-start threshold */
-.equ TCONN_DUP_ACK_CNT, 70    /* u8  — duplicate ACK counter */
-.equ TCONN_OOO_COUNT,  71      /* u8  — number of OOO slots in use (0-4) */
-.equ TCONN_OOO_SLOTS,  72      /* 32 bytes — 4 × {SEQ u32, LEN u16, PAD u16} */
-.equ TCONN_LAST_ACTIVE,    104     /* u64 — last activity timestamp (counter ticks) */
-.equ TCONN_PERSIST_SHIFT,  112     /* u8 — persist backoff shift (0=inactive) */
-/* 113-127: reserved for future use */
-.equ TCONN_SIZE,       128     /* power of 2 for indexing */
-.equ TCONN_SHIFT,      7       /* log2(TCONN_SIZE) */
+.equ TCONN_DUP_ACK_CNT, 66    /* u8  — duplicate ACK counter */
+.equ TCONN_OOO_COUNT,  67      /* u8  — number of OOO slots in use (0-4) */
+.equ TCONN_CWND,       68      /* u32 — congestion window (bytes) */
+.equ TCONN_SSTHRESH,   72      /* u32 — slow-start threshold */
+.equ TCONN_OOO_SLOTS,  76      /* 32 bytes — 4 × {SEQ u32, LEN u16, PAD u16} */
+.equ TCONN_LAST_ACTIVE,    108     /* u64 — last activity timestamp (counter ticks) */
+.equ TCONN_PERSIST_SHIFT,  116     /* u8 — persist backoff shift (0=inactive) */
+
+/* --- Send buffer, RTT, WSCALE (128-255, new) --- */
+.equ TCONN_SND_WSCALE,     128     /* u8 — peer's window scale factor (0 = no scaling) */
+.equ TCONN_RCV_WSCALE,     129     /* u8 — our window scale factor advertised */
+.equ TCONN_SACK_ENABLED,   130     /* u8 — SACK-Permitted negotiated */
+.equ TCONN_SND_BUF_HEAD,   132     /* u32 — circular send buffer write offset */
+.equ TCONN_SND_BUF_TAIL,   136     /* u32 — circular send buffer ACKed offset */
+.equ TCONN_SND_BUF_USED,   140     /* u32 — bytes pending in send buffer */
+.equ TCONN_SRTT,            144     /* u32 — smoothed RTT (timer ticks, fixed-point /8) */
+.equ TCONN_RTTVAR,          148     /* u32 — RTT variance (timer ticks, fixed-point /4) */
+.equ TCONN_RTO,             152     /* u32 — current RTO in timer ticks */
+.equ TCONN_SEND_TICK,       160     /* u64 — timestamp of segment being timed */
+/* 168-255: reserved */
+
+.equ TCONN_SIZE,       256     /* power of 2 for indexing */
+.equ TCONN_SHIFT,      8       /* log2(TCONN_SIZE) */
 
 /* Connection table */
 .equ TCP_MAX_CONNS,    16
-.equ TCP_CONN_TABLE_SIZE, 2048 /* 16 * 128 */
+.equ TCP_CONN_TABLE_SIZE, 4096 /* 16 * 256 */
 
 /* Receive buffer pool */
 .equ TCP_RXBUF_SIZE,      2048   /* bytes per connection, power of 2 */

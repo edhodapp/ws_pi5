@@ -415,8 +415,8 @@ test_func_paws_reject:
     mov     w1, #71
     bl      tcp_handle
 
-    /* Verify return = 0 (dropped by PAWS) */
-    cbnz    w0, .Lfpr_fail
+    /* Verify return > 0 (PAWS drop sends ACK per RFC 7323 §4.2) */
+    cbz     w0, .Lfpr_fail
 
     /* Verify RCV_NXT unchanged */
     ldr     w0, [x19, #TCONN_RCV_NXT]

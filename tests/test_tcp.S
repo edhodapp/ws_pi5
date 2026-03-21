@@ -1180,7 +1180,7 @@ test_tcp_peer_mss:
 
     /* tcp_send_ready with SND_WND=2000 → should return 1460 (peer MSS) */
     mov     w0, #2000
-    strh    w0, [x19, #TCONN_SND_WND]
+    str     w0, [x19, #TCONN_SND_WND]
     mov     x0, x19
     bl      tcp_send_ready
     mov     w1, #TCP_OUR_MSS
@@ -5443,7 +5443,7 @@ test_tcp_snd_wnd_capture:
     cbz     x0, .Lfail_tcp_swc
     mov     x21, x0
 
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #0xFFFF
     cmp     w0, w1
     b.ne    .Lfail_tcp_swc
@@ -5501,7 +5501,7 @@ test_tcp_snd_wnd_update:
     bl      tcp_handle
 
     /* Verify SND_WND = 8192 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #8192
     cmp     w0, w1
     b.ne    .Lfail_tcp_swu
@@ -5532,7 +5532,7 @@ test_tcp_send_exceeds_window:
 
     /* Set SND_WND=100 */
     mov     w0, #100
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     /* Save SND_NXT */
     ldr     w19, [x21, #TCONN_SND_NXT]
@@ -5553,7 +5553,7 @@ test_tcp_send_exceeds_window:
     b.ne    .Lfail_tcp_sew
 
     /* SND_WND unchanged */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cmp     w0, #100
     b.ne    .Lfail_tcp_sew
 
@@ -5583,7 +5583,7 @@ test_tcp_send_decrements_window:
 
     /* Set SND_WND=1000 */
     mov     w0, #1000
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     /* tcp_send 5 bytes */
     mov     x0, x21
@@ -5597,7 +5597,7 @@ test_tcp_send_decrements_window:
     b.ne    .Lfail_tcp_sdw
 
     /* SND_WND = 995 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #995
     cmp     w0, w1
     b.ne    .Lfail_tcp_sdw
@@ -5628,7 +5628,7 @@ test_tcp_send_ready:
 
     /* Set SND_WND=500 → tcp_send_ready returns 500 */
     mov     w0, #500
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
     mov     x0, x21
     bl      tcp_send_ready
     cmp     w0, #500
@@ -5636,7 +5636,7 @@ test_tcp_send_ready:
 
     /* Set SND_WND=2000 → tcp_send_ready returns 536 (clamped to default peer MSS) */
     mov     w0, #2000
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
     mov     x0, x21
     bl      tcp_send_ready
     cmp     w0, #TCP_DEFAULT_MSS
@@ -5705,7 +5705,7 @@ test_tcp_send_window_exhaustion:
 
     /* Set SND_WND=15 */
     mov     w0, #15
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     /* Step 1: tcp_send 5 bytes → ret=59, SND_WND=10 */
     mov     x0, x21
@@ -5715,7 +5715,7 @@ test_tcp_send_window_exhaustion:
     bl      tcp_send
     cmp     w0, #59
     b.ne    .Lfail_tcp_swe
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cmp     w0, #10
     b.ne    .Lfail_tcp_swe
     /* Clear retransmit state to allow next send (simulates ACK) */
@@ -5729,7 +5729,7 @@ test_tcp_send_window_exhaustion:
     bl      tcp_send
     cmp     w0, #59
     b.ne    .Lfail_tcp_swe
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cmp     w0, #5
     b.ne    .Lfail_tcp_swe
     /* Clear retransmit state to allow next send */
@@ -5743,7 +5743,7 @@ test_tcp_send_window_exhaustion:
     bl      tcp_send
     cmp     w0, #59
     b.ne    .Lfail_tcp_swe
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_swe
 
     /* Clear retransmit gate so step 4 tests window exhaustion specifically */
@@ -5756,7 +5756,7 @@ test_tcp_send_window_exhaustion:
     mov     w3, #5
     bl      tcp_send
     cbnz    w0, .Lfail_tcp_swe
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_swe
 
     /* Step 5: tcp_send_ready → returns 0 (SND_WND=0) */
@@ -5791,7 +5791,7 @@ test_tcp_send_window_exhaustion:
     bl      tcp_handle
     cbnz    w0, .Lfail_tcp_swe
     /* SND_WND should be 1000 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #1000
     cmp     w0, w1
     b.ne    .Lfail_tcp_swe
@@ -5810,7 +5810,7 @@ test_tcp_send_window_exhaustion:
     bl      tcp_send
     cmp     w0, #59
     b.ne    .Lfail_tcp_swe
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #995
     cmp     w0, w1
     b.ne    .Lfail_tcp_swe
@@ -5900,7 +5900,7 @@ test_tcp_send_boundary:
 
     /* Set SND_WND=5 */
     mov     w0, #5
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     /* tcp_send 5 bytes (exactly equals SND_WND) */
     mov     x0, x21
@@ -5912,7 +5912,7 @@ test_tcp_send_boundary:
     b.ne    .Lfail_tcp_sb
 
     /* SND_WND should be 0 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_sb
 
     ldr     x0, =name_tcp_sb
@@ -5940,7 +5940,7 @@ test_tcp_send_ready_zero:
     mov     x21, x0
 
     /* Set SND_WND=0 */
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
 
     mov     x0, x21
     bl      tcp_send_ready
@@ -5973,7 +5973,7 @@ test_tcp_snd_wnd_pure_ack:
     mov     w22, w1                 /* ISN */
 
     /* Set SND_WND=0 */
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
 
     /* Build pure ACK from tcp_handshake_ack_template */
     ldr     x0, =tcp_handshake_ack_template
@@ -6002,7 +6002,7 @@ test_tcp_snd_wnd_pure_ack:
     bl      tcp_handle
     cbnz    w0, .Lfail_tcp_swpa
     /* SND_WND should be 4096 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #4096
     cmp     w0, w1
     b.ne    .Lfail_tcp_swpa
@@ -6036,7 +6036,7 @@ test_tcp_snd_wnd_data_ack:
 
     /* Set SND_WND=100 */
     mov     w0, #100
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     /* Build 5-byte data frame, SEQ=2, ACK=ISN+1 */
     ldr     x0, =tcp_test_buf3
@@ -6074,7 +6074,7 @@ test_tcp_snd_wnd_data_ack:
     b.ne    .Lfail_tcp_swda
 
     /* Verify SND_WND=8192 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     mov     w1, #8192
     cmp     w0, w1
     b.ne    .Lfail_tcp_swda
@@ -9004,7 +9004,7 @@ test_tcp_tsopt_trunc_ts:
 /* ========================================================================
  * test_tcp_cwnd_grow — cwnd grows on new ACK (slow start: cwnd += MSS)
  *
- * 1. Handshake → ESTABLISHED (cwnd = 536, ssthresh = 0xFFFF)
+ * 1. Handshake → ESTABLISHED (cwnd = 536, ssthresh = 256 KB)
  * 2. tcp_send 5 bytes → frame built
  * 3. Inject ACK acknowledging those bytes → cwnd grows to 536+536 = 1072
  * ======================================================================== */
@@ -9019,7 +9019,7 @@ test_tcp_cwnd_grow:
     mov     w20, w1                 /* ISN */
 
     /* Verify initial cwnd = 536 (default MSS) */
-    ldrh    w0, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_CWND]
     cmp     w0, #TCP_DEFAULT_MSS
     b.ne    .Lfail_tcp_cwg
 
@@ -9055,7 +9055,7 @@ test_tcp_cwnd_grow:
     bl      tcp_handle
 
     /* cwnd should have grown: 536 + 536 = 1072 */
-    ldrh    w0, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_CWND]
     mov     w1, #1072
     cmp     w0, w1
     b.ne    .Lfail_tcp_cwg
@@ -9078,7 +9078,7 @@ test_tcp_cwnd_grow:
  * test_tcp_cwnd_rtx_reset — retransmit timeout resets cwnd to MSS
  *
  * 1. Handshake → ESTABLISHED
- * 2. Manually set cwnd=2000, ssthresh=0xFFFF
+ * 2. Manually set cwnd=2000, ssthresh=65535
  * 3. tcp_send → saves retransmit frame
  * 4. Call tcp_retransmit_cb → cwnd should reset to MSS (536)
  *    ssthresh = max(2000/2, 2*536) = max(1000, 1072) = 1072
@@ -9094,9 +9094,9 @@ test_tcp_cwnd_rtx_reset:
 
     /* Set cwnd = 2000 */
     mov     w0, #2000
-    strh    w0, [x19, #TCONN_CWND]
+    str     w0, [x19, #TCONN_CWND]
     mov     w0, #0xFFFF
-    strh    w0, [x19, #TCONN_SSTHRESH]
+    str     w0, [x19, #TCONN_SSTHRESH]
 
     /* Send 5 bytes to create retransmit state */
     mov     x0, x19
@@ -9112,12 +9112,12 @@ test_tcp_cwnd_rtx_reset:
     bl      tcp_retransmit_cb
 
     /* cwnd should be MSS (536) */
-    ldrh    w0, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_CWND]
     cmp     w0, #TCP_DEFAULT_MSS
     b.ne    .Lfail_tcp_crr
 
     /* ssthresh = max(2000/2, 2*536) = max(1000, 1072) = 1072 */
-    ldrh    w0, [x19, #TCONN_SSTHRESH]
+    ldr     w0, [x19, #TCONN_SSTHRESH]
     mov     w1, #1072
     cmp     w0, w1
     b.ne    .Lfail_tcp_crr
@@ -9155,9 +9155,9 @@ test_tcp_cwnd_gate:
 
     /* Set cwnd=10, SND_WND=2000 */
     mov     w0, #10
-    strh    w0, [x19, #TCONN_CWND]
+    str     w0, [x19, #TCONN_CWND]
     mov     w0, #2000
-    strh    w0, [x19, #TCONN_SND_WND]
+    str     w0, [x19, #TCONN_SND_WND]
 
     /* tcp_send 11 bytes → should fail (exceeds cwnd=10) */
     mov     x0, x19
@@ -9926,7 +9926,7 @@ test_tcp_fast_retransmit:
     cbnz    w0, .Lfail_tcp_frtx
 
     /* Verify ssthresh was set (should be max(cwnd/2, 2*MSS)) */
-    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    ldr     w0, [x21, #TCONN_SSTHRESH]
     cbz     w0, .Lfail_tcp_frtx
 
     ldr     x0, =name_tcp_frtx
@@ -10078,7 +10078,7 @@ test_tcp_persist_arm:
     b.ne    .Lfail_tcp_pa
 
     /* Verify SND_WND == 0 */
-    ldrh    w0, [x21, #TCONN_SND_WND]
+    ldr     w0, [x21, #TCONN_SND_WND]
     cbnz    w0, .Lfail_tcp_pa
 
     ldr     x0, =name_tcp_pa
@@ -10300,14 +10300,14 @@ test_tcp_frtx_no_send_fn:
     bl      tcp_set_send_ctx
 
     /* Record cwnd before */
-    ldrh    w19, [x21, #TCONN_CWND]
+    ldr     w19, [x21, #TCONN_CWND]
 
     /* Call tcp_fast_retransmit directly */
     mov     x0, x21
     bl      tcp_fast_retransmit
 
     /* ssthresh should still be updated (happens before send_fn check) */
-    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    ldr     w0, [x21, #TCONN_SSTHRESH]
     cbz     w0, .Lfail_tcp_fns
 
     /* But no crash occurred — test passes if we reach here */
@@ -10328,8 +10328,8 @@ test_tcp_frtx_no_send_fn:
  *
  * Exercises tcp_fast_retransmit csel: cwnd/2 < 2*MSS case.
  * Set cwnd to MSS (536), so cwnd/2=268 < 2*MSS=1072 → ssthresh=1072.
- * Also tests 0xFFFF cap path by setting cwnd high enough that
- * ssthresh + 3*MSS > 65535.
+ * Also tests 256 KB cap path by setting cwnd high enough that
+ * ssthresh + 3*MSS > 256 KB.
  * ======================================================================== */
 test_tcp_frtx_cwnd_floor:
     stp     x29, x30, [sp, #-48]!
@@ -10357,20 +10357,20 @@ test_tcp_frtx_cwnd_floor:
 
     /* Set cwnd to MSS (536) — cwnd/2=268 < 2*MSS=1072 */
     ldrh    w0, [x21, #TCONN_PEER_MSS]    /* w0 = MSS (536) */
-    strh    w0, [x21, #TCONN_CWND]
+    str     w0, [x21, #TCONN_CWND]
 
     mov     x0, x21
     bl      tcp_fast_retransmit
 
     /* ssthresh should be 2*MSS = 1072 (floor) */
-    ldrh    w0, [x21, #TCONN_SSTHRESH]
+    ldr     w0, [x21, #TCONN_SSTHRESH]
     ldrh    w1, [x21, #TCONN_PEER_MSS]
     lsl     w1, w1, #1                     /* 2*MSS */
     cmp     w0, w1
     b.ne    .Lfail_tcp_fcf
 
     /* cwnd should be ssthresh + 3*MSS = 1072 + 1608 = 2680 */
-    ldrh    w0, [x21, #TCONN_CWND]
+    ldr     w0, [x21, #TCONN_CWND]
     ldrh    w1, [x21, #TCONN_PEER_MSS]
     lsl     w2, w1, #1                     /* 2*MSS = ssthresh */
     mov     w3, #3
@@ -10379,10 +10379,10 @@ test_tcp_frtx_cwnd_floor:
     cmp     w0, w2
     b.ne    .Lfail_tcp_fcf
 
-    /* --- Now test 0xFFFF cap: set PEER_MSS high so ssthresh+3*MSS > 65535 --- */
-    mov     w0, #0xFFFF
-    strh    w0, [x21, #TCONN_CWND]
-    mov     w0, #20000                      /* large MSS → 3*MSS=60000 */
+    /* --- Now test 256KB cap: set cwnd and MSS so ssthresh+3*MSS > 256KB --- */
+    mov     w0, #0x40000                    /* cwnd = 256 KB */
+    str     w0, [x21, #TCONN_CWND]
+    mov     w0, #60000                      /* MSS = 60000 (fits u16) */
     strh    w0, [x21, #TCONN_PEER_MSS]
     strh    wzr, [x21, #TCONN_RTXLEN]
 
@@ -10397,10 +10397,10 @@ test_tcp_frtx_cwnd_floor:
     mov     x0, x21
     bl      tcp_fast_retransmit
 
-    /* ssthresh = max(65535/2=32767, 2*20000=40000) = 40000
-     * cwnd = 40000 + 3*20000 = 100000 → capped at 0xFFFF */
-    ldrh    w0, [x21, #TCONN_CWND]
-    mov     w1, #0xFFFF
+    /* ssthresh = max(256K/2=131072, 2*60000=120000) = 131072
+     * cwnd = 131072 + 3*60000 = 311072 → capped at 256KB (262144) */
+    ldr     w0, [x21, #TCONN_CWND]
+    mov     w1, #0x40000
     cmp     w0, w1
     b.ne    .Lfail_tcp_fcf
 
@@ -10698,7 +10698,7 @@ test_tcp_persist_cb_send:
     mov     x21, x0
 
     /* Set SND_WND = 0, PERSIST_SHIFT = 1 */
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
     mov     w0, #1
     strb    w0, [x21, #TCONN_PERSIST_SHIFT]
 
@@ -10758,7 +10758,7 @@ test_tcp_persist_cb_not_estab:
     /* Change state to CLOSE_WAIT (not ESTABLISHED) */
     mov     w0, #TCPS_CLOSE_WAIT
     strb    w0, [x21, #TCONN_STATE]
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
     mov     w0, #1
     strb    w0, [x21, #TCONN_PERSIST_SHIFT]
 
@@ -10807,7 +10807,7 @@ test_tcp_persist_cb_wnd_open:
 
     /* State=ESTABLISHED but SND_WND > 0 (window opened since timer was set) */
     mov     w0, #1000
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
     mov     w0, #1
     strb    w0, [x21, #TCONN_PERSIST_SHIFT]
 
@@ -10853,7 +10853,7 @@ test_tcp_persist_cb_no_send_fn:
     cbz     x0, .Lfail_tcp_pcns
     mov     x21, x0
 
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
     mov     w0, #1
     strb    w0, [x21, #TCONN_PERSIST_SHIFT]
 
@@ -10894,7 +10894,7 @@ test_tcp_persist_cb_shift_cap:
     cbz     x0, .Lfail_tcp_pcsc
     mov     x21, x0
 
-    strh    wzr, [x21, #TCONN_SND_WND]
+    str     wzr, [x21, #TCONN_SND_WND]
     /* Set PERSIST_SHIFT = 4 (after increment → 5, should be capped) */
     mov     w0, #4
     strb    w0, [x21, #TCONN_PERSIST_SHIFT]

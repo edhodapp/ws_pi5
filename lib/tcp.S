@@ -120,9 +120,9 @@ tcp_checksum:
 tcp_init:
     stp     x29, x30, [sp, #-16]!
 
-    /* Zero all 2048 bytes (128 iterations of 16 bytes) */
+    /* Zero connection table: TCP_CONN_TABLE_SIZE / 16 iterations */
     ldr     x0, =tcp_conn_table
-    mov     w1, #128
+    mov     w1, #(TCP_CONN_TABLE_SIZE / 16)
 .Ltcp_init_zero:
     stp     xzr, xzr, [x0], #16
     subs    w1, w1, #1
@@ -175,10 +175,10 @@ tcp_listen:
     strb    w0, [x1, #TCONN_STATE]
     strh    w2, [x1, #TCONN_LPORT]
 
-    /* Return slot index: (addr - table_base) >> 7 */
+    /* Return slot index: (addr - table_base) >> TCONN_SHIFT */
     ldr     x0, =tcp_conn_table
     sub     x0, x1, x0
-    lsr     w0, w0, #7
+    lsr     w0, w0, #TCONN_SHIFT
     ret
 
 .Ltl_full:
@@ -510,14 +510,14 @@ tcp_retransmit_cb:
     b.hs    .Lrtxcb_giveup
 
     /* Multiplicative decrease: ssthresh = max(cwnd/2, 2*MSS), cwnd = MSS */
-    ldrh    w0, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_CWND]
     lsr     w0, w0, #1              /* cwnd / 2 */
     ldrh    w1, [x19, #TCONN_PEER_MSS]
     lsl     w2, w1, #1              /* 2 * MSS */
     cmp     w0, w2
     csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
-    strh    w0, [x19, #TCONN_SSTHRESH]
-    strh    w1, [x19, #TCONN_CWND]  /* restart slow start */
+    str     w0, [x19, #TCONN_SSTHRESH]
+    str     w1, [x19, #TCONN_CWND]  /* restart slow start */
     strb    wzr, [x19, #TCONN_DUP_ACK_CNT] /* reset dup ACK count */
 
     /* Load send context */
@@ -1070,9 +1070,9 @@ tcp_listen_syn_handler:
     /* Initialize MSS/congestion/OOO fields */
     mov     w0, #TCP_DEFAULT_MSS        /* RFC 1122 default MSS = 536 */
     strh    w0, [x21, #TCONN_PEER_MSS]
-    strh    w0, [x21, #TCONN_CWND]      /* initial cwnd = 1 MSS */
-    mov     w0, #0xFFFF
-    strh    w0, [x21, #TCONN_SSTHRESH]  /* initial ssthresh = max */
+    str     w0, [x21, #TCONN_CWND]      /* initial cwnd = 1 MSS */
+    mov     w0, #0x40000                /* 256 KB = initial ssthresh */
+    str     w0, [x21, #TCONN_SSTHRESH]
     strb    wzr, [x21, #TCONN_DUP_ACK_CNT]
     strb    wzr, [x21, #TCONN_OOO_COUNT]
 
@@ -1095,7 +1095,7 @@ tcp_listen_syn_handler:
     ldrh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
     rev16   w0, w0
     uxth    w0, w0
-    strh    w0, [x21, #TCONN_SND_WND]
+    str     w0, [x21, #TCONN_SND_WND]
 
     str     w22, [x21, #TCONN_SND_UNA]
 
@@ -1132,7 +1132,7 @@ tcp_listen_syn_handler:
     bl      tcp_parse_mss
     cbz     w0, .Llsyn_mss_done
     strh    w0, [x21, #TCONN_PEER_MSS]
-    strh    w0, [x21, #TCONN_CWND]
+    str     w0, [x21, #TCONN_CWND]
 .Llsyn_mss_done:
 
     /* Initialize activity timestamp */
@@ -1248,7 +1248,7 @@ tcp_estab_ack_handler:
     rev16   w4, w4
     uxth    w4, w4
     cbz     w4, .Leak_zero_window
-    strh    w4, [x19, #TCONN_SND_WND]
+    str     w4, [x19, #TCONN_SND_WND]
     /* Non-zero window: cancel persist if active */
     ldrb    w5, [x19, #TCONN_PERSIST_SHIFT]
     cbz     w5, .Leak_wnd_done
@@ -1256,7 +1256,7 @@ tcp_estab_ack_handler:
     b       .Leak_wnd_done
 
 .Leak_zero_window:
-    strh    wzr, [x19, #TCONN_SND_WND]    /* store window=0 */
+    str     wzr, [x19, #TCONN_SND_WND]    /* store window=0 */
     ldrb    w5, [x19, #TCONN_PERSIST_SHIFT]
     cbnz    w5, .Leak_wnd_done             /* already armed */
     mov     w5, #1
@@ -1278,8 +1278,8 @@ tcp_estab_ack_handler:
     str     w4, [x19, #TCONN_SND_UNA]
 
     /* Congestion control: grow cwnd on new ACK (RFC 5681) */
-    ldrh    w7, [x19, #TCONN_CWND]
-    ldrh    w8, [x19, #TCONN_SSTHRESH]
+    ldr     w7, [x19, #TCONN_CWND]
+    ldr     w8, [x19, #TCONN_SSTHRESH]
     ldrh    w9, [x19, #TCONN_PEER_MSS]
     cmp     w7, w8
     b.hs    .Leak_cong_avoid
@@ -1295,10 +1295,10 @@ tcp_estab_ack_handler:
     cinc    w10, w10, eq
     add     w7, w7, w10
 .Leak_cwnd_store:
-    mov     w10, #0xFFFF
+    mov     w10, #0x40000               /* 256 KB cap */
     cmp     w7, w10
-    csel    w7, w7, w10, lo         /* cap at 65535 */
-    strh    w7, [x19, #TCONN_CWND]
+    csel    w7, w7, w10, lo
+    str     w7, [x19, #TCONN_CWND]
     strb    wzr, [x19, #TCONN_DUP_ACK_CNT]
 
     /* If SND_UNA == SND_NXT, all data ACKed → clear retransmit */
@@ -1926,8 +1926,8 @@ tcp_send:
     b.hi    .Lts_err
 
     /* Check payload_len <= min(SND_WND, cwnd) */
-    ldrh    w0, [x19, #TCONN_SND_WND]
-    ldrh    w1, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_SND_WND]
+    ldr     w1, [x19, #TCONN_CWND]
     cmp     w0, w1
     csel    w0, w0, w1, lo          /* min(SND_WND, cwnd) */
     cmp     w21, w0
@@ -1949,9 +1949,9 @@ tcp_send:
     str     w0, [x19, #TCONN_SND_NXT]
 
     /* SND_WND -= payload_len */
-    ldrh    w0, [x19, #TCONN_SND_WND]
+    ldr     w0, [x19, #TCONN_SND_WND]
     sub     w0, w0, w21
-    strh    w0, [x19, #TCONN_SND_WND]
+    str     w0, [x19, #TCONN_SND_WND]
 
     /* Save frame to retransmit buffer */
     mov     x0, x19                 /* conn */
@@ -2046,8 +2046,8 @@ tcp_send_ready:
     ldrh    w1, [x0, #TCONN_RTXLEN]
     cbnz    w1, .Ltsr_zero
     ldrh    w1, [x0, #TCONN_PEER_MSS]
-    ldrh    w2, [x0, #TCONN_CWND]
-    ldrh    w0, [x0, #TCONN_SND_WND]
+    ldr     w2, [x0, #TCONN_CWND]
+    ldr     w0, [x0, #TCONN_SND_WND]
     cmp     w0, w1
     csel    w0, w0, w1, lo          /* min(SND_WND, peer_mss) */
     cmp     w0, w2
@@ -2474,21 +2474,21 @@ tcp_fast_retransmit:
     mov     x19, x0
 
     /* Multiplicative decrease: ssthresh = max(cwnd/2, 2*MSS) */
-    ldrh    w0, [x19, #TCONN_CWND]
+    ldr     w0, [x19, #TCONN_CWND]
     lsr     w0, w0, #1              /* cwnd / 2 */
     ldrh    w1, [x19, #TCONN_PEER_MSS]
     lsl     w2, w1, #1              /* 2 * MSS */
     cmp     w0, w2
     csel    w0, w0, w2, hs          /* max(cwnd/2, 2*MSS) */
-    strh    w0, [x19, #TCONN_SSTHRESH]
+    str     w0, [x19, #TCONN_SSTHRESH]
     /* cwnd = ssthresh + 3*MSS (RFC 5681: inflate for 3 dup ACKs in flight) */
     mov     w2, #3
     mul     w2, w1, w2
     add     w0, w0, w2
-    mov     w3, #0xFFFF
+    mov     w3, #0x40000                /* 256 KB cap */
     cmp     w0, w3
     csel    w0, w0, w3, lo
-    strh    w0, [x19, #TCONN_CWND]
+    str     w0, [x19, #TCONN_CWND]
 
     /* Copy rtxbuf → tx_buf and send */
     ldr     x20, =tcp_send_ctx
@@ -2722,7 +2722,7 @@ tcp_persist_cb:
     ldrb    w1, [x19, #TCONN_STATE]
     cmp     w1, #TCPS_ESTABLISHED
     b.ne    .Lpersist_done
-    ldrh    w1, [x19, #TCONN_SND_WND]
+    ldr     w1, [x19, #TCONN_SND_WND]
     cbnz    w1, .Lpersist_done
 
     /* Build window probe using tcp_build_frame: zero-length ACK */
