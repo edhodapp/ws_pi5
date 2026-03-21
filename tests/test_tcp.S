@@ -258,6 +258,7 @@ test_tcp:
     bl      test_tcp_sack_parse_1block
     bl      test_tcp_sack_find_hole
     bl      test_tcp_sndbuf_build_at
+    bl      test_tcp_sack_fast_retransmit
     ldp     x29, x30, [sp], #16
     ret
 
@@ -12623,6 +12624,167 @@ test_tcp_sndbuf_build_at:
     ret
 
 /* ========================================================================
+ * test_tcp_sack_fast_retransmit — SACK-enabled fast rtx skips SACKed segment
+ *
+ * 1. Handshake, enable SACK, send two 5-byte segments
+ * 2. Build ACK frame with SACK block covering first segment
+ * 3. Call tcp_fast_retransmit with that frame
+ * 4. Verify the mock send received a frame with SEQ = SND_UNA + 5
+ *    (second segment), not SND_UNA (first, which is SACKed)
+ * ======================================================================== */
+.global test_tcp_sack_fast_retransmit
+test_tcp_sack_fast_retransmit:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_sfr
+    mov     x19, x0                 /* conn */
+
+    /* Enable SACK */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_SACK_ENABLED]
+
+    /* Set SND_WND large enough */
+    mov     w0, #2000
+    str     w0, [x19, #TCONN_SND_WND]
+
+    /* Save SND_UNA before sends */
+    ldr     w21, [x19, #TCONN_SND_UNA]
+
+    /* Send segment 1: 5 bytes */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sfr
+
+    /* Send segment 2: 5 bytes */
+    mov     x0, x19
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_sfr
+
+    /* Build a fake ACK frame with SACK block covering first segment.
+     * We need: TCP header with ACK=SND_UNA (no advance),
+     * SACK option: [SND_UNA, SND_UNA+5).
+     * Frame layout: ETH(14) + IP(20) + TCP(32) = 66 bytes
+     * TCP options: NOP NOP Kind=5 Len=10 Left(4) Right(4) = 12 bytes
+     * doff = 8 words (32 bytes) */
+
+    /* Start from SYN template (has correct MACs/IPs), patch everything */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+.Lsfr_cp:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lsfr_cp
+
+    ldr     x22, =tcp_test_buf
+
+    /* Flags = ACK */
+    mov     w0, #TCP_ACK_FLAG
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+
+    /* doff = 8 (32-byte TCP header with 12 bytes options) */
+    mov     w0, #0x80
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+
+    /* SEQ = RCV_NXT */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    rev     w0, w0
+    str     w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* ACK = SND_UNA (dup ACK — no advance) */
+    rev     w0, w21
+    str     w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* IP totlen = 52 (20 IP + 32 TCP) = 0x3400 LE */
+    mov     w0, #0x3400
+    strh    w0, [x22, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Options at TCP+20: NOP NOP Kind=5 Len=10 Left Right */
+    mov     w0, #TCP_OPT_NOP
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    mov     w0, #TCP_OPT_SACK
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w0, #10                 /* Len = 2 + 8*1 = 10 */
+    strb    w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+
+    /* SACK Left = SND_UNA (NBO) */
+    rev     w0, w21
+    str     w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 24)]
+
+    /* SACK Right = SND_UNA + 5 (NBO) */
+    add     w0, w21, #5
+    rev     w0, w0
+    str     w0, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + 28)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x22, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x22, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x22, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum (32 byte TCP section) */
+    strh    wzr, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x22
+    mov     w1, #32
+    bl      tcp_checksum
+    mov     w2, w0
+    strh    w2, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Install mock send function to capture the retransmitted frame */
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Call tcp_fast_retransmit(conn, frame, header_len=32) */
+    mov     x0, x19
+    mov     x1, x22
+    mov     w2, #32
+    bl      tcp_fast_retransmit
+
+    /* Mock send should have been called */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbz     w0, .Lfail_tcp_sfr
+
+    /* The retransmitted frame should have SEQ = SND_UNA + 5 (second segment) */
+    ldr     x0, =tcp_test_buf3
+    ldr     w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w0, w0
+    add     w1, w21, #5
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_sfr
+
+    ldr     x0, =name_tcp_sfr
+    bl      test_pass
+    b       .Ldone_tcp_sfr
+.Lfail_tcp_sfr:
+    ldr     x0, =name_tcp_sfr
+    bl      test_fail
+.Ldone_tcp_sfr:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -13288,6 +13450,7 @@ name_tcp_spa:       .asciz "tcp_sack_perm_absent"
 name_tcp_sp1:       .asciz "tcp_sack_parse_1block"
 name_tcp_sfh:       .asciz "tcp_sack_find_hole"
 name_tcp_sba2:      .asciz "tcp_sndbuf_build_at"
+name_tcp_sfr:       .asciz "tcp_sack_fast_retransmit"
 
 tcp_send_payload:
     .ascii  "World"

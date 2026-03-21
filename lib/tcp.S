@@ -614,8 +614,8 @@ tcp_sack_find_hole:
     b       .Lsfh_block_loop
 
 .Lsfh_covered:
-    /* This segment is SACKed, skip to next */
-    add     w0, w0, w5              /* offset += MSS */
+    /* This segment is SACKed, skip past right edge of the covering block */
+    sub     w0, w9, w3              /* offset = block.right - SND_UNA */
     b       .Lsfh_check
 
 .Lsfh_found_hole:
