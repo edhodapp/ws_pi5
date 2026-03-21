@@ -78,6 +78,14 @@ main:
     ldr     x3, =cdc_ecm_send
     bl      tcp_set_send_ctx
 
+    /* Initialize ICMP error subsystem */
+    bl      icmp_init
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =icmp_tx_buf
+    ldr     x3, =cdc_ecm_send
+    bl      icmp_set_send_ctx
+
     /* Start ARP cache refresh (arm timer to resolve gateway MAC on boot) */
     ldr     x0, =DWC2_BASE
     ldr     x1, =ecm_state
@@ -154,6 +162,10 @@ rx_buf:
 .balign 16
 timer_pool:
     .space  TPOOL_DEFAULT_SIZE
+
+.balign 16
+icmp_tx_buf:
+    .space  ICMP_ERROR_FRAME_LEN
 
 .balign 16
 arp_tx_buf:

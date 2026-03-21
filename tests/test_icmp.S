@@ -15,6 +15,12 @@
 .global test_icmp_echo_payload
 .global test_icmp_echo_payload_odd
 .global test_icmp_unknown_type
+.global test_icmp_bad_checksum
+.global test_icmp_send_error
+.global test_icmp_send_loop_suppress
+.global test_icmp_send_no_ctx
+.global test_icmp_rate_allow
+.global test_icmp_rate_deny
 
 .section .text
 
@@ -336,12 +342,19 @@ test_icmp_unknown_type:
     ldrh    w2, [x0, #40]
     strh    w2, [x1, #40]
 
-    /* Overwrite ICMP type to 11 (Time Exceeded) */
+    /* Overwrite ICMP type to 11 (Time Exceeded) and recompute ICMP checksum */
     ldr     x0, =icmp_echo_buf
     mov     w1, #11
     strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+    add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    mov     w1, #8
+    bl      ip_checksum
+    ldr     x1, =icmp_echo_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
 
     /* Call icmp_handle(buf, 42) */
+    ldr     x0, =icmp_echo_buf
     mov     w1, #42
     bl      icmp_handle
 
@@ -358,6 +371,250 @@ test_icmp_unknown_type:
 
 .Ldone_icmp_unk:
     ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_icmp_bad_checksum — echo request with corrupted ICMP checksum → 0
+ * ======================================================================== */
+test_icmp_bad_checksum:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =icmp_echo_template
+    ldr     x1, =icmp_echo_buf
+    ldp     x2, x3, [x0]
+    stp     x2, x3, [x1]
+    ldp     x2, x3, [x0, #16]
+    stp     x2, x3, [x1, #16]
+    ldr     x2, [x0, #32]
+    str     x2, [x1, #32]
+    ldrh    w2, [x0, #40]
+    strh    w2, [x1, #40]
+
+    /* Corrupt ICMP checksum */
+    ldr     x0, =icmp_echo_buf
+    mov     w1, #0xFF
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+
+    mov     w1, #42
+    bl      icmp_handle
+
+    cbnz    w0, .Lfail_icmp_badck
+    ldr     x0, =name_icmp_badck
+    bl      test_pass
+    b       .Ldone_icmp_badck
+.Lfail_icmp_badck:
+    ldr     x0, =name_icmp_badck
+    bl      test_fail
+.Ldone_icmp_badck:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_icmp_send_error — build and send Protocol Unreachable error
+ * ======================================================================== */
+test_icmp_send_error:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    /* Set up send context with fake send function */
+    ldr     x19, =icmp_send_ctx
+    str     xzr, [x19, #ICMPC_DWC2_BASE]
+    str     xzr, [x19, #ICMPC_ECM_STATE]
+    ldr     x0, =icmp_test_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    ldr     x0, =icmp_test_send_count
+    str     wzr, [x0]
+
+    /* Call icmp_send_error with a UDP frame (triggers Protocol Unreachable) */
+    ldr     x0, =icmp_echo_template     /* any valid frame will do */
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PROTO_UNREACH
+    bl      icmp_send_error
+
+    /* Send should have been called once */
+    ldr     x0, =icmp_test_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_icmp_se
+
+    /* Verify tx_buf has correct ICMP type and code */
+    ldr     x0, =icmp_test_tx_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cmp     w1, #ICMP_DEST_UNREACHABLE
+    b.ne    .Lfail_icmp_se
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+    cmp     w1, #ICMP_CODE_PROTO_UNREACH
+    b.ne    .Lfail_icmp_se
+
+    /* Verify IP checksum is valid */
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    cbnz    w0, .Lfail_icmp_se
+
+    /* Verify ICMP checksum is valid (36 bytes) */
+    ldr     x0, =icmp_test_tx_buf
+    add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    mov     w1, #36
+    bl      ip_checksum
+    cbnz    w0, .Lfail_icmp_se
+
+    ldr     x0, =name_icmp_se
+    bl      test_pass
+    b       .Ldone_icmp_se
+.Lfail_icmp_se:
+    ldr     x0, =name_icmp_se
+    bl      test_fail
+.Ldone_icmp_se:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_icmp_send_loop_suppress — no error on ICMP error frame
+ * ======================================================================== */
+test_icmp_send_loop_suppress:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =icmp_test_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    ldr     x0, =icmp_test_send_count
+    str     wzr, [x0]
+
+    /* Feed an ICMP type=3 frame as the "original" — should be suppressed */
+    ldr     x0, =icmp_not_echo_frame
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PROTO_UNREACH
+    bl      icmp_send_error
+
+    /* Send should NOT have been called */
+    ldr     x0, =icmp_test_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_icmp_loop
+    ldr     x0, =name_icmp_loop
+    bl      test_pass
+    b       .Ldone_icmp_loop
+.Lfail_icmp_loop:
+    ldr     x0, =name_icmp_loop
+    bl      test_fail
+.Ldone_icmp_loop:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_icmp_send_no_ctx — NULL send_fn → returns 0 without crash
+ * ======================================================================== */
+test_icmp_send_no_ctx:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      icmp_init
+
+    ldr     x0, =icmp_send_ctx
+    str     xzr, [x0, #ICMPC_SEND_FN]
+    ldr     x1, =icmp_test_tx_buf
+    str     x1, [x0, #ICMPC_TX_BUF]
+
+    ldr     x0, =icmp_echo_template
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PORT_UNREACH
+    bl      icmp_send_error
+
+    /* Should return 0 */
+    cbnz    w0, .Lfail_icmp_noctx
+    ldr     x0, =name_icmp_noctx
+    bl      test_pass
+    b       .Ldone_icmp_noctx
+.Lfail_icmp_noctx:
+    ldr     x0, =name_icmp_noctx
+    bl      test_fail
+.Ldone_icmp_noctx:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_icmp_rate_allow — token bucket allows first call after init
+ * ======================================================================== */
+test_icmp_rate_allow:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      icmp_init
+
+    bl      icmp_err_allow
+    cmp     w0, #1
+    b.ne    .Lfail_icmp_ra
+
+    /* Tokens should be BURST-1 */
+    ldr     x0, =icmp_err_tokens
+    ldr     w0, [x0]
+    cmp     w0, #(ICMP_ERR_BURST - 1)
+    b.ne    .Lfail_icmp_ra
+
+    ldr     x0, =name_icmp_ra
+    bl      test_pass
+    b       .Ldone_icmp_ra
+.Lfail_icmp_ra:
+    ldr     x0, =name_icmp_ra
+    bl      test_fail
+.Ldone_icmp_ra:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_icmp_rate_deny — exhausted tokens → deny
+ * ======================================================================== */
+test_icmp_rate_deny:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      icmp_init
+
+    /* Exhaust all tokens */
+    mov     w19, #ICMP_ERR_BURST
+.Lird_drain:
+    cbz     w19, .Lird_drained
+    bl      icmp_err_allow
+    sub     w19, w19, #1
+    b       .Lird_drain
+.Lird_drained:
+
+    /* Next call should be denied */
+    bl      icmp_err_allow
+    cbnz    w0, .Lfail_icmp_rd
+
+    ldr     x0, =name_icmp_rd
+    bl      test_pass
+    b       .Ldone_icmp_rd
+.Lfail_icmp_rd:
+    ldr     x0, =name_icmp_rd
+    bl      test_fail
+.Ldone_icmp_rd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * Fake ICMP send function — increments counter
+ * ======================================================================== */
+fake_icmp_send:
+    ldr     x9, =icmp_test_send_count
+    ldr     w10, [x9]
+    add     w10, w10, #1
+    str     w10, [x9]
+    mov     w0, #0
     ret
 
 /* ========================================================================
@@ -409,7 +666,7 @@ icmp_not_echo_frame:
     .byte   0x40, 0x01, 0x50, 0x9D
     .byte   0x0A, 0x00, 0x02, 0x02
     .byte   0x0A, 0x00, 0x02, 0x0F
-    .byte   0x03, 0x00, 0x00, 0x00                   /* type=3, code=0 */
+    .byte   0x03, 0x00, 0xFC, 0xFD                   /* type=3, code=0, cksum=0xFDFC */
     .byte   0x00, 0x01, 0x00, 0x01
 
 name_icmp_echo:       .asciz "icmp_echo_reply"
@@ -418,6 +675,12 @@ name_icmp_short:      .asciz "icmp_short"
 name_icmp_payload:    .asciz "icmp_echo_payload"
 name_icmp_payload_odd: .asciz "icmp_echo_payload_odd"
 name_icmp_unknown:    .asciz "icmp_unknown_type"
+name_icmp_badck:      .asciz "icmp_bad_checksum"
+name_icmp_se:         .asciz "icmp_send_error"
+name_icmp_loop:       .asciz "icmp_send_loop_suppress"
+name_icmp_noctx:      .asciz "icmp_send_no_ctx"
+name_icmp_ra:         .asciz "icmp_rate_allow"
+name_icmp_rd:         .asciz "icmp_rate_deny"
 
 /*
  * 74-byte ICMP echo request with 32-byte payload
@@ -483,3 +746,11 @@ icmp_payload_buf:
 .balign 4
 icmp_payload_odd_buf:
     .space  76
+
+.balign 16
+icmp_test_tx_buf:
+    .space  ICMP_ERROR_FRAME_LEN
+
+.balign 4
+icmp_test_send_count:
+    .word   0

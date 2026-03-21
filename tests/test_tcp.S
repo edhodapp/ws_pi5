@@ -190,6 +190,8 @@ test_tcp:
     bl      test_tcp_ts_recent_update
     bl      test_tcp_icmp_err_lport
     bl      test_tcp_icmp_err_rip
+    bl      test_tcp_icmp_err_proto_unreach
+    bl      test_tcp_icmp_err_port_unreach
     bl      test_tcp_tsopt_exhaust
     bl      test_tcp_tsopt_eol
     bl      test_tcp_tsopt_trunc
@@ -8487,6 +8489,88 @@ test_tcp_icmp_err_rip:
     ret
 
 /* ========================================================================
+ * test_tcp_icmp_err_proto_unreach — code=2 on ESTABLISHED → hard close
+ * ======================================================================== */
+.global test_tcp_icmp_err_proto_unreach
+test_tcp_icmp_err_proto_unreach:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_iepu
+    mov     x19, x0
+
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    /* Overwrite ICMP code to 2 (Protocol Unreachable) */
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #ICMP_CODE_PROTO_UNREACH
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* ESTABLISHED + code=2 → hard close (CLOSED) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_iepu
+
+    ldr     x0, =name_tcp_iepu
+    bl      test_pass
+    b       .Ldone_tcp_iepu
+.Lfail_tcp_iepu:
+    ldr     x0, =name_tcp_iepu
+    bl      test_fail
+.Ldone_tcp_iepu:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_icmp_err_port_unreach — code=3 on ESTABLISHED → hard close
+ * ======================================================================== */
+.global test_tcp_icmp_err_port_unreach
+test_tcp_icmp_err_port_unreach:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ieptu
+    mov     x19, x0
+
+    ldr     x0, =tcp_test_buf2
+    ldrh    w1, [x19, #TCONN_LPORT]
+    ldrh    w2, [x19, #TCONN_RPORT]
+    ldr     w3, [x19, #TCONN_RIP]
+    bl      ttcp_build_icmp_err
+
+    /* Overwrite ICMP code to 3 (Port Unreachable) */
+    ldr     x0, =tcp_test_buf2
+    mov     w1, #ICMP_CODE_PORT_UNREACH
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+
+    mov     w1, #70
+    bl      tcp_icmp_err
+
+    /* ESTABLISHED + code=3 → hard close (CLOSED) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cbnz    w0, .Lfail_tcp_ieptu
+
+    ldr     x0, =name_tcp_ieptu
+    bl      test_pass
+    b       .Ldone_tcp_ieptu
+.Lfail_tcp_ieptu:
+    ldr     x0, =name_tcp_ieptu
+    bl      test_fail
+.Ldone_tcp_ieptu:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_tcp_tsopt_exhaust — Options without Kind=8 → not found (loop exhaustion)
  *
  * Build a 66-byte SYN with doff=0x80 (32 bytes TCP header).
@@ -12181,6 +12265,8 @@ name_tcp_tpr:       .asciz "tcp_ts_paws_reject"
 name_tcp_tru:       .asciz "tcp_ts_recent_update"
 name_tcp_ielp:      .asciz "tcp_icmp_err_lport"
 name_tcp_ierip:     .asciz "tcp_icmp_err_rip"
+name_tcp_iepu:      .asciz "tcp_icmp_err_proto_unreach"
+name_tcp_ieptu:     .asciz "tcp_icmp_err_port_unreach"
 name_tcp_tse:       .asciz "tcp_tsopt_exhaust"
 name_tcp_tseol:     .asciz "tcp_tsopt_eol"
 name_tcp_tstr:      .asciz "tcp_tsopt_trunc"

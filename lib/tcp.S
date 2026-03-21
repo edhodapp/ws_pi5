@@ -450,14 +450,25 @@ tcp_icmp_err:
     cmp     w4, w20
     b.ne    .Licmpe_next
 
-    /* Match found — only hard-close SYN_RCVD (RFC 5461: soft error for established) */
+    /* Match found — extract ICMP code to decide hard vs soft error */
+    ldrb    w5, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+
+    /* Codes 2 (Protocol) and 3 (Port Unreachable): hard error for all states */
+    cmp     w5, #ICMP_CODE_PROTO_UNREACH
+    b.eq    .Licmpe_hard_close
+    cmp     w5, #ICMP_CODE_PORT_UNREACH
+    b.eq    .Licmpe_hard_close
+
+    /* All other codes: soft error per RFC 5461 — only hard-close SYN_RCVD */
     ldrb    w4, [x2, #TCONN_STATE]
     cmp     w4, #TCPS_SYN_RCVD
-    b.ne    .Licmpe_done             /* established+ → soft error, ignore */
-    mov     x19, x2                 /* save conn ptr (x2 clobbered by rtx_clear) */
+    b.ne    .Licmpe_done
+
+.Licmpe_hard_close:
+    mov     x19, x2
     mov     x0, x2
     bl      tcp_rtx_clear
-    strb    wzr, [x19, #TCONN_STATE]       /* CLOSED */
+    strb    wzr, [x19, #TCONN_STATE]
     b       .Licmpe_done
 
 .Licmpe_next:

@@ -72,6 +72,29 @@
 .equ ICMP_ECHO_REQUEST, 8
 .equ ICMP_ECHO_REPLY,  0
 .equ ICMP_DEST_UNREACHABLE, 3
+.equ ICMP_REDIRECT,    5
+.equ ICMP_TIME_EXCEEDED, 11
+.equ ICMP_PARAM_PROBLEM, 12
+
+/* ICMP Destination Unreachable codes */
+.equ ICMP_CODE_NET_UNREACH,    0
+.equ ICMP_CODE_HOST_UNREACH,   1
+.equ ICMP_CODE_PROTO_UNREACH,  2
+.equ ICMP_CODE_PORT_UNREACH,   3
+.equ ICMP_CODE_FRAG_NEEDED,    4
+
+/* ICMP error frame: ETH(14) + IP(20) + ICMP(8) + orig_IP(20) + orig_payload(8) */
+.equ ICMP_ERROR_FRAME_LEN,    70
+
+/* ICMP rate limiting */
+.equ ICMP_ERR_BURST,           10
+
+/* ICMP send context struct offsets */
+.equ ICMPC_DWC2_BASE,  0       /* x: DWC2 register base */
+.equ ICMPC_ECM_STATE,  8       /* x: ecm_state pointer */
+.equ ICMPC_TX_BUF,     16      /* x: TX buffer pointer */
+.equ ICMPC_SEND_FN,    24      /* x: cdc_ecm_send function pointer */
+.equ ICMPC_SIZE,       32
 
 /* UDP offsets (relative to IP payload, i.e., ETH_PAYLOAD + IP_HDR_MIN) */
 .equ UDP_SPORT,        0

@@ -128,6 +128,13 @@ udp_handle:
     b.eq    .Ludp_echo
     cmp     w0, #NTP_PORT
     b.eq    .Ludp_ntp
+
+    /* Unknown port → ICMP Port Unreachable (type 3, code 3) */
+    mov     x0, x19
+    mov     w1, w20
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PORT_UNREACH
+    bl      icmp_send_error
     b       .Ludp_drop
 
 .Ludp_ntp:

@@ -136,7 +136,7 @@ ip_handle:
     cmp     w0, #IP_PROTO_UDP
     b.eq    .Lip_udp
     cmp     w0, #IP_PROTO_TCP
-    b.ne    .Lip_drop
+    b.ne    .Lip_proto_unreach
 
     /* TCP → tcp_handle(frame, ETH_HDR_LEN + ip_total_length) */
     mov     x0, x19
@@ -157,6 +157,14 @@ ip_handle:
     add     w1, w21, #ETH_HDR_LEN
     bl      icmp_handle
     b       .Lip_done
+
+.Lip_proto_unreach:
+    /* ICMP Protocol Unreachable (type 3, code 2) */
+    mov     x0, x19
+    mov     w1, w20
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PROTO_UNREACH
+    bl      icmp_send_error
 
 .Lip_drop:
     mov     w0, #0
