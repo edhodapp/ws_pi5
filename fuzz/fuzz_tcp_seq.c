@@ -52,7 +52,7 @@ unsigned long timer_freq(void) { return 1; }
 /* Connection state constants (must match tcp.inc) */
 #define TCPS_ESTABLISHED 3
 #define TCPS_CLOSE_WAIT  4
-#define TCONN_SIZE       128
+#define TCONN_SIZE       256
 
 static char timer_pool[520] __attribute__((aligned(8)));
 
@@ -88,7 +88,7 @@ int main(void)
         if (flen == 0) {
             /* Close sentinel: trigger tcp_close on first eligible conn */
             unsigned char fin_buf[ETH_FRAME_MAX];
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 128; i++) {
                 unsigned char state = tcp_conn_table[i * TCONN_SIZE];
                 if (state == TCPS_ESTABLISHED || state == TCPS_CLOSE_WAIT) {
                     tcp_close(&tcp_conn_table[i * TCONN_SIZE], fin_buf);

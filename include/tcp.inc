@@ -102,13 +102,13 @@
 .equ TCONN_SHIFT,      8       /* log2(TCONN_SIZE) */
 
 /* Connection table */
-.equ TCP_MAX_CONNS,    16
-.equ TCP_CONN_TABLE_SIZE, 4096 /* 16 * 256 */
+.equ TCP_MAX_CONNS,    128
+.equ TCP_CONN_TABLE_SIZE, 32768 /* 128 * 256 */
 
 /* Receive buffer pool */
 .equ TCP_RXBUF_SIZE,      2048   /* bytes per connection, power of 2 */
 .equ TCP_RXBUF_SHIFT,     11     /* log2(2048) */
-.equ TCP_RXBUF_POOL_SIZE, 32768  /* 16 * 2048 */
+.equ TCP_RXBUF_POOL_SIZE, 262144 /* 128 * 2048 */
 
 /* FSA event codes (priority: RST > SYN > FIN > ACK) */
 .equ TCP_EVT_RST,      0
@@ -123,7 +123,7 @@
 .equ TCP_MAX_RETRIES,      8       /* max retransmit attempts before RST+close */
 .equ TCP_RTO_SHIFT_CAP,    5       /* max shift for backoff: 1<<5 = 32 seconds */
 .equ TCP_RTXBUF_SHIFT,     11      /* log2(2048) — retransmit buffer per conn */
-.equ TCP_RTXBUF_POOL_SIZE, 32768   /* 16 × 2048 (same layout as rxbuf_pool) */
+.equ TCP_RTXBUF_POOL_SIZE, 262144  /* 128 × 2048 */
 
 /* TCP send context struct (for retransmit callback) */
 .equ TSCTX_DWC2_BASE,  0       /* u64 */

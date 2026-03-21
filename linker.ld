@@ -24,5 +24,6 @@ SECTIONS
         __bss_end = .;
     }
 
-    _stack_top = 0x100000;
+    /* Stack above BSS — grows downward from here (64 KB stack space) */
+    _stack_top = ALIGN(__bss_end, 16) + 0x10000;
 }

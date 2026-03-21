@@ -911,9 +911,9 @@ test_tcp_init_test:
     cmp     w1, w2
     b.ne    .Lfail_tcp_init
 
-    /* Slots 1-15: all state = CLOSED (0) */
+    /* Slots 1-(MAX_CONNS-1): all state = CLOSED (0) */
     add     x0, x0, #TCONN_SIZE    /* point to slot 1 */
-    mov     w3, #15
+    mov     w3, #(TCP_MAX_CONNS - 1)
 .Ltcp_init_check:
     ldrb    w1, [x0, #TCONN_STATE]
     cbnz    w1, .Lfail_tcp_init
@@ -1471,11 +1471,11 @@ test_tcp_table_full:
     mov     w0, #80
     bl      tcp_listen
 
-    /* Fill slots 1-15 with state=ESTABLISHED (non-evictable) */
+    /* Fill slots 1-(MAX_CONNS-1) with state=ESTABLISHED (non-evictable) */
     ldr     x0, =tcp_conn_table
     add     x0, x0, #TCONN_SIZE    /* skip slot 0 (LISTEN) */
     mov     w2, #TCPS_ESTABLISHED
-    mov     w3, #15
+    mov     w3, #(TCP_MAX_CONNS - 1)
 .Ltfull_fill:
     strb    w2, [x0, #TCONN_STATE]
     add     x0, x0, #TCONN_SIZE
@@ -7514,7 +7514,7 @@ test_tcp_listen_full:
 
     bl      tcp_init
 
-    /* Fill all 16 slots with LISTEN on ports 1..16 */
+    /* Fill all 128 slots with LISTEN on ports 1..128 */
     mov     w19, #1
 .Ltlf_fill:
     mov     w0, w19
@@ -7522,7 +7522,7 @@ test_tcp_listen_full:
     cmn     w0, #1
     b.eq    .Lfail_tcp_lf           /* shouldn't fail yet */
     add     w19, w19, #1
-    cmp     w19, #17
+    cmp     w19, #(TCP_MAX_CONNS + 1)
     b.lt    .Ltlf_fill
 
     /* Now table is full — next listen should return -1 */
@@ -9444,11 +9444,11 @@ test_tcp_syn_evict:
     mov     w0, #80
     bl      tcp_listen
 
-    /* Fill slots 1-15 with state=SYN_RCVD (evictable) */
+    /* Fill slots 1-(MAX_CONNS-1) with state=SYN_RCVD (evictable) */
     ldr     x0, =tcp_conn_table
     add     x0, x0, #TCONN_SIZE    /* skip slot 0 (LISTEN) */
     mov     w2, #TCPS_SYN_RCVD
-    mov     w3, #15
+    mov     w3, #(TCP_MAX_CONNS - 1)
 .Lsevict_fill:
     strb    w2, [x0, #TCONN_STATE]
     add     x0, x0, #TCONN_SIZE
