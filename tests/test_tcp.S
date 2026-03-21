@@ -55,7 +55,7 @@ test_tcp:
     /* Zero connection table so Phase 1 tests see all-CLOSED
      * (main() may have called tcp_init earlier in test_boot_main) */
     ldr     x0, =tcp_conn_table
-    mov     w1, #64
+    mov     w1, #128
 .Lttcp_zero_table:
     stp     xzr, xzr, [x0], #16
     subs    w1, w1, #1
@@ -6074,7 +6074,7 @@ test_tcp_rtx_save_on_send:
     /* Verify first byte of rtxbuf matches send_test_buf */
     ldr     x0, =tcp_conn_table
     sub     x0, x21, x0
-    lsr     x0, x0, #6             /* slot index */
+    lsr     x0, x0, #7             /* slot index */
     ldr     x1, =tcp_rtxbuf_pool
     add     x1, x1, x0, lsl #TCP_RXBUF_SHIFT
     ldrb    w2, [x1]
@@ -7252,7 +7252,7 @@ test_tcp_listen_multi:
 
     /* Verify port 8080 slot: state=LISTEN, lport=0x901F (8080 NBO) */
     ldr     x0, =tcp_conn_table
-    add     x0, x0, x20, lsl #6    /* slot * 64 */
+    add     x0, x0, x20, lsl #7    /* slot * 128 */
     ldrb    w1, [x0, #TCONN_STATE]
     cmp     w1, #TCPS_LISTEN
     b.ne    .Lfail_tcp_lm

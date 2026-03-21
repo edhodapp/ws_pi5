@@ -50,7 +50,7 @@ unsigned long timer_freq(void) { return 1; }
 /* Connection state constants (must match tcp.inc) */
 #define TCPS_ESTABLISHED 3
 #define TCPS_CLOSE_WAIT  4
-#define TCONN_SIZE       64
+#define TCONN_SIZE       128
 
 static char timer_pool[520] __attribute__((aligned(8)));
 

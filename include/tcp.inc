@@ -47,7 +47,7 @@
 .equ TCP_FIN_ACK,      0x11    /* FIN + ACK */
 .equ TCP_PSH_ACK,      0x18    /* PSH + ACK */
 
-/* Connection struct (64 bytes, Phase 2+) */
+/* Connection struct (128 bytes, Phase 2+) */
 .equ TCONN_STATE,      0       /* u8  */
 .equ TCONN_PAD1,       1
 .equ TCONN_LPORT,      2       /* u16 — network byte order */
@@ -68,11 +68,18 @@
 .equ TCONN_RTXCOUNT,   58      /* u8  — retry count (incremented each timeout) */
 .equ TCONN_TS_ENABLED, 59      /* u8  — 0=disabled, 1=enabled (negotiated from SYN) */
 .equ TCONN_TS_RECENT,  60      /* u32 — last received TSval from peer (host order) */
-.equ TCONN_SIZE,       64      /* power of 2 → lsl #6 for indexing */
+.equ TCONN_PEER_MSS,   64      /* u16 — peer's advertised MSS (host order, default 536) */
+.equ TCONN_CWND,       66      /* u16 — congestion window (bytes) */
+.equ TCONN_SSTHRESH,   68      /* u16 — slow-start threshold */
+.equ TCONN_DUP_ACK_CNT, 70    /* u8  — duplicate ACK counter */
+.equ TCONN_OOO_COUNT,  71      /* u8  — number of OOO slots in use (0-4) */
+.equ TCONN_OOO_SLOTS,  72      /* 32 bytes — 4 × {SEQ u32, LEN u16, PAD u16} */
+/* 104-127: reserved for future use */
+.equ TCONN_SIZE,       128     /* power of 2 → lsl #7 for indexing */
 
 /* Connection table */
 .equ TCP_MAX_CONNS,    16
-.equ TCP_CONN_TABLE_SIZE, 1024 /* 16 * 64 */
+.equ TCP_CONN_TABLE_SIZE, 2048 /* 16 * 128 */
 
 /* Receive buffer pool */
 .equ TCP_RXBUF_SIZE,      2048   /* bytes per connection, power of 2 */
@@ -108,3 +115,9 @@
 .equ TCP_TSOPT_SIZE,       12      /* NOP NOP Kind Len TSval(4) TSecr(4) */
 .equ TCP_TS_FRAME_LEN,    66      /* ETH(14) + IP(20) + TCP(32) */
 .equ TCP_ISN_SECRET_SIZE,  8
+
+/* MSS option constants */
+.equ TCP_OPT_MSS,        2
+.equ TCP_OPT_MSS_LEN,    4
+.equ TCP_DEFAULT_MSS,     536   /* RFC 1122 */
+.equ TCP_OUR_MSS,         1460  /* ETH_MTU(1500) - IP(20) - TCP(20) */

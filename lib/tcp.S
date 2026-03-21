@@ -108,9 +108,9 @@ tcp_checksum:
  * Clobbers: x0-x2
  */
 tcp_init:
-    /* Zero all 1024 bytes (64 iterations of 16 bytes) */
+    /* Zero all 2048 bytes (128 iterations of 16 bytes) */
     ldr     x0, =tcp_conn_table
-    mov     w1, #64
+    mov     w1, #128
 .Ltcp_init_zero:
     stp     xzr, xzr, [x0], #16
     subs    w1, w1, #1
@@ -154,10 +154,10 @@ tcp_listen:
     strb    w0, [x1, #TCONN_STATE]
     strh    w2, [x1, #TCONN_LPORT]
 
-    /* Return slot index: (addr - table_base) >> 6 */
+    /* Return slot index: (addr - table_base) >> 7 */
     ldr     x0, =tcp_conn_table
     sub     x0, x1, x0
-    lsr     w0, w0, #6
+    lsr     w0, w0, #7
     ret
 
 .Ltl_full:
@@ -206,10 +206,10 @@ tcp_rtx_save:
     mov     x20, x1                 /* frame src */
     mov     w21, w2                 /* frame_len */
 
-    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x3, =tcp_conn_table
     sub     x3, x19, x3
-    lsr     x3, x3, #6
+    lsr     x3, x3, #7
 
     /* Dest = tcp_rtxbuf_pool + (slot << TCP_RXBUF_SHIFT) */
     ldr     x4, =tcp_rtxbuf_pool
@@ -430,10 +430,10 @@ tcp_retransmit_cb:
     ldr     x1, [x20, #TSCTX_SEND_FN]
     cbz     x1, .Lrtxcb_done       /* send_fn not set up → return */
 
-    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #6
+    lsr     x2, x2, #7
 
     /* Copy rtxbuf → tx_buf (RTXLEN bytes) */
     ldr     x3, =tcp_rtxbuf_pool
@@ -914,6 +914,15 @@ tcp_listen_syn_handler:
     mov     w0, #-1
     str     w0, [x21, #TCONN_TIMER_SLOT]
 
+    /* Initialize MSS/congestion/OOO fields */
+    mov     w0, #TCP_DEFAULT_MSS        /* RFC 1122 default MSS = 536 */
+    strh    w0, [x21, #TCONN_PEER_MSS]
+    strh    w0, [x21, #TCONN_CWND]      /* initial cwnd = 1 MSS */
+    mov     w0, #0xFFFF
+    strh    w0, [x21, #TCONN_SSTHRESH]  /* initial ssthresh = max */
+    strb    wzr, [x21, #TCONN_DUP_ACK_CNT]
+    strb    wzr, [x21, #TCONN_OOO_COUNT]
+
     ldrh    w0, [x20, #TCONN_LPORT]
     strh    w0, [x21, #TCONN_LPORT]
 
@@ -1124,10 +1133,10 @@ tcp_estab_ack_handler:
 
     /* Accept data: copy to rx buffer */
 
-    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #6             /* slot index */
+    lsr     x2, x2, #7             /* slot index */
 
     /* Dest = tcp_rxbuf_pool + (slot << 11) + rxlen */
     ldr     x0, =tcp_rxbuf_pool
@@ -1583,10 +1592,10 @@ tcp_send:
  * Leaf function, clobbers x0-x3
  */
 tcp_rx_peek:
-    /* Compute slot index: (conn - tcp_conn_table) >> 6 */
+    /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x1, =tcp_conn_table
     sub     x1, x0, x1
-    lsr     x1, x1, #6             /* slot index */
+    lsr     x1, x1, #7             /* slot index */
 
     /* Buffer = tcp_rxbuf_pool + (slot << 11) */
     ldr     x2, =tcp_rxbuf_pool
