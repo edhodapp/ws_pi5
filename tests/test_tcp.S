@@ -233,7 +233,12 @@ test_tcp:
     bl      test_tcp_persist_arm_with_pool
     bl      test_tcp_df_bit
     bl      test_tcp_fin_with_data
+    bl      test_tcp_fin_data_bad_seq
+    bl      test_tcp_fin_data_overflow
     bl      test_tcp_timewait_fin_reack
+    bl      test_tcp_tw_fin_no_timer
+    bl      test_tcp_tw_fin_no_pool
+    bl      test_tcp_tw_fin_arm_no_pool
     ldp     x29, x30, [sp], #16
     ret
 
@@ -11139,6 +11144,443 @@ test_tcp_timewait_fin_reack:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #64
     ret
+
+/* ========================================================================
+ * test_tcp_fin_data_bad_seq — FIN+data with wrong SEQ → data skipped, FIN ok
+ *
+ * Branch: tcp_estab_fin_handler line 1538 (b.ne .Lefin_no_data)
+ * Exercises: SEQ != RCV_NXT taken path
+ * ======================================================================== */
+test_tcp_fin_data_bad_seq:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_fdbs
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Build FIN+ACK with 5 bytes of data but BAD SEQ (99 instead of 2) */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x19, =tcp_test_buf
+
+    /* Fix ACK to ISN+1 */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Set SEQ to 99 (wrong — RCV_NXT is 2) */
+    mov     w0, #99
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* Append 5 bytes of payload */
+    mov     w0, #'H'
+    strb    w0, [x19, #54]
+    mov     w0, #'e'
+    strb    w0, [x19, #55]
+    mov     w0, #'l'
+    strb    w0, [x19, #56]
+    mov     w0, #'l'
+    strb    w0, [x19, #57]
+    mov     w0, #'o'
+    strb    w0, [x19, #58]
+
+    /* Update IP TotalLength: 40 + 5 = 45 → 0x002D NBO → 0x2D00 LE */
+    mov     w0, #0x2D00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum over 25 bytes (20 hdr + 5 data) */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle with frame_len=59 */
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Verify reply generated (ACK for FIN) */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_fdbs
+
+    /* Verify state = CLOSE_WAIT (FIN was still processed) */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_fdbs
+
+    /* Verify RXLEN = 0 (data was NOT accepted — bad SEQ) */
+    ldrh    w0, [x21, #TCONN_RXLEN]
+    cbnz    w0, .Lfail_tcp_fdbs
+
+    /* Verify RCV_NXT = 2 + 1(FIN only) = 3 (no data advance) */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, #3
+    b.ne    .Lfail_tcp_fdbs
+
+    ldr     x0, =name_tcp_fdbs
+    bl      test_pass
+    b       .Ldone_tcp_fdbs
+.Lfail_tcp_fdbs:
+    ldr     x0, =name_tcp_fdbs
+    bl      test_fail
+.Ldone_tcp_fdbs:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_fin_data_overflow — FIN+data when rxbuf nearly full → skip data
+ *
+ * Branch: tcp_estab_fin_handler line 1544 (b.hi .Lefin_no_data)
+ * Exercises: rxlen + data_len > TCP_RXBUF_SIZE taken path
+ * ======================================================================== */
+test_tcp_fin_data_overflow:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_fdov
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Pre-fill RXLEN to TCP_RXBUF_SIZE - 2 (only 2 bytes of room, 5 won't fit) */
+    mov     w0, #(TCP_RXBUF_SIZE - 2)
+    strh    w0, [x21, #TCONN_RXLEN]
+
+    /* Build FIN+ACK with 5 bytes data, correct SEQ=2 */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x19, =tcp_test_buf
+
+    /* Fix ACK to ISN+1 */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Append 5 bytes of payload */
+    mov     w0, #'H'
+    strb    w0, [x19, #54]
+    mov     w0, #'e'
+    strb    w0, [x19, #55]
+    mov     w0, #'l'
+    strb    w0, [x19, #56]
+    mov     w0, #'l'
+    strb    w0, [x19, #57]
+    mov     w0, #'o'
+    strb    w0, [x19, #58]
+
+    /* Update IP TotalLength: 45 */
+    mov     w0, #0x2D00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle */
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Verify reply generated */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_fdov
+
+    /* Verify CLOSE_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_fdov
+
+    /* Verify RXLEN unchanged (still TCP_RXBUF_SIZE - 2, data NOT accepted) */
+    ldrh    w0, [x21, #TCONN_RXLEN]
+    cmp     w0, #(TCP_RXBUF_SIZE - 2)
+    b.ne    .Lfail_tcp_fdov
+
+    /* Verify RCV_NXT = 2 + 1(FIN only) = 3 */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, #3
+    b.ne    .Lfail_tcp_fdov
+
+    ldr     x0, =name_tcp_fdov
+    bl      test_pass
+    b       .Ldone_tcp_fdov
+.Lfail_tcp_fdov:
+    ldr     x0, =name_tcp_fdov
+    bl      test_fail
+.Ldone_tcp_fdov:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_tw_fin_no_timer — TIME_WAIT+FIN with TIMER_SLOT=-1 → skip cancel
+ *
+ * Branch: tcp_timewait_fin_handler line 2772 (b.eq .Ltwfin_arm)
+ * Exercises: TIMER_SLOT == -1 taken path (skips timer_cancel)
+ * ======================================================================== */
+test_tcp_tw_fin_no_timer:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twnt
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Force TIME_WAIT with TIMER_SLOT = -1 (no active timer) */
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+    mov     w0, #3
+    str     w0, [x21, #TCONN_RCV_NXT]
+    mov     w0, #-1
+    str     w0, [x21, #TCONN_TIMER_SLOT]
+
+    /* Send FIN+ACK */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ACK reply generated */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_twnt
+
+    /* Verify still TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_twnt
+
+    /* Verify ACK flag in reply */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_ACK_FLAG
+    b.ne    .Lfail_tcp_twnt
+
+    ldr     x0, =name_tcp_twnt
+    bl      test_pass
+    b       .Ldone_tcp_twnt
+.Lfail_tcp_twnt:
+    ldr     x0, =name_tcp_twnt
+    bl      test_fail
+.Ldone_tcp_twnt:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_tw_fin_no_pool — TIME_WAIT+FIN with pool=NULL → ACK but no timers
+ *
+ * Branches: tcp_timewait_fin_handler lines 2776, 2782 (cbz x0, .Ltwfin_done)
+ * Exercises: pool==NULL taken path on both cancel and arm
+ * ======================================================================== */
+test_tcp_tw_fin_no_pool:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twnp
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Force TIME_WAIT */
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+    mov     w0, #3
+    str     w0, [x21, #TCONN_RCV_NXT]
+    /* TIMER_SLOT = 0 (not -1) so cancel path is entered */
+    str     wzr, [x21, #TCONN_TIMER_SLOT]
+
+    /* Save current timer pool ptr and set to NULL */
+    ldr     x23, =tcp_timer_pool_ptr
+    ldr     x24, [x23]              /* save old pool ptr */
+    str     xzr, [x23]              /* pool = NULL */
+
+    /* Send FIN+ACK */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    mov     w20, w0                 /* save return value */
+
+    /* Restore timer pool ptr before any assertions */
+    str     x24, [x23]
+
+    /* Verify ACK reply generated */
+    cmp     w20, #54
+    b.lt    .Lfail_tcp_twnp
+
+    /* Verify still TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_twnp
+
+    /* Verify ACK flag in reply */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_ACK_FLAG
+    b.ne    .Lfail_tcp_twnp
+
+    ldr     x0, =name_tcp_twnp
+    bl      test_pass
+    b       .Ldone_tcp_twnp
+.Lfail_tcp_twnp:
+    /* Restore pool ptr on failure path too */
+    str     x24, [x23]
+    ldr     x0, =name_tcp_twnp
+    bl      test_fail
+.Ldone_tcp_twnp:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_tw_fin_arm_no_pool — TIME_WAIT+FIN, TIMER_SLOT=-1 + pool=NULL
+ *
+ * Branch: tcp_timewait_fin_handler line 2782 (cbz x0, .Ltwfin_done)
+ * Exercises: arm-path pool==NULL taken (skips timer_set)
+ * Also exercises: TIMER_SLOT==-1 taken (line 2772)
+ * ======================================================================== */
+test_tcp_tw_fin_arm_no_pool:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twap
+    mov     x21, x0
+    mov     w22, w1
+
+    /* Force TIME_WAIT, TIMER_SLOT=-1, pool=NULL */
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+    mov     w0, #3
+    str     w0, [x21, #TCONN_RCV_NXT]
+    mov     w0, #-1
+    str     w0, [x21, #TCONN_TIMER_SLOT]
+
+    ldr     x23, =tcp_timer_pool_ptr
+    ldr     x24, [x23]
+    str     xzr, [x23]
+
+    /* Send FIN+ACK */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+    mov     w20, w0
+
+    /* Restore pool */
+    str     x24, [x23]
+
+    /* Verify ACK reply */
+    cmp     w20, #54
+    b.lt    .Lfail_tcp_twap
+
+    /* Verify still TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_twap
+
+    ldr     x0, =name_tcp_twap
+    bl      test_pass
+    b       .Ldone_tcp_twap
+.Lfail_tcp_twap:
+    str     x24, [x23]
+    ldr     x0, =name_tcp_twap
+    bl      test_fail
+.Ldone_tcp_twap:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
     .ltorg
 
 /* ========================================================================
@@ -11782,7 +12224,12 @@ name_tcp_pcsc:      .asciz "tcp_persist_cb_shift_cap"
 name_tcp_pawp:      .asciz "tcp_persist_arm_with_pool"
 name_tcp_df:        .asciz "tcp_df_bit"
 name_tcp_fwd:       .asciz "tcp_fin_with_data"
+name_tcp_fdbs:      .asciz "tcp_fin_data_bad_seq"
+name_tcp_fdov:      .asciz "tcp_fin_data_overflow"
 name_tcp_twfr:      .asciz "tcp_timewait_fin_reack"
+name_tcp_twnt:      .asciz "tcp_tw_fin_no_timer"
+name_tcp_twnp:      .asciz "tcp_tw_fin_no_pool"
+name_tcp_twap:      .asciz "tcp_tw_fin_arm_no_pool"
 
 tcp_send_payload:
     .ascii  "World"

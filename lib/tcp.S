@@ -46,6 +46,7 @@
 .global tcp_persist_arm
 .global tcp_persist_cb
 .global tcp_timewait_fin_handler
+.global tcp_timer_pool_ptr
 
 .section .text
 
