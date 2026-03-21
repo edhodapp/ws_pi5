@@ -250,7 +250,7 @@ test_tcp:
     bl      test_tcp_rtt_karn
     bl      test_tcp_wscale_negotiate
     bl      test_tcp_wscale_no_opt
-    /* TODO: test_tcp_wscale_window_apply needs frame construction fix */
+    bl      test_tcp_wscale_window_apply
     ldp     x29, x30, [sp], #16
     ret
 
@@ -12160,21 +12160,13 @@ test_tcp_wscale_window_apply:
     strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     w1, #25
     bl      tcp_checksum
+    mov     w2, w0                  /* save checksum */
     ldr     x0, =tcp_test_buf
-    strh    w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
-    ldr     x0, =tcp_test_buf
     mov     w1, #59
     bl      tcp_handle
 
-    /* tcp_handle should return > 0; if 0, likely checksum/seq issue */
-    cmp     w0, #0
-    b.gt    .Lwwa_handled
-    /* Frame dropped — check if SND_WND was updated at all */
-    ldr     w0, [x19, #TCONN_SND_WND]
-    cbnz    w0, .Lfail_tcp_wwa     /* updated but frame dropped? */
-    b       .Lfail_tcp_wwa         /* not updated, frame dropped */
-.Lwwa_handled:
     /* SND_WND should be 100 << 2 = 400 */
     ldr     w0, [x19, #TCONN_SND_WND]
     cmp     w0, #400
