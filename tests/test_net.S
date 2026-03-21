@@ -6,6 +6,7 @@
  *   2. test_net_recv_icmp    — ICMP echo request for us → returns 42
  *   3. test_net_recv_unknown — EtherType=0x86DD (IPv6) → returns 0
  *   4. test_net_recv_short   — 13-byte frame → returns 0
+ *   5. test_net_recv_wrong_mac — dst MAC not ours/broadcast → returns 0
  */
 
 .include "net.inc"
@@ -14,6 +15,7 @@
 .global test_net_recv_icmp
 .global test_net_recv_unknown
 .global test_net_recv_short
+.global test_net_recv_wrong_mac
 
 .section .text
 
@@ -142,6 +144,30 @@ test_net_recv_short:
     ret
 
 /* ========================================================================
+ * test_net_recv_wrong_mac — frame addressed to another host → returns 0
+ * ======================================================================== */
+test_net_recv_wrong_mac:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =net_wrong_mac_frame
+    mov     w1, #ETH_HDR_LEN
+    bl      net_recv_one
+
+    cbnz    w0, .Lfail_net_wrong_mac
+
+    ldr     x0, =name_net_wrong_mac
+    bl      test_pass
+    b       .Ldone_net_wrong_mac
+
+.Lfail_net_wrong_mac:
+    ldr     x0, =name_net_wrong_mac
+    bl      test_fail
+
+.Ldone_net_wrong_mac:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -210,10 +236,18 @@ net_short_frame:
     .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
     .byte   0x08
 
+/* 14-byte frame with wrong destination MAC — neither ours nor broadcast */
+.balign 4
+net_wrong_mac_frame:
+    .byte   0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00     /* dst: some other host */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+
 name_net_arp:       .asciz "net_recv_arp"
 name_net_icmp:      .asciz "net_recv_icmp"
 name_net_unknown:   .asciz "net_recv_unknown"
 name_net_short:     .asciz "net_recv_short"
+name_net_wrong_mac: .asciz "net_recv_wrong_mac"
 
 .section .data
 /* Mutable buffers for in-place handler tests */

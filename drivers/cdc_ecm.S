@@ -158,6 +158,10 @@ cdc_ecm_send:
 /*
  * cdc_ecm_recv - Receive an Ethernet frame via bulk IN
  *
+ * CDC-ECM delivers frames WITHOUT the 4-byte Ethernet FCS — the USB
+ * transport provides its own integrity checks, so CRC is stripped by
+ * the device.  Actual frame length is determined from HCTSIZ residual.
+ *
  * x0: DWC2 base address
  * x1: pointer to ECM state struct
  * x2: pointer to receive buffer
@@ -165,6 +169,7 @@ cdc_ecm_send:
  *
  * Returns:
  *   w0: 0 on success, 1 on failure
+ *   w1: actual bytes received (valid only on success)
  */
 cdc_ecm_recv:
     mov     x9, x1                  /* save ecm_state */

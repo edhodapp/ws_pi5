@@ -74,6 +74,8 @@ _start:
     bl      test_eth_type_short
     bl      test_eth_build_hdr
     bl      test_eth_mac_eq
+    bl      test_eth_type_long
+    bl      test_eth_type_802_3
     bl      test_arp_request_for_us
     bl      test_arp_request_other_ip
     bl      test_arp_reply_ignored
@@ -98,6 +100,7 @@ _start:
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown
     bl      test_net_recv_short
+    bl      test_net_recv_wrong_mac
     bl      test_udp
     bl      test_timer
     bl      test_ntp

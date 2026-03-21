@@ -60,12 +60,13 @@ main:
 
     /* Initialize TCP connection table */
     bl      tcp_init
-    mov     w0, #80
-    bl      tcp_listen
 
-    /* Give TCP a handle to the timer pool */
+    /* Give TCP a handle to the timer pool — must precede tcp_listen */
     ldr     x0, =timer_pool
     bl      tcp_set_timer_pool
+
+    mov     w0, #80
+    bl      tcp_listen
 
     /* Start idle connection reaper */
     bl      tcp_start_reaper
@@ -115,8 +116,8 @@ net_loop:
     bl      cdc_ecm_recv
     cbnz    w0, net_loop            /* recv failed → retry */
 
+    /* w1 = actual frame length from cdc_ecm_recv */
     ldr     x0, =rx_buf
-    mov     w1, #ETH_FRAME_MAX
     bl      net_recv_one
     cbz     w0, .Lnet_timers        /* no reply → check timers → loop */
 

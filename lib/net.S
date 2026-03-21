@@ -25,7 +25,25 @@ net_recv_one:
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = frame_len */
 
-    /* Get EtherType (returns -1 if too short) */
+    /* Need at least ETH_HDR_LEN to read destination MAC */
+    cmp     w20, #ETH_HDR_LEN
+    b.lt    .Lnr_drop
+
+    /* Filter: destination MAC must be ours or broadcast */
+    /* x0 = frame pointer (ETH_DST at offset 0) */
+    ldr     x1, =net_our_mac
+    bl      eth_mac_eq
+    cbnz    w0, .Lnr_mac_ok
+
+    mov     x0, x19
+    ldr     x1, =net_broadcast_mac
+    bl      eth_mac_eq
+    cbz     w0, .Lnr_drop
+
+.Lnr_mac_ok:
+    /* Get EtherType (returns -1 if invalid) */
+    mov     x0, x19
+    mov     w1, w20
     bl      eth_type
     /* w0 = EtherType or -1 */
 
@@ -35,7 +53,7 @@ net_recv_one:
     cmp     w0, #ETHERTYPE_IPV4
     b.eq    .Lnr_ipv4
 
-    /* Unknown EtherType or short frame → drop */
+.Lnr_drop:
     mov     w0, #0
     b       .Lnr_done
 

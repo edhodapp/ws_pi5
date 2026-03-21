@@ -18,6 +18,7 @@
  *
  * Returns:
  *   w0: 0 on success, 1 on failure
+ *   w1: actual bytes transferred (valid only on success)
  */
 usb_bulk_xfer:
     stp     x29, x30, [sp, #-80]!
@@ -75,6 +76,10 @@ usb_bulk_xfer:
     eor     w9, w9, #0x40000000
     str     w9, [x25]
 .Lbulk_ok:
+    /* Compute actual bytes transferred: original_len - HCTSIZ remaining */
+    ldr     w1, [x19, #HC_TSIZ]
+    and     w1, w1, #0x7FFFF       /* bits [18:0] = remaining byte count */
+    sub     w1, w24, w1             /* w1 = actual bytes transferred */
     mov     w0, #0
     b       .Lbulk_done
 

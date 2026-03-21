@@ -30,6 +30,9 @@ fake_ecmd_xfer:
     ldr     x9, =ecmd_saved_hctsiz
     str     w2, [x9]
 
+    /* Write HCTSIZ=0 to channel register so usb_bulk_xfer reads remaining=0 */
+    str     wzr, [x0, #HC_TSIZ]
+
     ldr     x9, =ecmd_call_count
     ldr     w10, [x9]
     add     w10, w10, #1

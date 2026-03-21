@@ -27,6 +27,9 @@ fake_bulk_save_xfer:
     ldr     x9, =bulk_saved_hctsiz
     str     w2, [x9]
 
+    /* Write HCTSIZ=0 to channel register so usb_bulk_xfer reads remaining=0 */
+    str     wzr, [x0, #HC_TSIZ]
+
     ldr     x9, =bulk_fake_fail
     ldr     w9, [x9]
     cbnz    w9, .Lbfake_fail

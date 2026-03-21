@@ -17,19 +17,26 @@
  *
  * x0: frame buffer pointer
  * w1: frame length
- * Returns: w0 = EtherType (host order), or -1 if len < 14
+ * Returns: w0 = EtherType (host order), or -1 if invalid
+ *          Invalid: len < 14, len > 1514, or EtherType < 0x0600 (802.3 length)
  * Clobbers: x0, x1
  */
 eth_type:
     cmp     w1, #ETH_HDR_LEN
-    b.lt    .Ltype_short
+    b.lt    .Ltype_bad
+    cmp     w1, #ETH_FRAME_MAX
+    b.gt    .Ltype_bad
 
     ldrh    w0, [x0, #ETH_TYPE]     /* big-endian on wire */
     rev16   w0, w0                  /* byte-swap to host order */
     uxth    w0, w0                  /* zero-extend to 32 bits */
+
+    /* Values < 0x0600 are IEEE 802.3 length fields, not EtherType */
+    cmp     w0, #0x0600
+    b.lo    .Ltype_bad
     ret
 
-.Ltype_short:
+.Ltype_bad:
     mov     w0, #-1
     ret
 

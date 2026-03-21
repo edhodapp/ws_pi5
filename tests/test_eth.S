@@ -6,6 +6,8 @@
  *   2. test_eth_type_short   — 13-byte frame → returns -1
  *   3. test_eth_build_hdr    — dst MAC, src MAC, EtherType all correct
  *   4. test_eth_mac_eq       — same MACs → 1, different → 0
+ *   5. test_eth_type_long    — frame > ETH_FRAME_MAX → returns -1
+ *   6. test_eth_type_802_3   — EtherType < 0x0600 (802.3 length) → returns -1
  */
 
 .include "net.inc"
@@ -14,6 +16,8 @@
 .global test_eth_type_short
 .global test_eth_build_hdr
 .global test_eth_mac_eq
+.global test_eth_type_long
+.global test_eth_type_802_3
 
 .section .text
 
@@ -154,6 +158,56 @@ test_eth_mac_eq:
     ret
 
 /* ========================================================================
+ * test_eth_type_long — frame length 1515 → returns -1
+ * ======================================================================== */
+test_eth_type_long:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =fake_arp_frame
+    mov     w1, #(ETH_FRAME_MAX + 1)
+    bl      eth_type
+
+    cmn     w0, #1
+    b.ne    .Lfail_type_long
+
+    ldr     x0, =name_type_long
+    bl      test_pass
+    b       .Ldone_type_long
+
+.Lfail_type_long:
+    ldr     x0, =name_type_long
+    bl      test_fail
+
+.Ldone_type_long:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_eth_type_802_3 — EtherType=0x05DC (1500, 802.3 length) → returns -1
+ * ======================================================================== */
+test_eth_type_802_3:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =fake_802_3_frame
+    mov     w1, #ETH_HDR_LEN
+    bl      eth_type
+
+    cmn     w0, #1
+    b.ne    .Lfail_type_802_3
+
+    ldr     x0, =name_type_802_3
+    bl      test_pass
+    b       .Ldone_type_802_3
+
+.Lfail_type_802_3:
+    ldr     x0, =name_type_802_3
+    bl      test_fail
+
+.Ldone_type_802_3:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -178,10 +232,19 @@ test_other_mac:
 test_tail_diff_mac:
     .byte   0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01
 
+/* 14-byte frame with EtherType=0x05DC (1500 decimal = 802.3 length field) */
+.balign 4
+fake_802_3_frame:
+    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF     /* dst: broadcast */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: some sender */
+    .byte   0x05, 0xDC                               /* 802.3 length = 1500 */
+
 name_type_arp:      .asciz "eth_type_arp"
 name_type_short:    .asciz "eth_type_short"
 name_build_hdr:     .asciz "eth_build_hdr"
 name_mac_eq:        .asciz "eth_mac_eq"
+name_type_long:     .asciz "eth_type_long"
+name_type_802_3:    .asciz "eth_type_802_3"
 
 .section .data
 .balign 4
