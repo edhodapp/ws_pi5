@@ -245,6 +245,9 @@ test_tcp:
     bl      test_tcp_badack_state_rollback
     bl      test_tcp_rtx_resets_dupack
     bl      test_tcp_reaper_synrcvd_60s
+    bl      test_tcp_rtt_init
+    bl      test_tcp_rto_double
+    bl      test_tcp_rtt_karn
     ldp     x29, x30, [sp], #16
     ret
 
@@ -11868,6 +11871,148 @@ test_tcp_reaper_synrcvd_60s:
     ret
 
 /* ========================================================================
+ * test_tcp_rtt_init — first RTT sample initializes SRTT/RTTVAR/RTO
+ * ======================================================================== */
+.global test_tcp_rtt_init
+test_tcp_rtt_init:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_ri
+    mov     x19, x0
+
+    /* Simulate RTT: set SEND_TICK, clear RTXCOUNT, then call tcp_rtt_update */
+    bl      timer_freq
+    mov     x20, x0                 /* freq */
+
+    /* R = 50ms = freq / 20 */
+    udiv    w0, w20, w0
+    mov     w2, #20
+    udiv    w0, w20, w2             /* R = freq/20 (50ms in ticks) */
+    mov     x1, x19
+    bl      tcp_rtt_update
+
+    /* SRTT should be R (first sample) */
+    ldr     w0, [x19, #TCONN_SRTT]
+    cbz     w0, .Lfail_tcp_ri      /* should be non-zero */
+
+    /* RTTVAR should be R/2 */
+    ldr     w1, [x19, #TCONN_RTTVAR]
+    cbz     w1, .Lfail_tcp_ri
+
+    /* RTO should be SRTT + 4*RTTVAR >= freq (1 sec minimum) */
+    ldr     w2, [x19, #TCONN_RTO]
+    cmp     w2, w20                 /* RTO >= freq? */
+    b.lo    .Lfail_tcp_ri
+
+    ldr     x0, =name_tcp_ri
+    bl      test_pass
+    b       .Ldone_tcp_ri
+.Lfail_tcp_ri:
+    ldr     x0, =name_tcp_ri
+    bl      test_fail
+.Ldone_tcp_ri:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_rto_double — retransmit callback doubles RTO
+ * ======================================================================== */
+.global test_tcp_rto_double
+test_tcp_rto_double:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rd2
+    mov     x19, x0
+
+    /* Set RTO to a known value */
+    bl      timer_freq
+    str     w0, [x19, #TCONN_RTO]  /* RTO = 1 sec */
+    mov     w20, w0                 /* save freq */
+
+    /* Set up retransmit state */
+    mov     w0, #54
+    strh    w0, [x19, #TCONN_RTXLEN]
+    strb    wzr, [x19, #TCONN_RTXCOUNT]
+    ldr     x0, =tcp_send_ctx
+    str     xzr, [x0, #TSCTX_SEND_FN]  /* NULL send → skip actual send */
+
+    /* Call retransmit callback */
+    mov     x0, x19
+    bl      tcp_retransmit_cb
+
+    /* RTO should be doubled (2 * freq) */
+    ldr     w0, [x19, #TCONN_RTO]
+    lsl     w1, w20, #1            /* 2 * freq */
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_rd2
+
+    ldr     x0, =name_tcp_rd2
+    bl      test_pass
+    b       .Ldone_tcp_rd2
+.Lfail_tcp_rd2:
+    ldr     x0, =name_tcp_rd2
+    bl      test_fail
+.Ldone_tcp_rd2:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_rtt_karn — no RTT sample on retransmitted segment
+ * ======================================================================== */
+.global test_tcp_rtt_karn
+test_tcp_rtt_karn:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_rk
+    mov     x19, x0
+
+    /* Set up: SRTT=1000, RTXCOUNT=1 (retransmitted), SEND_TICK=nonzero */
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_SRTT]
+    mov     w0, #500
+    str     w0, [x19, #TCONN_RTTVAR]
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_RTXCOUNT]  /* marks as retransmitted */
+    mov     x0, #12345
+    str     x0, [x19, #TCONN_SEND_TICK]
+
+    /* Send data segment — ACK handler should skip RTT sample (Karn) */
+    ldr     w3, [x19, #TCONN_RCV_NXT]  /* SEQ = RCV_NXT */
+    ldr     w4, [x19, #TCONN_SND_NXT]  /* ACK = SND_NXT */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #5                      /* 5 bytes payload */
+    mov     w2, #0x41                   /* fill = 'A' */
+    bl      ttcp_build_data_frame
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* SRTT should still be 1000 (not updated due to Karn) */
+    ldr     w0, [x19, #TCONN_SRTT]
+    cmp     w0, #1000
+    b.ne    .Lfail_tcp_rk
+
+    ldr     x0, =name_tcp_rk
+    bl      test_pass
+    b       .Ldone_tcp_rk
+.Lfail_tcp_rk:
+    ldr     x0, =name_tcp_rk
+    bl      test_fail
+.Ldone_tcp_rk:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -12520,6 +12665,9 @@ name_tcp_oow:       .asciz "tcp_ooo_outside_window"
 name_tcp_bsr:       .asciz "tcp_badack_state_rollback"
 name_tcp_rrd:       .asciz "tcp_rtx_resets_dupack"
 name_tcp_rs60:      .asciz "tcp_reaper_synrcvd_60s"
+name_tcp_ri:        .asciz "tcp_rtt_init"
+name_tcp_rd2:       .asciz "tcp_rto_double"
+name_tcp_rk:        .asciz "tcp_rtt_karn"
 
 tcp_send_payload:
     .ascii  "World"

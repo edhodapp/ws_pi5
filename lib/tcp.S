@@ -316,6 +316,76 @@ tcp_rtx_save:
  * Guard: skip if tcp_timer_pool_ptr == 0 (tests without timer pool)
  * Clobbers: x0-x6, x30
  */
+/*
+ * tcp_rtt_update — Update SRTT/RTTVAR/RTO per RFC 6298
+ *
+ * w0: measured RTT (R) in timer ticks
+ * x1: connection pointer
+ * Clobbers: w0-w5
+ *
+ * First sample:  SRTT = R, RTTVAR = R/2, RTO = SRTT + 4*RTTVAR
+ * Subsequent:    RTTVAR = (3/4)*RTTVAR + (1/4)*|SRTT - R|
+ *                SRTT = (7/8)*SRTT + (1/8)*R
+ *                RTO = SRTT + 4*RTTVAR
+ * Minimum RTO = freq (1 second in ticks)
+ */
+.global tcp_rtt_update
+tcp_rtt_update:
+    stp     x19, x30, [sp, #-16]!
+    mov     x19, x1                 /* x19 = conn */
+    mov     w2, w0                  /* w2 = R */
+
+    ldr     w3, [x19, #TCONN_SRTT]
+    cbnz    w3, .Lrtt_subsequent
+
+    /* First sample: SRTT = R, RTTVAR = R/2 */
+    str     w2, [x19, #TCONN_SRTT]
+    lsr     w0, w2, #1
+    str     w0, [x19, #TCONN_RTTVAR]
+    b       .Lrtt_compute_rto
+
+.Lrtt_subsequent:
+    /* |SRTT - R| */
+    subs    w4, w3, w2
+    cneg    w4, w4, mi              /* w4 = abs(SRTT - R) */
+
+    /* RTTVAR = (3/4)*RTTVAR + (1/4)*|SRTT - R| */
+    ldr     w5, [x19, #TCONN_RTTVAR]
+    lsr     w0, w5, #2             /* RTTVAR/4 */
+    sub     w5, w5, w0             /* 3/4 * RTTVAR */
+    lsr     w4, w4, #2             /* |SRTT - R| / 4 */
+    add     w5, w5, w4
+    str     w5, [x19, #TCONN_RTTVAR]
+
+    /* SRTT = (7/8)*SRTT + (1/8)*R */
+    lsr     w0, w3, #3             /* SRTT/8 */
+    sub     w3, w3, w0             /* 7/8 * SRTT */
+    lsr     w2, w2, #3             /* R/8 */
+    add     w3, w3, w2
+    str     w3, [x19, #TCONN_SRTT]
+
+.Lrtt_compute_rto:
+    /* RTO = SRTT + 4*RTTVAR, minimum 1 second */
+    ldr     w3, [x19, #TCONN_SRTT]
+    ldr     w4, [x19, #TCONN_RTTVAR]
+    lsl     w4, w4, #2             /* 4 * RTTVAR */
+    add     w0, w3, w4             /* RTO = SRTT + 4*RTTVAR */
+
+    /* Minimum RTO = 1 second = timer_freq ticks */
+    bl      timer_freq
+    cmp     w0, w0                 /* need to compare RTO vs freq... */
+    /* w0 was clobbered by timer_freq. Recompute. */
+    ldr     w3, [x19, #TCONN_SRTT]
+    ldr     w4, [x19, #TCONN_RTTVAR]
+    lsl     w4, w4, #2
+    add     w3, w3, w4             /* w3 = RTO */
+    cmp     w3, w0                 /* compare RTO vs freq (1 sec) */
+    csel    w3, w3, w0, hs         /* max(RTO, 1 sec) */
+    str     w3, [x19, #TCONN_RTO]
+
+    ldp     x19, x30, [sp], #16
+    ret
+
 tcp_rtx_arm:
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
@@ -329,25 +399,18 @@ tcp_rtx_arm:
     cbz     x0, .Lrtxa_done
     mov     x20, x0                 /* x20 = timer pool */
 
-    /* Compute RTO: 1 << min(RTXCOUNT, 5) seconds, capped at 60 */
-    ldrb    w1, [x19, #TCONN_RTXCOUNT]
-    cmp     w1, #TCP_RTO_SHIFT_CAP
-    csel    w1, w1, w2, lo
-    mov     w2, #TCP_RTO_SHIFT_CAP
-    csel    w1, w1, w2, lo          /* w1 = min(count, 5) */
-    mov     w3, #1
-    lsl     w3, w3, w1              /* w3 = 1 << shift */
-    cmp     w3, #60
-    csel    w3, w3, w4, lo
-    mov     w4, #60
-    csel    w3, w3, w4, lo          /* w3 = min(shifted, 60) */
+    /* Use RTO from TCONN (RFC 6298). If RTO == 0, use initial 1 second. */
+    ldr     w21, [x19, #TCONN_RTO]
+    cbnz    w21, .Lrtxa_have_rto
+    bl      timer_freq
+    mov     w21, w0                 /* initial RTO = 1 second in ticks */
+    str     w21, [x19, #TCONN_RTO]
+.Lrtxa_have_rto:
 
-    /* Convert to ticks: rto_ticks = rto_secs × freq */
-    mov     w21, w3                 /* save rto_secs (clobbered by bl) */
-    bl      timer_freq              /* x0 = freq */
-    mul     x21, x0, x21           /* x21 = rto_ticks */
-    bl      timer_now               /* x0 = now */
-    add     x1, x0, x21            /* x1 = expiry tick */
+    /* Record send timestamp for RTT measurement */
+    bl      timer_now
+    str     x0, [x19, #TCONN_SEND_TICK]
+    add     x1, x0, x21            /* x1 = expiry = now + RTO */
 
     /* timer_set(pool, expiry, callback, conn) */
     mov     x0, x20
@@ -519,6 +582,16 @@ tcp_retransmit_cb:
     str     w0, [x19, #TCONN_SSTHRESH]
     str     w1, [x19, #TCONN_CWND]  /* restart slow start */
     strb    wzr, [x19, #TCONN_DUP_ACK_CNT] /* reset dup ACK count */
+
+    /* Double RTO on timeout (RFC 6298 §5.5), cap at 60 seconds */
+    ldr     w21, [x19, #TCONN_RTO]
+    lsl     w21, w21, #1           /* doubled RTO */
+    bl      timer_freq
+    mov     x1, #60
+    mul     x1, x0, x1             /* max_rto = 60 * freq */
+    cmp     w21, w1
+    csel    w21, w21, w1, lo       /* min(doubled, max) */
+    str     w21, [x19, #TCONN_RTO]
 
     /* Load send context */
     ldr     x20, =tcp_send_ctx
@@ -1276,6 +1349,23 @@ tcp_estab_ack_handler:
     cmp     w4, w6
     b.hi    .Leak_una_done          /* seg_ack > SND_NXT → invalid, ignore */
     str     w4, [x19, #TCONN_SND_UNA]
+
+    /* RTT measurement (RFC 6298, Karn's algorithm) */
+    ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cbnz    w0, .Leak_no_rtt            /* retransmitted → skip sample */
+    ldr     x0, [x19, #TCONN_SEND_TICK]
+    cbz     x0, .Leak_no_rtt            /* no timestamp → skip */
+    stp     x4, x5, [sp, #-16]!        /* save seg_ack, SND_UNA */
+    str     x6, [sp, #-8]!             /* save SND_NXT */
+    bl      timer_now
+    ldr     x1, [x19, #TCONN_SEND_TICK]
+    sub     w0, w0, w1                  /* R = now - send_tick (ticks) */
+    mov     x1, x19
+    bl      tcp_rtt_update
+    str     xzr, [x19, #TCONN_SEND_TICK]
+    ldr     x6, [sp], #8
+    ldp     x4, x5, [sp], #16
+.Leak_no_rtt:
 
     /* Congestion control: grow cwnd on new ACK (RFC 5681) */
     ldr     w7, [x19, #TCONN_CWND]
