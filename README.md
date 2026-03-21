@@ -386,7 +386,8 @@ The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This
 **Test coverage:** 332 unit tests (complete branch coverage) + 145 functional tests (138 PICT-generated exhaustive combinatorial + 7 handcrafted scenario) + 29 fuzz corpus inputs (13 single-packet + 16 multi-packet sequence). All tests run on QEMU raspi3b, zero crashes.
 
 **Next:**
-- Complete the production-quality network stack hardening described below, then implement HTTP
+- Pi 4 hardware bringup (GENET Ethernet, UART3, fan control)
+- TLS 1.3 / HTTPS
 
 ## Work in Progress
 
@@ -429,12 +430,19 @@ All implemented:
 5. SACK (RFC 2018) — parse blocks, SACK-aware fast retransmit
 6. RFC 6298 RTO — SRTT/RTTVAR measurement with Karn's algorithm
 
-#### After TCP: HTTP
+#### HTTP: COMPLETE
 
-| Gap | Impact |
-|-----|--------|
-| **HTTP request parser** | Cannot understand what client wants |
-| **HTTP response generator** | Cannot reply to client |
+Request parser (GET, URI matching, end-of-headers detection), response generator (200/404, Content-Length, Connection: close), cooperative poll loop serving one chunk per connection per iteration.
+
+#### Next: Pi 4 Hardware + HTTPS
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **GENET Ethernet driver** | Planned | Native Gigabit MAC on BCM2711, replaces USB CDC-ECM |
+| **UART3 on GPIO 4/5** | Planned | Frees GPIO 14 for fan control |
+| **Fan control** | Planned | GPIO 14 + mailbox temperature reading |
+| **TLS 1.3** | Planned | AES-GCM via ARMv8 crypto extensions, X25519, Ed25519 |
+| **HTTPS** | Planned | TLS record layer between TCP and HTTP |
 
 #### Design Decisions
 
