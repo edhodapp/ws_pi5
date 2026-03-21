@@ -78,8 +78,22 @@ _start:
     bl      test_eth_type_802_3
     bl      test_arp_request_for_us
     bl      test_arp_request_other_ip
-    bl      test_arp_reply_ignored
+    bl      test_arp_reply_learned
     bl      test_arp_truncated
+    bl      test_arp_spa_zero
+    bl      test_arp_spa_broadcast
+    bl      test_arp_spa_multicast
+    bl      test_arp_reply_not_gw
+    bl      test_arp_reply_not_ours
+    bl      test_arp_bad_oper
+    bl      test_arp_build_request
+    bl      test_arp_build_req_unicast
+    bl      test_arp_gw_mac_cache
+    bl      test_arp_non_gw_no_cache
+    bl      test_arp_timer_cb_send
+    bl      test_arp_timer_cb_no_send
+    bl      test_arp_bad_htype
+    bl      test_arp_bad_hlen
     bl      test_ip_checksum
     bl      test_ip_checksum_carry
     bl      test_icmp_echo_reply

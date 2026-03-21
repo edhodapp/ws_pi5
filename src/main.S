@@ -78,6 +78,14 @@ main:
     ldr     x3, =cdc_ecm_send
     bl      tcp_set_send_ctx
 
+    /* Start ARP cache refresh (arm timer to resolve gateway MAC on boot) */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    ldr     x2, =arp_tx_buf
+    ldr     x3, =timer_pool
+    ldr     x4, =cdc_ecm_send
+    bl      arp_start
+
     /* Initialize NTP (cache timer frequency) */
     bl      ntp_init
 
@@ -146,6 +154,10 @@ rx_buf:
 .balign 16
 timer_pool:
     .space  TPOOL_DEFAULT_SIZE
+
+.balign 16
+arp_tx_buf:
+    .space  ARP_FRAME_LEN
 
 .balign 16
 ntp_tx_buf:

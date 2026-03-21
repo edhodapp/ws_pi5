@@ -27,9 +27,21 @@
 .equ ARP_PKT_LEN,      28
 .equ ARP_FRAME_LEN,    42
 
-/* ARP operation codes (big-endian on wire) */
+/* ARP operation codes (host order) */
 .equ ARP_OP_REQUEST,   1
 .equ ARP_OP_REPLY,     2
+
+/* ARP cache refresh interval (seconds) */
+.equ ARP_REFRESH_SECS, 300
+
+/* ARP send context struct offsets (follows NTP pattern) */
+.equ ARPC_DWC2_BASE,   0       /* x: DWC2 register base */
+.equ ARPC_ECM_STATE,   8       /* x: ecm_state pointer */
+.equ ARPC_TX_BUF,      16      /* x: TX buffer pointer */
+.equ ARPC_TIMER_POOL,  24      /* x: timer pool pointer */
+.equ ARPC_SEND_FN,     32      /* x: cdc_ecm_send function pointer */
+.equ ARPC_TIMER_FREQ,  40      /* x: CNTFRQ_EL0 cached */
+.equ ARPC_SIZE,        48
 
 /* IPv4 header offsets (relative to ETH_PAYLOAD) */
 .equ IP_VER_IHL,       0

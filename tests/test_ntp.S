@@ -9,9 +9,7 @@
  *   5. test_ntp_handle_short    — payload < 48 → ignored
  *   6. test_ntp_time_synced     — known state → correct wall time
  *   7. test_ntp_time_not_synced — synced=0 → returns 0
- *   8. test_arp_gw_mac_cache    — ARP from gateway → MAC cached
- *   9. test_arp_non_gw_no_cache — ARP from non-gateway → not cached
- *  10. test_udp_ntp_dispatch    — UDP port 123 → ntp_handle called, synced
+ *   8. test_udp_ntp_dispatch    — UDP port 123 → ntp_handle called, synced
  */
 
 .include "net.inc"
@@ -31,8 +29,6 @@ test_ntp:
     bl      test_ntp_handle_short
     bl      test_ntp_time_synced
     bl      test_ntp_time_not_synced
-    bl      test_arp_gw_mac_cache
-    bl      test_arp_non_gw_no_cache
     bl      test_udp_ntp_dispatch
     bl      test_ntp_timer_cb_no_gw
     bl      test_ntp_timer_cb_send
@@ -53,14 +49,6 @@ tntp_reset_state:
     stp     xzr, xzr, [x0, #16]
     ret
 
-/* ---- Helper: zero net_gw_mac_valid ---- */
-tntp_reset_gw:
-    ldr     x0, =net_gw_mac_valid
-    str     wzr, [x0]
-    ldr     x0, =net_gw_mac
-    strh    wzr, [x0]
-    str     wzr, [x0, #2]
-    ret
 
 /* ========================================================================
  * 1. test_ntp_build_request
@@ -357,105 +345,7 @@ test_ntp_time_not_synced:
     ret
 
 /* ========================================================================
- * 8. test_arp_gw_mac_cache — ARP from gateway (10.0.2.2) → MAC cached
- * ======================================================================== */
-test_arp_gw_mac_cache:
-    stp     x29, x30, [sp, #-16]!
-
-    bl      tntp_reset_gw
-
-    /* Copy ARP template (gateway SPA=10.0.2.2) to mutable buffer */
-    ldr     x0, =tntp_arp_gw_template
-    ldr     x1, =tntp_arp_buf
-    /* 42 bytes: 5 doublewords + 2 bytes */
-    ldp     x2, x3, [x0]
-    stp     x2, x3, [x1]
-    ldp     x2, x3, [x0, #16]
-    stp     x2, x3, [x1, #16]
-    ldr     x2, [x0, #32]
-    str     x2, [x1, #32]
-    ldrh    w2, [x0, #40]
-    strh    w2, [x1, #40]
-
-    /* Call arp_handle — this is the same template as the existing
-     * arp_req_template (SPA=10.0.2.2, TPA=10.0.2.15) */
-    ldr     x0, =tntp_arp_buf
-    mov     w1, #ARP_FRAME_LEN
-    bl      arp_handle
-
-    /* Should return 42 (reply built) */
-    cmp     w0, #ARP_FRAME_LEN
-    b.ne    .Lfail_agc
-
-    /* Check net_gw_mac_valid == 1 */
-    ldr     x0, =net_gw_mac_valid
-    ldr     w1, [x0]
-    cmp     w1, #1
-    b.ne    .Lfail_agc
-
-    /* Check net_gw_mac == sender MAC (AA:BB:CC:DD:EE:FF) */
-    ldr     x0, =net_gw_mac
-    ldr     x1, =tntp_gw_sender_mac
-    bl      eth_mac_eq
-    cbz     w0, .Lfail_agc
-
-    ldr     x0, =name_agc
-    bl      test_pass
-    b       .Ldone_agc
-.Lfail_agc:
-    ldr     x0, =name_agc
-    bl      test_fail
-.Ldone_agc:
-    ldp     x29, x30, [sp], #16
-    ret
-
-/* ========================================================================
- * 9. test_arp_non_gw_no_cache — ARP from 192.168.0.1 → not cached
- * ======================================================================== */
-test_arp_non_gw_no_cache:
-    stp     x29, x30, [sp, #-16]!
-
-    bl      tntp_reset_gw
-
-    /* This ARP is for a different TPA (10.0.2.99) so arp_handle returns 0.
-     * Even if we changed SPA, the gateway cache only runs after a
-     * successful reply. Use a valid ARP (TPA=our IP) but SPA=192.168.0.1 */
-    ldr     x0, =tntp_arp_nongw_template
-    ldr     x1, =tntp_arp_buf2
-    ldp     x2, x3, [x0]
-    stp     x2, x3, [x1]
-    ldp     x2, x3, [x0, #16]
-    stp     x2, x3, [x1, #16]
-    ldr     x2, [x0, #32]
-    str     x2, [x1, #32]
-    ldrh    w2, [x0, #40]
-    strh    w2, [x1, #40]
-
-    ldr     x0, =tntp_arp_buf2
-    mov     w1, #ARP_FRAME_LEN
-    bl      arp_handle
-
-    /* Should return 42 (reply built — TPA matches our IP) */
-    cmp     w0, #ARP_FRAME_LEN
-    b.ne    .Lfail_angc
-
-    /* But net_gw_mac_valid should still be 0 (SPA != gateway) */
-    ldr     x0, =net_gw_mac_valid
-    ldr     w1, [x0]
-    cbnz    w1, .Lfail_angc
-
-    ldr     x0, =name_angc
-    bl      test_pass
-    b       .Ldone_angc
-.Lfail_angc:
-    ldr     x0, =name_angc
-    bl      test_fail
-.Ldone_angc:
-    ldp     x29, x30, [sp], #16
-    ret
-
-/* ========================================================================
- * 10. test_udp_ntp_dispatch — UDP port 123 with valid NTP → synced
+ * 8. test_udp_ntp_dispatch — UDP port 123 with valid NTP → synced
  *
  * Full frame: ETH(14) + IP(20) + UDP(8) + NTP(48) = 90 bytes
  * ======================================================================== */
@@ -938,10 +828,6 @@ test_ntp_auth_digest_half:
 tntp_gw_mac:
     .byte   0x52, 0x55, 0x0A, 0x00, 0x02, 0x02
 
-/* Sender MAC in ARP gateway test */
-tntp_gw_sender_mac:
-    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
-
 /*
  * Valid NTP server response (48 bytes)
  * Byte 0: flags = 0x24 (LI=0, VN=4, Mode=4=server)
@@ -980,35 +866,6 @@ tntp_ntp_kod:
     .byte   0x24                        /* flags: LI=0, VN=4, Mode=4 */
     .byte   0x00                        /* stratum: 0 (KoD) */
     .space  46
-
-/*
- * ARP request template — gateway SPA=10.0.2.2, TPA=10.0.2.15
- * (same as existing arp_req_template but we need our own copy)
- */
-.balign 4
-tntp_arp_gw_template:
-    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF     /* dst: broadcast */
-    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
-    .byte   0x08, 0x06                               /* EtherType: ARP */
-    .byte   0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01
-    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* SHA */
-    .byte   0x0A, 0x00, 0x02, 0x02                   /* SPA: 10.0.2.2 (gateway) */
-    .byte   0x00, 0x00, 0x00, 0x00, 0x00, 0x00     /* THA */
-    .byte   0x0A, 0x00, 0x02, 0x0F                   /* TPA: 10.0.2.15 (us) */
-
-/*
- * ARP request — non-gateway SPA=192.168.0.1 (0xC0A80001), TPA=10.0.2.15
- */
-.balign 4
-tntp_arp_nongw_template:
-    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-    .byte   0x11, 0x22, 0x33, 0x44, 0x55, 0x66     /* src: some other MAC */
-    .byte   0x08, 0x06
-    .byte   0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01
-    .byte   0x11, 0x22, 0x33, 0x44, 0x55, 0x66     /* SHA */
-    .byte   0xC0, 0xA8, 0x00, 0x01                   /* SPA: 192.168.0.1 */
-    .byte   0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    .byte   0x0A, 0x00, 0x02, 0x0F                   /* TPA: 10.0.2.15 (us) */
 
 /*
  * Full 90-byte UDP frame with NTP response on port 123
@@ -1067,8 +924,6 @@ name_nhk:   .asciz "ntp_handle_kod"
 name_nhs:   .asciz "ntp_handle_short"
 name_nts:   .asciz "ntp_time_synced"
 name_ntns:  .asciz "ntp_time_not_synced"
-name_agc:   .asciz "arp_gw_mac_cache"
-name_angc:  .asciz "arp_non_gw_no_cache"
 name_und:   .asciz "udp_ntp_dispatch"
 name_ntcng: .asciz "ntp_timer_cb_no_gw"
 name_ntcs:  .asciz "ntp_timer_cb_send"
@@ -1149,14 +1004,6 @@ tntp_ntp_auth_bad:
 .balign 16
 tntp_frame_buf:
     .space  90
-
-.balign 4
-tntp_arp_buf:
-    .space  42
-
-.balign 4
-tntp_arp_buf2:
-    .space  42
 
 .balign 4
 tntp_udp_ntp_buf:
