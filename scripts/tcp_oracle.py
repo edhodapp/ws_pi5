@@ -295,131 +295,189 @@ FSA_TABLE = {
 
 
 def oracle(conn_state, flags, port_match, payload, checksum, header):
-    """Compute expected (ret, post_state, reply_flags) for a test vector.
+    """Compute expected behavior for a test vector.
+
+    Returns 8-tuple:
+      (ret, post_state, reply_flags, reply_seq, reply_ack,
+       post_rcv_nxt, post_rxlen, post_snd_una)
 
     ret: 0 = drop/no-reply, 54 = reply frame built
     post_state: TCPS_* value after tcp_handle returns
     reply_flags: TCP flags byte in reply (only meaningful when ret=54)
-
-    Key insight: when the code reaches .Ltcp_no_conn (NULL handler or
-    unclassifiable event), the connection slot state is NOT modified.
-    The strb of next_state only happens for non-NULL handlers.
+    reply_seq/reply_ack: value ldr reads from reply frame (NBO as LE u32)
+    post_rcv_nxt/post_rxlen/post_snd_una: exact-match only, else 0
     """
     state_code = STATE_MAP[conn_state]
     tcp_flags = FLAGS_MAP[flags]
 
+    # Compute incoming frame fields (matching build_frame_v2)
+    if payload == 'some':
+        tcp_seq_host = PRE_RCV_NXT
+    elif payload == 'bad_seq':
+        tcp_seq_host = 999
+    elif payload == 'dup_seq':
+        tcp_seq_host = 0
+    else:
+        tcp_seq_host = 1
+
+    if port_match == 'exact' and (tcp_flags & TCP_ACK_FLAG):
+        tcp_ack_host = PRE_SND_NXT
+    else:
+        tcp_ack_host = 0
+
+    data_bytes = 5 if payload in ('some', 'bad_seq', 'dup_seq') else 0
+
     # 1. Header invalid -> drop (no conn state change)
     if header != 'valid':
-        return (0, state_code, 0)
+        return (0, state_code, 0, 0, 0, 0, 0, 0)
 
     # 2. Checksum invalid -> drop (no conn state change)
     if checksum == 'invalid':
-        return (0, state_code, 0)
+        return (0, state_code, 0, 0, 0, 0, 0, 0)
 
     # 3. No connection match -> RST (no conn to modify)
     if port_match == 'no_match':
-        return rst_result(tcp_flags, state_code)
+        return rst_result(tcp_flags, state_code,
+                          tcp_seq_host, tcp_ack_host, data_bytes)
 
     # 4. Determine lookup state and the slot's actual state
-    # tcp_init() always sets slot 0 = LISTEN. For listen_only, the scan
-    # always finds slot 0 (LISTEN). For exact, slot 1 is pre-seeded.
     if port_match == 'listen_only':
         lookup_state = TCPS_LISTEN
-        slot_state = TCPS_LISTEN      # slot 0 from tcp_init
+        slot_state = TCPS_LISTEN
     else:  # exact
         lookup_state = state_code
-        slot_state = state_code        # slot 1 pre-seeded
+        slot_state = state_code
 
     # 5. Classify event
     evt = classify_event(tcp_flags)
     if evt == -1:
-        # Unclassifiable -> .Ltcp_no_conn (slot state unchanged)
-        return rst_result(tcp_flags, slot_state)
+        r = rst_result(tcp_flags, slot_state,
+                       tcp_seq_host, tcp_ack_host, data_bytes)
+        if port_match == 'exact':
+            return r[:5] + (PRE_RCV_NXT, 0, PRE_SND_UNA)
+        return r
 
     # 6. FSA table lookup
     entry = FSA_TABLE.get(lookup_state, {}).get(evt)
     if entry is None:
-        # NULL handler -> .Ltcp_no_conn (slot state unchanged)
-        return rst_result(tcp_flags, slot_state)
+        r = rst_result(tcp_flags, slot_state,
+                       tcp_seq_host, tcp_ack_host, data_bytes)
+        if port_match == 'exact':
+            return r[:5] + (PRE_RCV_NXT, 0, PRE_SND_UNA)
+        return r
 
     # 7. Handler-specific logic (handler is non-NULL, FSA wrote next_state)
     handler = entry[-1]
 
     if handler == 'listen_syn':
-        # Allocates NEW conn in SYN_RCVD, reply SYN+ACK
-        # LISTEN slot keeps LISTEN (FSA wrote LISTEN as next_state)
-        return (54, TCPS_SYN_RCVD, TCP_SYN_ACK)
+        reply_seq = to_nbo_ldr(ISN)
+        reply_ack = to_nbo_ldr(tcp_seq_host + 1)
+        return (54, TCPS_SYN_RCVD, TCP_SYN_ACK, reply_seq, reply_ack,
+                0, 0, 0)
 
     if handler == 'conn_close':
-        next_state = entry[0]  # CLOSED
-        return (0, next_state, 0)
+        next_state = entry[0]
+        if port_match == 'exact':
+            return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
+        return (0, next_state, 0, 0, 0, 0, 0, 0)
 
     if handler == 'synrcvd_ack':
-        next_state = entry[0]  # ESTABLISHED (already written by FSA)
-        # ACK is always correct for exact-match (ACK = SND_NXT)
-        return (0, next_state, 0)
+        next_state = entry[0]
+        return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_NXT)
 
     if handler == 'estab_ack':
-        next_state = entry[0]  # ESTABLISHED
+        next_state = entry[0]
         if payload == 'none':
-            return (0, next_state, 0)       # pure ACK -> drop
+            return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_NXT)
         elif payload == 'some':
-            # SEQ = PRE_RCV_NXT = 2, matches RCV_NXT -> accept data, reply ACK
-            return (54, next_state, TCP_ACK_FLAG)
+            reply_seq = to_nbo_ldr(PRE_SND_NXT)
+            reply_ack = to_nbo_ldr(PRE_RCV_NXT + 5)
+            return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                    PRE_RCV_NXT + 5, 5, PRE_SND_NXT)
         elif payload == 'bad_seq':
-            # SEQ = 999 > RCV_NXT -> future, drop
-            return (0, next_state, 0)
+            return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_NXT)
         elif payload == 'dup_seq':
-            # SEQ = 0 < RCV_NXT = 2 -> duplicate data, re-ACK
-            return (54, next_state, TCP_ACK_FLAG)
-        return (0, next_state, 0)
+            reply_seq = to_nbo_ldr(PRE_SND_NXT)
+            reply_ack = to_nbo_ldr(PRE_RCV_NXT)
+            return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                    PRE_RCV_NXT, 0, PRE_SND_NXT)
+        return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_NXT)
 
     if handler == 'estab_fin':
-        next_state = entry[0]  # CLOSE_WAIT
-        return (54, next_state, TCP_ACK_FLAG)
+        next_state = entry[0]
+        reply_seq = to_nbo_ldr(PRE_SND_NXT)
+        reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
+        return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
 
     if handler == 'drop':
         next_state = entry[0]
-        return (0, next_state, 0)
+        if port_match == 'exact':
+            return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
+        return (0, next_state, 0, 0, 0, 0, 0, 0)
 
     if handler == 'lastack_ack':
-        next_state = entry[0]  # CLOSED
-        # ACK is always correct for exact-match (ACK = SND_NXT)
-        return (0, next_state, 0)
+        next_state = entry[0]
+        return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
 
     if handler == 'finwait1_ack':
-        next_state = entry[0]  # FIN_WAIT_2
-        # ACK is always correct for exact-match
-        return (0, next_state, 0)
+        next_state = entry[0]
+        return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
 
     if handler == 'finwait1_fin':
-        next_state = entry[0]  # CLOSING
-        # RCV_NXT += 1, build ACK reply
-        return (54, next_state, TCP_ACK_FLAG)
+        next_state = entry[0]
+        reply_seq = to_nbo_ldr(PRE_SND_NXT)
+        reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
+        return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
 
     if handler == 'finwait2_fin':
-        next_state = entry[0]  # TIME_WAIT
-        # RCV_NXT += 1, arm timer, build ACK reply
-        return (54, next_state, TCP_ACK_FLAG)
+        next_state = entry[0]
+        reply_seq = to_nbo_ldr(PRE_SND_NXT)
+        reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
+        return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
 
     if handler == 'closing_ack':
-        next_state = entry[0]  # TIME_WAIT
-        # ACK is always correct for exact-match
-        return (0, next_state, 0)
+        next_state = entry[0]
+        return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
 
     # Should not reach here
-    return rst_result(tcp_flags, slot_state)
+    r = rst_result(tcp_flags, slot_state,
+                   tcp_seq_host, tcp_ack_host, data_bytes)
+    if port_match == 'exact':
+        return r[:5] + (PRE_RCV_NXT, 0, PRE_SND_UNA)
+    return r
 
 
-def rst_result(tcp_flags, post_state):
+def to_nbo_ldr(h):
+    """Convert host-order u32 to the value ldr reads from NBO frame bytes."""
+    return struct.unpack('<I', struct.pack('>I', h & 0xFFFFFFFF))[0]
+
+
+def rst_result(tcp_flags, post_state, tcp_seq_host, tcp_ack_host, data_bytes):
     """Compute RST reply details matching tcp_handle .Ltcp_no_conn.
 
     post_state: the connection slot's state (unchanged by RST path).
+    Returns 8-tuple: (ret, post_state, reply_flags, reply_seq, reply_ack,
+                       post_rcv_nxt, post_rxlen, post_snd_una)
+    post_rcv_nxt/rxlen/snd_una are 0 here — caller overrides for exact-match.
     """
+    # RFC 793 §3.4: never send RST in response to RST
+    if tcp_flags & TCP_RST:
+        return (0, post_state, 0, 0, 0, 0, 0, 0)
+
     if tcp_flags & TCP_ACK_FLAG:
-        return (54, post_state, TCP_RST)
+        reply_seq = to_nbo_ldr(tcp_ack_host)
+        return (54, post_state, TCP_RST, reply_seq, 0, 0, 0, 0)
     else:
-        return (54, post_state, TCP_RST_ACK)
+        seg_len = data_bytes
+        if tcp_flags & TCP_SYN:
+            seg_len += 1
+        if tcp_flags & TCP_FIN:
+            seg_len += 1
+        reply_ack = to_nbo_ldr(tcp_seq_host + seg_len)
+        return (54, post_state, TCP_RST_ACK, 0, reply_ack, 0, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -526,14 +584,15 @@ def make_entry(conn_state, flags, port_match, payload, checksum, header):
     """Build one 192-byte binary entry."""
     frame_data, frame_len = build_frame_v2(
         conn_state, flags, port_match, payload, checksum, header)
-    ret, post_state, reply_flags = oracle(
+    (ret, post_state, reply_flags, reply_seq, reply_ack,
+     post_rcv_nxt, post_rxlen, post_snd_una) = oracle(
         conn_state, flags, port_match, payload, checksum, header)
 
     state_code = STATE_MAP[conn_state]
     pm_code = PORT_MATCH_CODE[port_match]
 
-    # Expected ret: 0 or 54
-    expected_ret = 0 if ret == 0 else 1
+    # Expected ret: actual return value (0 or 54)
+    expected_ret = ret
 
     # Pre-seed fields (only relevant for exact match)
     # Port/IP values must be stored as LE-loaded representations of NBO bytes,
@@ -575,15 +634,27 @@ def make_entry(conn_state, flags, port_match, payload, checksum, header):
     # Frame data (128 bytes, zero-padded)
     frame_padded = frame_data[:128].ljust(128, b'\x00')
 
-    # Entry = header(32) + frame(128) + padding(32) = 192
-    entry = entry_hdr + frame_padded + b'\x00' * 32
+    # Trailing fields (32 bytes): new expected values + padding
+    trailing = struct.pack('<IIIHxxI',
+        reply_seq,          # [160..163] u32 LE
+        reply_ack,          # [164..167] u32 LE
+        post_rcv_nxt,       # [168..171] u32 LE
+        post_rxlen,         # [172..173] u16 LE
+                            # [174..175] pad
+        post_snd_una,       # [176..179] u32 LE
+    )
+    trailing += b'\x00' * 12   # [180..191] pad
+
+    # Entry = header(32) + frame(128) + trailing(32) = 192
+    entry = entry_hdr + frame_padded + trailing
     assert len(entry) == ENTRY_SIZE
     return entry
 
 
 def dry_run_entry(idx, conn_state, flags, port_match, payload, checksum, header):
     """Return human-readable description of one test vector."""
-    ret, post_state, reply_flags = oracle(
+    (ret, post_state, reply_flags, reply_seq, reply_ack,
+     post_rcv_nxt, post_rxlen, post_snd_una) = oracle(
         conn_state, flags, port_match, payload, checksum, header)
     state_names = {v: k for k, v in STATE_MAP.items()}
     post_name = state_names.get(post_state, f'?{post_state}')

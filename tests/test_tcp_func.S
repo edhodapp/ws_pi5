@@ -80,37 +80,48 @@ uart_puthex8:
 
 /* ---------------------------------------------------------------------------
  * Binary entry layout (192 bytes):
- *   [0..1]   u16 LE  frame_len
- *   [2]      u8      expected_ret (0=drop, 1=reply)
- *   [3]      u8      expected_post_state (TCPS_*)
- *   [4]      u8      expected_reply_flags
- *   [5]      u8      conn_state_code (TCPS_* to pre-seed)
- *   [6]      u8      port_match_code (0=exact, 1=listen_only, 2=no_match)
- *   [7]      u8      pad
- *   [8..11]  u32 LE  pre_snd_nxt
- *   [12..15] u32 LE  pre_rcv_nxt
- *   [16..17] u16 LE  pre_lport (NBO value)
- *   [18..19] u16 LE  pre_rport (NBO value)
- *   [20..23] u32 LE  pre_rip (NBO value)
- *   [24..27] u32 LE  pre_snd_una
- *   [28..31] padding
- *   [32..159] frame_data (128 bytes)
- *   [160..191] padding
+ *   [0..1]     u16 LE  frame_len
+ *   [2]        u8      expected_ret (0 or 54)
+ *   [3]        u8      expected_post_state (TCPS_*)
+ *   [4]        u8      expected_reply_flags
+ *   [5]        u8      conn_state_code (TCPS_* to pre-seed)
+ *   [6]        u8      port_match_code (0=exact, 1=listen_only, 2=no_match)
+ *   [7]        pad
+ *   [8..11]    u32 LE  pre_snd_nxt
+ *   [12..15]   u32 LE  pre_rcv_nxt
+ *   [16..17]   u16 LE  pre_lport (NBO value)
+ *   [18..19]   u16 LE  pre_rport (NBO value)
+ *   [20..23]   u32 LE  pre_rip (NBO value)
+ *   [24..27]   u32 LE  pre_snd_una
+ *   [28..31]   padding
+ *   [32..159]  frame_data (128 bytes)
+ *   [160..163] u32 LE  expected_reply_seq
+ *   [164..167] u32 LE  expected_reply_ack
+ *   [168..171] u32 LE  expected_post_rcv_nxt
+ *   [172..173] u16 LE  expected_post_rxlen
+ *   [174..175] pad
+ *   [176..179] u32 LE  expected_post_snd_una
+ *   [180..191] pad (12 bytes)
  * --------------------------------------------------------------------------- */
-.equ ENT_FRAME_LEN,      0
-.equ ENT_EXPECTED_RET,    2
-.equ ENT_EXPECTED_STATE,  3
-.equ ENT_EXPECTED_FLAGS,  4
-.equ ENT_CONN_STATE,      5
-.equ ENT_PORT_MATCH,      6
-.equ ENT_PRE_SND_NXT,     8
-.equ ENT_PRE_RCV_NXT,     12
-.equ ENT_PRE_LPORT,       16
-.equ ENT_PRE_RPORT,       18
-.equ ENT_PRE_RIP,         20
-.equ ENT_PRE_SND_UNA,     24
-.equ ENT_FRAME_DATA,      32
-.equ ENT_SIZE,            192
+.equ ENT_FRAME_LEN,       0
+.equ ENT_EXPECTED_RET,     2
+.equ ENT_EXPECTED_STATE,   3
+.equ ENT_EXPECTED_FLAGS,   4
+.equ ENT_CONN_STATE,       5
+.equ ENT_PORT_MATCH,       6
+.equ ENT_PRE_SND_NXT,      8
+.equ ENT_PRE_RCV_NXT,      12
+.equ ENT_PRE_LPORT,        16
+.equ ENT_PRE_RPORT,        18
+.equ ENT_PRE_RIP,          20
+.equ ENT_PRE_SND_UNA,      24
+.equ ENT_FRAME_DATA,       32
+.equ ENT_REPLY_SEQ,        160
+.equ ENT_REPLY_ACK,        164
+.equ ENT_POST_RCV_NXT,     168
+.equ ENT_POST_RXLEN,       172
+.equ ENT_POST_SND_UNA,     176
+.equ ENT_SIZE,             192
 
 /* ---------------------------------------------------------------------------
  * test_tcp_functional — Main functional test loop
@@ -205,40 +216,77 @@ test_tcp_functional:
     bl      tcp_handle
     /* w0 = return value (0 or 54) */
 
-    /* --- 5. Verify return value --- */
+    /* --- 5. Verify return value (direct comparison: 0 or 54) --- */
     ldrb    w1, [x22, #ENT_EXPECTED_RET]
-    cbz     w1, .Lfunc_check_drop
-
-    /* Expected reply (ret should be 54) */
-    cmp     w0, #54
+    cmp     w0, w1
     b.ne    .Lfunc_fail
+    cbz     w0, .Lfunc_check_state      /* drop → skip reply checks */
 
-    /* Verify reply flags in scratch buffer */
+    /* --- 5a. Verify reply flags --- */
     ldrb    w2, [x23, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
     ldrb    w3, [x22, #ENT_EXPECTED_FLAGS]
     cmp     w2, w3
     b.ne    .Lfunc_fail
-    b       .Lfunc_check_state
 
-.Lfunc_check_drop:
-    /* Expected drop (ret should be 0) */
-    cbnz    w0, .Lfunc_fail
+    /* --- 5b. Verify reply SEQ and ACK --- */
+    ldr     w2, [x23, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    ldr     w3, [x22, #ENT_REPLY_SEQ]
+    cmp     w2, w3
+    b.ne    .Lfunc_fail
+    ldr     w2, [x23, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    ldr     w3, [x22, #ENT_REPLY_ACK]
+    cmp     w2, w3
+    b.ne    .Lfunc_fail
 
 .Lfunc_check_state:
     /* --- 6. Verify post-state --- */
     ldrb    w0, [x22, #ENT_PORT_MATCH]
-    cbz     w0, .Lfunc_check_exact_state
+    cmp     w0, #2
+    b.eq    .Lfunc_pass                 /* no_match: skip state+data */
+    cmp     w0, #1
+    b.eq    .Lfunc_check_listen_state   /* listen_only */
 
-    /* Non-exact: only check if expected_post_state == SYN_RCVD */
+    /* --- exact: check slot 1 state --- */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, #TCONN_SIZE        /* slot 1 */
+    ldrb    w1, [x0, #TCONN_STATE]
+    ldrb    w2, [x22, #ENT_EXPECTED_STATE]
+    cmp     w1, w2
+    b.ne    .Lfunc_fail
+
+    /* --- 7. Data-path assertions (exact-match only) --- */
+    ldr     x0, =tcp_conn_table
+    add     x0, x0, #TCONN_SIZE        /* slot 1 */
+    ldr     w1, [x0, #TCONN_RCV_NXT]
+    ldr     w2, [x22, #ENT_POST_RCV_NXT]
+    cmp     w1, w2
+    b.ne    .Lfunc_fail
+    ldrh    w1, [x0, #TCONN_RXLEN]
+    ldrh    w2, [x22, #ENT_POST_RXLEN]
+    cmp     w1, w2
+    b.ne    .Lfunc_fail
+    ldr     w1, [x0, #TCONN_SND_UNA]
+    ldr     w2, [x22, #ENT_POST_SND_UNA]
+    cmp     w1, w2
+    b.ne    .Lfunc_fail
+    b       .Lfunc_pass
+
+.Lfunc_check_listen_state:
     ldrb    w1, [x22, #ENT_EXPECTED_STATE]
     cmp     w1, #TCPS_SYN_RCVD
-    b.ne    .Lfunc_pass
+    b.ne    .Lfunc_check_listen_simple
 
-    /* Scan table for SYN_RCVD slot */
+    /* SYN_RCVD: verify slot 0 preserved as LISTEN */
+    ldr     x0, =tcp_conn_table
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_LISTEN
+    b.ne    .Lfunc_fail
+
+    /* Scan table for any SYN_RCVD slot */
     ldr     x0, =tcp_conn_table
     mov     w2, #TCP_MAX_CONNS
 .Lfunc_scan_synrcvd:
-    cbz     w2, .Lfunc_fail     /* no SYN_RCVD found */
+    cbz     w2, .Lfunc_fail             /* no SYN_RCVD found */
     sub     w2, w2, #1
     ldrb    w3, [x0, #TCONN_STATE]
     cmp     w3, #TCPS_SYN_RCVD
@@ -246,10 +294,9 @@ test_tcp_functional:
     add     x0, x0, #TCONN_SIZE
     b       .Lfunc_scan_synrcvd
 
-.Lfunc_check_exact_state:
-    /* Exact match: check slot 1 state */
+.Lfunc_check_listen_simple:
+    /* Non-SYN_RCVD: check slot 0 state == expected (always LISTEN) */
     ldr     x0, =tcp_conn_table
-    add     x0, x0, #TCONN_SIZE    /* slot 1 */
     ldrb    w1, [x0, #TCONN_STATE]
     ldrb    w2, [x22, #ENT_EXPECTED_STATE]
     cmp     w1, w2

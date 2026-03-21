@@ -797,6 +797,10 @@ tcp_handle:
     /* --- RST generation (RFC 793 §3.4, Phase 1 behavior) --- */
     ldrb    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
 
+    /* RFC 793 §3.4: never send RST in response to RST */
+    tst     w2, #TCP_RST
+    b.ne    .Ltcp_drop
+
     tst     w2, #TCP_ACK_FLAG
     b.ne    .Ltcp_rst_has_ack
 
