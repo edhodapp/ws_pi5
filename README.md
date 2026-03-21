@@ -324,13 +324,47 @@ afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 
 ## Hardware Test Plan
 
-See [test_plan.md](test_plan.md) for the physical test setup:
+### Target Platform: Raspberry Pi 4 (8 GB)
 
-- **Chromebook** — development host
-- **Pi 4** — test host running PiOS, acts as CDC-ECM peer
-- **Pi 3** — device under test, running the bare-metal kernel
+The target hardware is a Pi 4 Model B with the official case and fan, connected to a Chromebook for development.
 
-Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
+### GPIO Pin Assignments
+
+| Header Pin | GPIO | Function | Notes |
+|------------|------|----------|-------|
+| Pin 7 | GPIO 4 | **UART3 TX** | Serial debug output to Chromebook |
+| Pin 29 | GPIO 5 | **UART3 RX** | Serial debug input from Chromebook |
+| Pin 8 | GPIO 14 | **Fan control** | Official Pi 4 case fan (on/off) |
+| Pin 4 | — | **5V** | Fan power |
+| Pin 6 | — | **GND** | Fan ground |
+| Pin 9 or 14 | — | **GND** | Serial adapter ground |
+
+UART0 (the default PL011 on GPIO 14/15) is not used — GPIO 14 is reassigned to fan control. UART3 (ALT4 function on GPIO 4/5) provides serial debug instead.
+
+### Serial Debug Wiring
+
+Connect a **3.3V** USB-to-serial adapter (CP2102 or FTDI FT232RL) to the Pi 4 GPIO header:
+
+```
+Pi 4 Pin 7  (GPIO 4 / UART3 TX) → Adapter RX
+Pi 4 Pin 29 (GPIO 5 / UART3 RX) → Adapter TX
+Pi 4 Pin 9  (GND)                → Adapter GND
+```
+
+**Do NOT connect the adapter's VCC/3.3V pin** — the Pi powers itself. **Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO.
+
+On the Chromebook:
+```
+screen /dev/ttyUSB0 115200
+```
+
+### Fan Control
+
+The official Raspberry Pi 4 case fan is controlled via GPIO 14 (on/off). The kernel reads CPU temperature from the VideoCore mailbox and toggles the fan based on a configurable threshold (default: on at 60°C, off at 45°C, with hysteresis to prevent rapid cycling).
+
+### Network
+
+The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This replaces the Pi 3's USB CDC-ECM path with a direct memory-mapped driver.
 
 ## Current Status
 
