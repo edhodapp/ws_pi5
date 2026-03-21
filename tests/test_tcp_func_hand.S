@@ -33,6 +33,7 @@ test_tcp_func_handcrafted:
     bl      test_func_data_ack_ts_echo
     bl      test_func_icmp_proto_unreach
     bl      test_func_icmp_port_unreach
+    bl      test_func_multi_segment
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1292,6 +1293,218 @@ fh_fake_icmp_send:
     ret
 
 /* ===========================================================================
+ * test_func_multi_segment — Two sends without intervening ACK, then partial ACK
+ *
+ * Exercises the core Phase 5 behavior: multiple segments in flight.
+ * 1. Handshake → ESTABLISHED (SND_WND large enough for 2 segments)
+ * 2. tcp_send 5 bytes → succeeds, SND_NXT advances by 5
+ * 3. tcp_send 5 more bytes → succeeds (no RTXLEN gate), SND_NXT advances by 10
+ * 4. Inject ACK for first 5 bytes → SND_BUF_USED decreases to 5
+ * 5. tcp_send 5 more bytes → succeeds (window re-opened)
+ * =========================================================================== */
+test_func_multi_segment:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* SYN → SYN-ACK (reuse fh_syn_template, copy to scratch) */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfms_cp1:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfms_cp1
+
+    /* Fix TCP checksum */
+    ldr     x0, =fh_scratch
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =fh_scratch
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfms_fail
+
+    /* Extract ISN from SYN-ACK SEQ */
+    ldr     x0, =fh_scratch
+    ldr     w19, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w19, w19
+
+    /* Build handshake ACK from SYN template (swap src/dst ports, set ACK flag) */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfms_cp2:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfms_cp2
+
+    ldr     x0, =fh_scratch
+    mov     w1, #TCP_ACK_FLAG
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    /* SEQ = 2 (SYN consumed 1) */
+    mov     w1, #2
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* ACK = ISN+1 */
+    add     w1, w19, #1
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* doff = 5 */
+    mov     w1, #0x50
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =fh_scratch
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Find ESTABLISHED connection */
+    ldr     x20, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfms_find:
+    cbz     w3, .Lfms_fail
+    sub     w3, w3, #1
+    ldrb    w0, [x20, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Lfms_found
+    add     x20, x20, #TCONN_SIZE
+    b       .Lfms_find
+.Lfms_found:
+
+    /* Set SND_WND large enough for multiple sends */
+    mov     w0, #2000
+    str     w0, [x20, #TCONN_SND_WND]
+
+    /* Save initial SND_NXT */
+    ldr     w21, [x20, #TCONN_SND_NXT]
+
+    /* --- Send 1: 5 bytes --- */
+    mov     x0, x20
+    ldr     x1, =fh_scratch
+    ldr     x2, =fh_multi_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfms_fail
+
+    /* Verify SND_NXT advanced by 5 */
+    ldr     w0, [x20, #TCONN_SND_NXT]
+    add     w1, w21, #5
+    cmp     w0, w1
+    b.ne    .Lfms_fail
+
+    /* --- Send 2: 5 more bytes (no ACK in between!) --- */
+    mov     x0, x20
+    ldr     x1, =fh_scratch
+    ldr     x2, =fh_multi_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfms_fail
+
+    /* Verify SND_NXT advanced by 10 total */
+    ldr     w0, [x20, #TCONN_SND_NXT]
+    add     w1, w21, #10
+    cmp     w0, w1
+    b.ne    .Lfms_fail
+
+    /* Verify SND_BUF_USED == 10 */
+    ldr     w0, [x20, #TCONN_SND_BUF_USED]
+    cmp     w0, #10
+    b.ne    .Lfms_fail
+
+    /* --- Partial ACK: ACK first 5 bytes only ---
+     * Build pure ACK: SEQ=RCV_NXT, ACK=SND_UNA+5 */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfms_cp3:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfms_cp3
+
+    ldr     x0, =fh_scratch
+    mov     w1, #TCP_ACK_FLAG
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    mov     w1, #0x50
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* SEQ = RCV_NXT */
+    ldr     w1, [x20, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* ACK = SND_UNA + 5 (partial) */
+    ldr     w1, [x20, #TCONN_SND_UNA]
+    add     w1, w1, #5
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* IP totlen = 40 */
+    mov     w1, #0x2800
+    strh    w1, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    /* Recompute IP checksum */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    ldr     x0, =fh_scratch
+    strh    w0, [x0, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    /* Recompute TCP checksum */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =fh_scratch
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify SND_BUF_USED decreased to 5 */
+    ldr     w0, [x20, #TCONN_SND_BUF_USED]
+    cmp     w0, #5
+    b.ne    .Lfms_fail
+
+    /* --- Send 3: 5 more bytes (window re-opened) --- */
+    mov     x0, x20
+    ldr     x1, =fh_scratch
+    ldr     x2, =fh_multi_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfms_fail
+
+    /* Verify SND_NXT advanced by 15 total */
+    ldr     w0, [x20, #TCONN_SND_NXT]
+    add     w1, w21, #15
+    cmp     w0, w1
+    b.ne    .Lfms_fail
+
+    ldr     x0, =name_fms
+    bl      test_pass
+    b       .Lfms_done
+.Lfms_fail:
+    ldr     x0, =name_fms
+    bl      test_fail
+.Lfms_done:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ===========================================================================
  * Test data
  * =========================================================================== */
 .section .rodata
@@ -1374,6 +1587,10 @@ name_firt:  .asciz "func_icmp_rtx_timer"
 name_fdae:  .asciz "func_data_ack_ts_echo"
 name_fpu:   .asciz "func_icmp_proto_unreach"
 name_fptu:  .asciz "func_icmp_port_unreach"
+name_fms:   .asciz "func_multi_segment"
+
+fh_multi_payload:
+    .asciz "Hello"
 
 /*
  * 42-byte UDP frame to port 9999 (unknown) from 10.0.2.2
