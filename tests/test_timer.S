@@ -22,6 +22,7 @@ test_timer:
     bl      test_check_not_yet
     bl      test_check_clears
     bl      test_check_multiple
+    bl      test_cancel_oob
 
     ldp     x29, x30, [sp], #16
     ret
@@ -409,6 +410,42 @@ test_check_multiple:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ---- test_cancel_oob: index >= capacity → no crash, no effect ---- */
+.global test_cancel_oob
+test_cancel_oob:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      ttimer_setup
+
+    /* Set a timer in slot 0 */
+    ldr     x0, =ttimer_pool
+    mov     x1, #2000
+    ldr     x2, =ttimer_cb_inc
+    ldr     x3, =ttimer_counter
+    bl      timer_set
+
+    /* Try to cancel index 99 (>= capacity 16) — should be ignored */
+    ldr     x0, =ttimer_pool
+    mov     w1, #99
+    bl      timer_cancel
+
+    /* Slot 0 callback should still be set (not corrupted by OOB cancel) */
+    ldr     x0, =ttimer_pool
+    add     x0, x0, #TPOOL_SLOTS
+    ldr     x1, [x0, #SLOT_CALLBACK]
+    cbz     x1, .Lfail_tcoob
+
+    ldr     x0, =name_tcoob
+    bl      test_pass
+    b       .Ldone_tcoob
+.Lfail_tcoob:
+    ldr     x0, =name_tcoob
+    bl      test_fail
+.Ldone_tcoob:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* ---- BSS ---- */
 .section .bss
 .balign 16
@@ -427,3 +464,4 @@ name_tcf:      .asciz "timer_check_fires"
 name_tcny:     .asciz "timer_check_not_yet"
 name_tccl:     .asciz "timer_check_clears"
 name_tcm:      .asciz "timer_check_multiple"
+name_tcoob:    .asciz "timer_cancel_oob"

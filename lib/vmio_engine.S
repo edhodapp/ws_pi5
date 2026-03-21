@@ -64,8 +64,13 @@ vmio_engine_step:
     cmp     w20, w21
     b.hs    .Lstep_no_trans
 
-    /* Compute table index: state * n_events + evt_code */
+    /* Bounds-check state against n_states */
     ldr     w22, [x19, #ENG_STATE]
+    ldr     w0, [x19, #ENG_NSTATES]
+    cmp     w22, w0
+    b.hs    .Lstep_no_trans
+
+    /* Compute table index: state * n_events + evt_code */
     mul     w22, w22, w21           /* state * n_events */
     add     w22, w22, w20           /* + evt_code */
 

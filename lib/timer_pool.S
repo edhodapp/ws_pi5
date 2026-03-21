@@ -70,12 +70,18 @@ timer_set:
  * Clobbers: x0-x2
  */
 timer_cancel:
+    /* Bounds check: index < capacity */
+    ldr     w2, [x0, #TPOOL_CAP]
+    cmp     w1, w2
+    b.hs    .Ltcan_ret
+
     /* slot_ptr = pool + TPOOL_SLOTS + index * SLOT_SIZE */
     mov     w2, #SLOT_SIZE
     umull   x2, w1, w2
     add     x0, x0, #TPOOL_SLOTS
     add     x0, x0, x2
     str     xzr, [x0, #SLOT_CALLBACK]  /* mark inactive */
+.Ltcan_ret:
     ret
 
 /*

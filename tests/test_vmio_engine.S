@@ -16,6 +16,7 @@ test_vmio_engine:
     bl      test_engine_step_idle
     bl      test_engine_step_no_trans
     bl      test_engine_step_oob
+    bl      test_engine_step_oob_state
     bl      test_engine_step_one
     bl      test_engine_multi_step
 
@@ -260,6 +261,50 @@ test_engine_step_oob:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ---- test_engine_step_oob_state — state >= n_states → STEP_NO_TRANS ---- */
+.global test_engine_step_oob_state
+test_engine_step_oob_state:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      teng_setup
+
+    /* Init engine: state=0, n_states=3, n_events=2 */
+    ldr     x0, =teng_engine
+    mov     w1, #0
+    mov     w2, #3
+    mov     w3, #2
+    ldr     x4, =teng_table
+    ldr     x5, =teng_hi_queue
+    ldr     x6, =teng_lo_queue
+    ldr     x7, =teng_flag
+    bl      vmio_engine_init
+
+    /* Corrupt state to 5 (>= n_states=3) */
+    ldr     x0, =teng_engine
+    mov     w1, #5
+    str     w1, [x0, #ENG_STATE]
+
+    /* Enqueue valid event code=0 */
+    mov     w0, #0
+    bl      teng_enqueue_lo
+
+    /* Step — should return STEP_NO_TRANS due to state OOB */
+    ldr     x0, =teng_engine
+    bl      vmio_engine_step
+    cmn     w0, #1
+    b.ne    .Lfail_esoobs
+
+    ldr     x0, =name_esoobs
+    bl      test_pass
+    b       .Ldone_esoobs
+.Lfail_esoobs:
+    ldr     x0, =name_esoobs
+    bl      test_fail
+.Ldone_esoobs:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* ---- test_engine_step_one ---- */
 test_engine_step_one:
     stp     x29, x30, [sp, #-16]!
@@ -408,5 +453,6 @@ name_einit:     .asciz "engine_init"
 name_esidle:    .asciz "engine_step_idle"
 name_esnt:      .asciz "engine_step_no_trans"
 name_esoob:     .asciz "engine_step_oob"
+name_esoobs:    .asciz "engine_step_oob_state"
 name_es1:       .asciz "engine_step_one"
 name_esm:       .asciz "engine_multi_step"
