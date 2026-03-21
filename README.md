@@ -368,22 +368,23 @@ The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This
 
 ## Current Status
 
-**Working:**
-- PL011 UART output
-- DWC2 USB host controller initialization via VideoCore mailbox
-- USB device enumeration (control transfers, descriptor parsing)
-- CDC-ECM Ethernet device activation and bulk data transfer
-- ARP request/reply with passive gateway MAC learning
-- IP with checksum validation, fragment reassembly (4-slot engine with timeouts)
-- ICMP echo request/reply (ping)
-- UDP with echo service (port 7)
-- TCP — complete transport layer: 10-state FSA, congestion control (slow start / avoidance), retransmission with backoff, fast retransmit (RFC 5681), TCP timestamps with PAWS, OOO buffering, MSS negotiation, persist timer, idle reaper, RST rate limiting, RST SEQ validation (RFC 5961), ICMP soft errors (RFC 5461), SYN flood eviction, DF bit, data-on-FIN, TIME_WAIT re-ACK
-- Timer infrastructure (ARM generic timer, software timer pool)
-- SNTP client — timer-driven polling, request builder, response parser, wall-clock time via `ntp_time`
-- MD5 hash for TCP ISN generation (RFC 6528)
-- Dependency injection for testability (send function pointer, MMIO base addresses as parameters)
+| Layer | Status | Key Features |
+|-------|--------|-------------|
+| **Ethernet** | Production ready | Frame validation, MAC filtering, 802.3 rejection |
+| **ARP** | Production ready | Request/reply, SPA validation, timer-driven cache refresh |
+| **IP** | Production ready | Checksum, TTL, fragment reassembly with overlap detection |
+| **ICMP** | Production ready | Echo reply, error generation, rate limiting |
+| **UDP** | Production ready | Checksum, echo service, NTP dispatch |
+| **TCP** | Production ready | 128 conns, WSCALE, SACK, RFC 6298 RTO, multi-segment send, 256 KB send buffer |
+| **HTTP** | Implemented | GET parser, 200/404 responses, cooperative poll loop |
+| **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
+| **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
+| **TLS/HTTPS** | Planned | TLS 1.3 with ARMv8 crypto extensions |
+| **Pi 4 platform** | In progress | EL2 drop done, addresses updated; GENET/UART3/fan pending |
 
-**Test coverage:** 332 unit tests (complete branch coverage) + 145 functional tests (138 PICT-generated exhaustive combinatorial + 7 handcrafted scenario) + 29 fuzz corpus inputs (13 single-packet + 16 multi-packet sequence). All tests run on QEMU raspi3b, zero crashes.
+**Kernel image:** 25 KB (text: 17.5 KB, data: 4.4 KB, BSS: 32.6 MB runtime)
+
+**Test coverage:** 358 unit tests + 153 functional tests (138 PICT + 15 handcrafted) + 39 fuzz seeds (23 single-packet + 16 multi-packet). Complete branch coverage on all new code.
 
 **Next:**
 - Pi 4 hardware bringup (GENET Ethernet, UART3, fan control)
