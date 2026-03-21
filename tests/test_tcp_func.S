@@ -214,7 +214,7 @@ test_tcp_functional:
     mov     x0, x23
     ldrh    w1, [x22, #ENT_FRAME_LEN]
     bl      tcp_handle
-    /* w0 = return value (0 or 54) */
+    /* w0 = return value (0, 54, or 58 for SYN-ACK with MSS) */
 
     /* --- 5. Verify return value (direct comparison: 0 or 54) --- */
     ldrb    w1, [x22, #ENT_EXPECTED_RET]

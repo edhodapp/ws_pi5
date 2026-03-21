@@ -372,7 +372,7 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
     if handler == 'listen_syn':
         reply_seq = to_nbo_ldr(ISN)
         reply_ack = to_nbo_ldr(tcp_seq_host + 1)
-        return (54, TCPS_SYN_RCVD, TCP_SYN_ACK, reply_seq, reply_ack,
+        return (58, TCPS_SYN_RCVD, TCP_SYN_ACK, reply_seq, reply_ack,
                 0, 0, 0)
 
     if handler == 'conn_close':
@@ -395,7 +395,11 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
             return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
                     PRE_RCV_NXT + 5, 5, PRE_SND_NXT)
         elif payload == 'bad_seq':
-            return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_NXT)
+            # OOO buffering: segment buffered, dup ACK sent
+            reply_seq = to_nbo_ldr(PRE_SND_NXT)
+            reply_ack = to_nbo_ldr(PRE_RCV_NXT)
+            return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                    PRE_RCV_NXT, 0, PRE_SND_NXT)
         elif payload == 'dup_seq':
             reply_seq = to_nbo_ldr(PRE_SND_NXT)
             reply_ack = to_nbo_ldr(PRE_RCV_NXT)
