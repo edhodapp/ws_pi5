@@ -31,6 +31,8 @@ test_tcp_func_handcrafted:
     bl      test_func_handshake_ts
     bl      test_func_icmp_rtx_timer
     bl      test_func_data_ack_ts_echo
+    bl      test_func_icmp_proto_unreach
+    bl      test_func_icmp_port_unreach
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1109,6 +1111,187 @@ test_func_data_ack_ts_echo:
     ret
 
 /* ===========================================================================
+ * test_func_icmp_proto_unreach — unknown IP protocol through net_recv_one
+ *   triggers ICMP Protocol Unreachable via icmp_send_error
+ *
+ * Setup: icmp_init, install fake send_fn in icmp_send_ctx
+ * Send:  42-byte frame with IP proto=99 via ip_handle
+ * Verify: fake send_fn called, tx_buf has type=3 code=2
+ * =========================================================================== */
+test_func_icmp_proto_unreach:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    /* Install fake send function in icmp_send_ctx */
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =fh_icmp_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fh_fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+    str     xzr, [x19, #ICMPC_DWC2_BASE]
+    str     xzr, [x19, #ICMPC_ECM_STATE]
+
+    ldr     x0, =fh_icmp_send_count
+    str     wzr, [x0]
+
+    /* Build frame with unknown IP proto=99 in scratch buf */
+    ldr     x19, =fh_scratch
+
+    /* Zero 42 bytes */
+    mov     x0, x19
+    mov     w1, #42
+.Lfpu_zero:
+    strb    wzr, [x0], #1
+    subs    w1, w1, #1
+    b.ne    .Lfpu_zero
+
+    /* ETH: dst=our MAC, src=peer, type=IPv4 */
+    mov     w0, #0x02
+    strb    w0, [x19, #ETH_DST]
+    mov     w0, #0x01
+    strb    w0, [x19, #(ETH_DST + 5)]
+    mov     w0, #0xAA
+    strb    w0, [x19, #ETH_SRC]
+    mov     w0, #0x0008
+    strh    w0, [x19, #ETH_TYPE]
+
+    /* IP: ver/ihl=0x45, totlen=28, TTL=64, proto=99 */
+    mov     w0, #0x45
+    strb    w0, [x19, #ETH_PAYLOAD]
+    mov     w0, #0x1C00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+    mov     w0, #64
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_TTL)]
+    mov     w0, #99
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_PROTO)]
+    ldr     w0, =0x0202000A
+    str     w0, [x19, #(ETH_PAYLOAD + IP_SRC)]
+    ldr     w0, =0x0F02000A
+    str     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
+
+    /* Compute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Call ip_handle (not net_recv_one, to avoid MAC filter on zeroed MACs) */
+    mov     x0, x19
+    mov     w1, #42
+    bl      ip_handle
+
+    /* ip_handle returns 0 (dropped, but ICMP error was sent out-of-band) */
+    cbnz    w0, .Lfpu_fail
+
+    /* Verify fake send was called */
+    ldr     x0, =fh_icmp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfpu_fail
+
+    /* Verify tx_buf has ICMP type=3, code=2 */
+    ldr     x0, =fh_icmp_tx_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cmp     w1, #ICMP_DEST_UNREACHABLE
+    b.ne    .Lfpu_fail
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+    cmp     w1, #ICMP_CODE_PROTO_UNREACH
+    b.ne    .Lfpu_fail
+
+    ldr     x0, =name_fpu
+    bl      test_pass
+    b       .Lfpu_done
+.Lfpu_fail:
+    ldr     x0, =name_fpu
+    bl      test_fail
+.Lfpu_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ===========================================================================
+ * test_func_icmp_port_unreach — unknown UDP port through ip_handle
+ *   triggers ICMP Port Unreachable
+ *
+ * Send: valid UDP frame with dport=9999 (not echo/NTP)
+ * Verify: fake send called with type=3 code=3
+ * =========================================================================== */
+test_func_icmp_port_unreach:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =fh_icmp_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fh_fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+    str     xzr, [x19, #ICMPC_DWC2_BASE]
+    str     xzr, [x19, #ICMPC_ECM_STATE]
+
+    ldr     x0, =fh_icmp_send_count
+    str     wzr, [x0]
+
+    /* Copy UDP-to-unknown-port template to scratch */
+    ldr     x0, =fh_udp_unknown_port
+    ldr     x1, =fh_scratch
+    ldp     x2, x3, [x0]
+    stp     x2, x3, [x1]
+    ldp     x2, x3, [x0, #16]
+    stp     x2, x3, [x1, #16]
+    ldr     x2, [x0, #32]
+    str     x2, [x1, #32]
+    ldrh    w2, [x0, #40]
+    strh    w2, [x1, #40]
+
+    /* Call ip_handle */
+    ldr     x0, =fh_scratch
+    mov     w1, #42
+    bl      ip_handle
+
+    /* Returns 0 */
+    cbnz    w0, .Lfptu_fail
+
+    /* Verify send called */
+    ldr     x0, =fh_icmp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfptu_fail
+
+    /* Verify type=3, code=3 */
+    ldr     x0, =fh_icmp_tx_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cmp     w1, #ICMP_DEST_UNREACHABLE
+    b.ne    .Lfptu_fail
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+    cmp     w1, #ICMP_CODE_PORT_UNREACH
+    b.ne    .Lfptu_fail
+
+    ldr     x0, =name_fptu
+    bl      test_pass
+    b       .Lfptu_done
+.Lfptu_fail:
+    ldr     x0, =name_fptu
+    bl      test_fail
+.Lfptu_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* Fake ICMP send function for functional tests */
+fh_fake_icmp_send:
+    ldr     x9, =fh_icmp_send_count
+    ldr     w10, [x9]
+    add     w10, w10, #1
+    str     w10, [x9]
+    mov     w0, #0
+    ret
+
+/* ===========================================================================
  * Test data
  * =========================================================================== */
 .section .rodata
@@ -1189,6 +1372,25 @@ name_fic:   .asciz "func_icmp_teardown"
 name_fhts:  .asciz "func_handshake_ts"
 name_firt:  .asciz "func_icmp_rtx_timer"
 name_fdae:  .asciz "func_data_ack_ts_echo"
+name_fpu:   .asciz "func_icmp_proto_unreach"
+name_fptu:  .asciz "func_icmp_port_unreach"
+
+/*
+ * 42-byte UDP frame to port 9999 (unknown) from 10.0.2.2
+ * ETH(14) + IP(20, proto=UDP, totlen=28) + UDP(8, dport=9999)
+ */
+.balign 4
+fh_udp_unknown_port:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: peer */
+    .byte   0x08, 0x00                               /* IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x1C                   /* ver, totlen=28 */
+    .byte   0x12, 0x34, 0x00, 0x00                   /* id, flags */
+    .byte   0x40, 0x11, 0x50, 0x8D                   /* TTL=64, proto=UDP, cksum */
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src IP */
+    .byte   0x0A, 0x00, 0x02, 0x0F                   /* dst IP */
+    .byte   0x27, 0x0F, 0x27, 0x0F                   /* sport=9999, dport=9999 */
+    .byte   0x00, 0x08, 0x99, 0xAF                   /* len=8, cksum=0xAF99 */
 
 .section .bss
 .balign 16
@@ -1198,3 +1400,11 @@ fh_scratch:
 .balign 8
 fh_timer_pool:
     .space  40              /* 8 header + 1×32 slot */
+
+.balign 16
+fh_icmp_tx_buf:
+    .space  ICMP_ERROR_FRAME_LEN
+
+.balign 4
+fh_icmp_send_count:
+    .word   0
