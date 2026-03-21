@@ -317,6 +317,49 @@ Verification uses `arping`, `ping`, and `tcpdump` from the Pi 4.
 **Next:**
 - HTTP request parsing and response generation
 
+## Work in Progress
+
+### TCP Stack Audit: HTTP/Internet Readiness
+
+The TCP transport layer is complete. The only blocker for serving HTTP is the application layer itself.
+
+#### Hard Blockers
+
+| Gap | Impact |
+|-----|--------|
+| **HTTP request parser** | Cannot understand what client wants |
+| **HTTP response generator** | Cannot reply to client |
+
+#### Recommended Before Internet Exposure
+
+| Gap | Risk |
+|-----|------|
+| **PMTUD (ICMP "too big")** | DF bit is set; paths with MTU < 1500 (VPN, PPPoE) will black-hole packets |
+| **SWS avoidance (receive side)** | Near-full rxbuf advertises tiny windows, causing inefficient small segments |
+
+#### Acceptable Limitations
+
+| Item | Status | Why it's OK for basic HTTP |
+|------|--------|---------------------------|
+| No segmentation | App loops `tcp_send` with MSS chunks | Straightforward for small pages |
+| 1 segment in flight | ~29 KB/s at 50ms RTT | Fine for a 5 KB static page (~200ms) |
+| 2048-byte rxbuf | Typical GET is 200-500 bytes | Sufficient for GET-only server |
+| 16-slot conn table | Personal/demo traffic | Workable with SYN eviction + reaper |
+| No RTT estimation | Fixed 1s initial RTO | Conservative but functional |
+| No Nagle | Immediate sends | HTTP servers disable Nagle anyway |
+| No window scaling / SACK | Small buffers, 1-seg-in-flight | Irrelevant for this design |
+
+#### What's Implemented
+
+The full TCP capability list, all tested:
+
+- **Core**: 10-state FSA, 3-way handshake, passive/active/simultaneous close, TIME_WAIT with 2MSL timer, RST generation and handling
+- **Data transfer**: in-order receive, `tcp_send`, receive buffer management (`rx_peek`/`rx_flush`), send window tracking, dynamic receive window advertisement
+- **Reliability**: retransmission timer with exponential backoff (max 8 retries), fast retransmit (3 dup ACKs, RFC 5681), congestion control (slow start, congestion avoidance, ssthresh)
+- **Options**: MSS negotiation, TCP timestamps (TSopt), PAWS (Protection Against Wrapped Sequences)
+- **Security**: RST SEQ validation (RFC 5961), SYN flood protection with SYN_RCVD eviction, RST rate limiting (token bucket), ICMP soft errors for ESTABLISHED+ (RFC 5461), idle connection reaper (per-state timeouts)
+- **Robustness**: persist timer (zero-window probing with backoff), DF bit on all outgoing IP, data-on-FIN acceptance, TIME_WAIT FIN re-ACK, OOO segment buffering (4 slots per connection), IP fragment reassembly
+
 ## Future: Multi-Pi Architecture
 
 The network stack is composed of plain functions that operate on buffers — nothing ties them to a specific role. This opens the door to a cluster of bare-metal Pi 3s, each with a single narrow responsibility, sharing the same assembly library:
