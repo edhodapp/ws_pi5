@@ -253,6 +253,8 @@ test_tcp:
     bl      test_tcp_wscale_window_apply
     bl      test_tcp_sndbuf_write
     bl      test_tcp_sndbuf_ack_advance
+    bl      test_tcp_sack_perm_negotiate
+    bl      test_tcp_sack_perm_absent
     ldp     x29, x30, [sp], #16
     ret
 
@@ -12314,6 +12316,133 @@ test_tcp_sndbuf_ack_advance:
     ret
 
 /* ========================================================================
+ * test_tcp_sack_perm_negotiate — SYN with SACK-Permitted → flag set
+ * ======================================================================== */
+.global test_tcp_sack_perm_negotiate
+test_tcp_sack_perm_negotiate:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build SYN with SACK-Permitted option: 56 bytes = 54 + Kind=4 + Len=2 */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+.Lspn_cp:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lspn_cp
+
+    /* Append SACK-Permitted at TCP offset 20, set doff=6 (24 bytes) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #0x60
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w1, #TCP_OPT_NOP
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    mov     w1, #TCP_OPT_SACK_PERM
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w1, #TCP_OPT_SACK_PERM_LEN
+    strb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+    /* IP totlen = 44 (0x2C00 LE) */
+    mov     w1, #0x2C00
+    strh    w1, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    /* Recompute checksums */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x0, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #24
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =tcp_test_buf
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfail_tcp_spn
+
+    /* Find SYN_RCVD conn, check SACK_ENABLED == 1 */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    ldrb    w0, [x19, #TCONN_SACK_ENABLED]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_spn
+
+    /* SYN-ACK should be 66 bytes (62 + 4 SACK-Perm) */
+    /* Actually, the return value from tcp_handle tells us */
+
+    ldr     x0, =name_tcp_spn
+    bl      test_pass
+    b       .Ldone_tcp_spn
+.Lfail_tcp_spn:
+    ldr     x0, =name_tcp_spn
+    bl      test_fail
+.Ldone_tcp_spn:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_sack_perm_absent — SYN without SACK-Permitted → flag clear
+ * ======================================================================== */
+.global test_tcp_sack_perm_absent
+test_tcp_sack_perm_absent:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Bare SYN (no SACK-Permitted) */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+.Lspa_cp:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lspa_cp
+    ldr     x0, =tcp_test_buf
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =tcp_test_buf
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfail_tcp_spa
+
+    /* SACK_ENABLED should be 0 */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    ldrb    w0, [x19, #TCONN_SACK_ENABLED]
+    cbnz    w0, .Lfail_tcp_spa
+
+    ldr     x0, =name_tcp_spa
+    bl      test_pass
+    b       .Ldone_tcp_spa
+.Lfail_tcp_spa:
+    ldr     x0, =name_tcp_spa
+    bl      test_fail
+.Ldone_tcp_spa:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -12974,6 +13103,8 @@ name_tcp_wno:       .asciz "tcp_wscale_no_opt"
 name_tcp_wwa:       .asciz "tcp_wscale_window_apply"
 name_tcp_sbw:       .asciz "tcp_sndbuf_write"
 name_tcp_sba:       .asciz "tcp_sndbuf_ack_advance"
+name_tcp_spn:       .asciz "tcp_sack_perm_negotiate"
+name_tcp_spa:       .asciz "tcp_sack_perm_absent"
 
 tcp_send_payload:
     .ascii  "World"

@@ -1334,6 +1334,14 @@ tcp_listen_syn_handler:
     strb    wzr, [x21, #TCONN_RCV_WSCALE]
 .Llsyn_wscale_done:
 
+    /* Parse SACK-Permitted option from incoming SYN */
+    ldrb    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    lsr     w1, w1, #4
+    lsl     w1, w1, #2
+    mov     x0, x19
+    bl      tcp_parse_sack_permitted
+    strb    w0, [x21, #TCONN_SACK_ENABLED]
+
     /* Initialize activity timestamp */
     bl      timer_now
     str     x0, [x21, #TCONN_LAST_ACTIVE]
@@ -1889,11 +1897,14 @@ tcp_build_frame:
     mov     w25, #TCP_TSOPT_SIZE    /* 12 bytes overhead */
 .Lbf_ts_decided:
 
-    /* Determine if SYN options needed: w26 = 0 or 8 (MSS=4 + WSCALE=4) */
+    /* Determine if SYN options needed: MSS(4) + WSCALE(4) + optional SACK-Perm(4) */
     mov     w26, #0
     tst     w21, #TCP_SYN
     b.eq    .Lbf_syn_opts_decided
-    mov     w26, #(TCP_OPT_MSS_LEN + 4) /* MSS(4) + NOP+WSCALE(4) */
+    mov     w26, #(TCP_OPT_MSS_LEN + 4) /* MSS(4) + NOP+WSCALE(4) = 8 */
+    ldrb    w0, [x19, #TCONN_SACK_ENABLED]
+    cbz     w0, .Lbf_syn_opts_decided
+    add     w26, w26, #4                 /* + NOP+NOP+SACK-Perm(4) = 12 */
 .Lbf_syn_opts_decided:
 
     /* 1. Build Ethernet header: dst=RMAC, src=net_our_mac, type=0x0800 */
@@ -2021,6 +2032,17 @@ tcp_build_frame:
     strb    w1, [x0, #6]
     ldrb    w1, [x19, #TCONN_RCV_WSCALE]
     strb    w1, [x0, #7]
+
+    /* SACK-Permitted option if negotiated: NOP+NOP+Kind=4+Len=2 = 4 bytes */
+    ldrb    w1, [x19, #TCONN_SACK_ENABLED]
+    cbz     w1, .Lbf_no_mss
+    mov     w1, #TCP_OPT_NOP
+    strb    w1, [x0, #8]
+    strb    w1, [x0, #9]
+    mov     w1, #TCP_OPT_SACK_PERM
+    strb    w1, [x0, #10]
+    mov     w1, #TCP_OPT_SACK_PERM_LEN
+    strb    w1, [x0, #11]
 .Lbf_no_mss:
 
     /* Copy payload if present */
@@ -2688,6 +2710,49 @@ tcp_parse_wscale:
  * Clobbers: x0-x4
  * Leaf function.
  */
+/*
+ * tcp_parse_sack_permitted — Check for SACK-Permitted option (Kind=4, Len=2)
+ *
+ * x0: frame pointer, w1: tcp_header_len
+ * Returns: w0 = 1 if found, 0 if not
+ * Clobbers: x0-x4
+ */
+.global tcp_parse_sack_permitted
+tcp_parse_sack_permitted:
+    cmp     w1, #TCP_HDR_MIN
+    b.le    .Lsp_not_found
+    add     x2, x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_HDR_MIN)
+    add     x3, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x3, x3, x1
+.Lsp_loop:
+    cmp     x2, x3
+    b.hs    .Lsp_not_found
+    ldrb    w4, [x2]
+    cbz     w4, .Lsp_not_found
+    cmp     w4, #TCP_OPT_NOP
+    b.eq    .Lsp_nop
+    add     x0, x2, #1
+    cmp     x0, x3
+    b.hs    .Lsp_not_found
+    ldrb    w0, [x2, #1]
+    cmp     w0, #2
+    b.lt    .Lsp_not_found
+    cmp     w4, #TCP_OPT_SACK_PERM
+    b.ne    .Lsp_skip
+    cmp     w0, #TCP_OPT_SACK_PERM_LEN
+    b.ne    .Lsp_skip
+    mov     w0, #1
+    ret
+.Lsp_nop:
+    add     x2, x2, #1
+    b       .Lsp_loop
+.Lsp_skip:
+    add     x2, x2, x0
+    b       .Lsp_loop
+.Lsp_not_found:
+    mov     w0, #0
+    ret
+
 tcp_parse_tsopt:
     /* If header_len <= 20, no options */
     cmp     w1, #TCP_HDR_MIN

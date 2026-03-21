@@ -96,7 +96,9 @@
 .equ TCONN_RTTVAR,          148     /* u32 — RTT variance (timer ticks, fixed-point /4) */
 .equ TCONN_RTO,             152     /* u32 — current RTO in timer ticks */
 .equ TCONN_SEND_TICK,       160     /* u64 — timestamp of segment being timed */
-/* 168-255: reserved */
+.equ TCONN_SACK_RECOVER,   168     /* u32 — SND_NXT at fast retransmit entry */
+.equ TCONN_SACK_RTX_OFF,   172     /* u32 — retransmit offset past SACKed ranges */
+/* 176-255: reserved */
 
 .equ TCONN_SIZE,       256     /* power of 2 for indexing */
 .equ TCONN_SHIFT,      8       /* log2(TCONN_SIZE) */
@@ -153,6 +155,10 @@
 .equ TCP_OPT_WSCALE,     3
 .equ TCP_OPT_WSCALE_LEN, 3
 .equ TCP_OUR_WSCALE,     0       /* Our shift = 0 (rxbuf 2 KB fits in 16 bits) */
+.equ TCP_OPT_SACK_PERM,     4       /* Kind: SACK-Permitted (RFC 2018) */
+.equ TCP_OPT_SACK_PERM_LEN, 2       /* Length: kind + length only */
+.equ TCP_OPT_SACK,           5       /* Kind: SACK blocks */
+.equ TCP_SACK_BLOCK_SIZE,    8       /* Each block: LeftEdge(4) + RightEdge(4) */
 .equ TCP_DEFAULT_MSS,     536   /* RFC 1122 */
 .equ TCP_OUR_MSS,         1460  /* ETH_MTU(1500) - IP(20) - TCP(20) */
 
