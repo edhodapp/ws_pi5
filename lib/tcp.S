@@ -279,11 +279,11 @@ tcp_rtx_save:
     /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x3, =tcp_conn_table
     sub     x3, x19, x3
-    lsr     x3, x3, #7
+    lsr     x3, x3, #TCONN_SHIFT
 
-    /* Dest = tcp_rtxbuf_pool + (slot << TCP_RXBUF_SHIFT) */
+    /* Dest = tcp_rtxbuf_pool + (slot << TCP_RTXBUF_SHIFT) */
     ldr     x4, =tcp_rtxbuf_pool
-    add     x4, x4, x3, lsl #TCP_RXBUF_SHIFT
+    add     x4, x4, x3, lsl #TCP_RTXBUF_SHIFT
 
     /* Byte-copy frame → rtxbuf */
     mov     x0, x4
@@ -528,11 +528,11 @@ tcp_retransmit_cb:
     /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #7
+    lsr     x2, x2, #TCONN_SHIFT
 
     /* Copy rtxbuf → tx_buf (RTXLEN bytes) */
     ldr     x3, =tcp_rtxbuf_pool
-    add     x3, x3, x2, lsl #TCP_RXBUF_SHIFT   /* src */
+    add     x3, x3, x2, lsl #TCP_RTXBUF_SHIFT  /* src */
     ldr     x4, [x20, #TSCTX_TX_BUF]            /* dst */
     ldrh    w21, [x19, #TCONN_RTXLEN]
     mov     w5, w21
@@ -1357,7 +1357,7 @@ tcp_estab_ack_handler:
     /* Copy data to rxbuf at offset RXLEN + gap */
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #7             /* slot index */
+    lsr     x2, x2, #TCONN_SHIFT             /* slot index */
     ldr     x0, =tcp_rxbuf_pool
     add     x0, x0, x2, lsl #TCP_RXBUF_SHIFT
     add     x0, x0, w9, uxtw       /* + RXLEN */
@@ -1393,7 +1393,7 @@ tcp_estab_ack_handler:
     /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #7             /* slot index */
+    lsr     x2, x2, #TCONN_SHIFT             /* slot index */
 
     /* Dest = tcp_rxbuf_pool + (slot << 11) + rxlen */
     ldr     x0, =tcp_rxbuf_pool
@@ -1576,7 +1576,7 @@ tcp_estab_fin_handler:
     /* Copy data to rxbuf */
     ldr     x2, =tcp_conn_table
     sub     x2, x21, x2
-    lsr     x2, x2, #7             /* slot index */
+    lsr     x2, x2, #TCONN_SHIFT             /* slot index */
     ldr     x0, =tcp_rxbuf_pool
     add     x0, x0, x2, lsl #TCP_RXBUF_SHIFT
     add     x0, x0, x5             /* + current RXLEN */
@@ -1986,7 +1986,7 @@ tcp_rx_peek:
     /* Compute slot index: (conn - tcp_conn_table) >> 7 */
     ldr     x1, =tcp_conn_table
     sub     x1, x0, x1
-    lsr     x1, x1, #7             /* slot index */
+    lsr     x1, x1, #TCONN_SHIFT   /* slot index */
 
     /* Buffer = tcp_rxbuf_pool + (slot << 11) */
     ldr     x2, =tcp_rxbuf_pool
@@ -2497,7 +2497,7 @@ tcp_fast_retransmit:
 
     ldr     x2, =tcp_conn_table
     sub     x2, x19, x2
-    lsr     x2, x2, #7
+    lsr     x2, x2, #TCONN_SHIFT
 
     ldr     x3, =tcp_rtxbuf_pool
     add     x3, x3, x2, lsl #TCP_RXBUF_SHIFT

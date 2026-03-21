@@ -6302,7 +6302,7 @@ test_tcp_rtx_save_on_send:
     /* Verify first byte of rtxbuf matches send_test_buf */
     ldr     x0, =tcp_conn_table
     sub     x0, x21, x0
-    lsr     x0, x0, #7             /* slot index */
+    lsr     x0, x0, #TCONN_SHIFT   /* slot index */
     ldr     x1, =tcp_rtxbuf_pool
     add     x1, x1, x0, lsl #TCP_RXBUF_SHIFT
     ldrb    w2, [x1]
@@ -7480,7 +7480,7 @@ test_tcp_listen_multi:
 
     /* Verify port 8080 slot: state=LISTEN, lport=0x901F (8080 NBO) */
     ldr     x0, =tcp_conn_table
-    add     x0, x0, x20, lsl #7    /* slot * 128 */
+    add     x0, x0, x20, lsl #TCONN_SHIFT  /* slot * TCONN_SIZE */
     ldrb    w1, [x0, #TCONN_STATE]
     cmp     w1, #TCPS_LISTEN
     b.ne    .Lfail_tcp_lm

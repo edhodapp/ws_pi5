@@ -77,7 +77,8 @@
 .equ TCONN_LAST_ACTIVE,    104     /* u64 — last activity timestamp (counter ticks) */
 .equ TCONN_PERSIST_SHIFT,  112     /* u8 — persist backoff shift (0=inactive) */
 /* 113-127: reserved for future use */
-.equ TCONN_SIZE,       128     /* power of 2 → lsl #7 for indexing */
+.equ TCONN_SIZE,       128     /* power of 2 for indexing */
+.equ TCONN_SHIFT,      7       /* log2(TCONN_SIZE) */
 
 /* Connection table */
 .equ TCP_MAX_CONNS,    16
@@ -100,6 +101,7 @@
 /* Retransmission constants */
 .equ TCP_MAX_RETRIES,      8       /* max retransmit attempts before RST+close */
 .equ TCP_RTO_SHIFT_CAP,    5       /* max shift for backoff: 1<<5 = 32 seconds */
+.equ TCP_RTXBUF_SHIFT,     11      /* log2(2048) — retransmit buffer per conn */
 .equ TCP_RTXBUF_POOL_SIZE, 32768   /* 16 × 2048 (same layout as rxbuf_pool) */
 
 /* TCP send context struct (for retransmit callback) */
