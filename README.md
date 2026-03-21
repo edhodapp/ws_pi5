@@ -381,11 +381,11 @@ The current 1-segment-in-flight design delivers a 200 KB page in 6.8 seconds at 
 
 | Parameter | Current | Target |
 |-----------|---------|--------|
-| Connections | 16 | 64 |
+| Connections | 16 | 128 |
 | Send buffer | 1514 bytes (1 frame) | 256 KB (circular) |
 | Window | 64 KB max (no WSCALE) | 256 KB via WSCALE |
 | Rxbuf | 2 KB | 2 KB (unchanged) |
-| Memory | ~68 KB | ~16.2 MB (~1.6% of Pi 3 RAM) |
+| Memory | ~68 KB | ~32.5 MB (~3.2% of Pi 3 RAM) |
 
 Implementation:
 1. WSCALE negotiation in SYN-ACK
