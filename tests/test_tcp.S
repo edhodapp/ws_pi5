@@ -203,6 +203,7 @@ test_tcp:
     bl      test_tcp_cwnd_gate
     bl      test_tcp_ooo_merge
     bl      test_tcp_rst_ratelimit
+    bl      test_tcp_rst_refill
     bl      test_tcp_syn_evict
     ldp     x29, x30, [sp], #16
     ret
@@ -9215,6 +9216,60 @@ test_tcp_rst_ratelimit:
     ret
 
 /* ========================================================================
+ * test_tcp_rst_refill — Zero tokens, forge stale last_tick so elapsed >
+ * freq, send SYN → refill triggers → RST (not dropped)
+ *
+ * Covers: tcp_rst_allow b.lo .Lrst_no_refill NOT-taken (refill path)
+ * Sets last_tick = timer_now() - 2*timer_freq() so elapsed is guaranteed
+ * > freq regardless of QEMU counter speed.
+ * ======================================================================== */
+test_tcp_rst_refill:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Zero tokens and forge a stale last_tick */
+    ldr     x0, =tcp_rst_tokens
+    str     wzr, [x0]
+
+    bl      timer_freq
+    mov     x19, x0                 /* x19 = freq */
+    bl      timer_now
+    /* last_tick = now - 2*freq → elapsed will be >= freq */
+    sub     x0, x0, x19, lsl #1
+    ldr     x1, =tcp_rst_last_tick
+    str     x0, [x1]
+
+    /* Send SYN — tokens=0 but refill should fire → RST (54) */
+    ldr     x0, =tcp_syn_wrongport_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    cmp     w0, #54
+    b.ne    .Lfail_tcp_rf
+
+    ldr     x0, =name_tcp_rf
+    bl      test_pass
+    b       .Ldone_tcp_rf
+
+.Lfail_tcp_rf:
+    ldr     x0, =name_tcp_rf
+    bl      test_fail
+
+.Ldone_tcp_rf:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_tcp_syn_evict — Fill slots 1-15 with SYN_RCVD, send SYN → SYN-ACK
  * (evicts a SYN_RCVD slot instead of returning RST)
  * ======================================================================== */
@@ -9901,6 +9956,7 @@ name_tcp_crr:       .asciz "tcp_cwnd_rtx_reset"
 name_tcp_cwga:      .asciz "tcp_cwnd_gate"
 name_tcp_oom:       .asciz "tcp_ooo_merge"
 name_tcp_rl:        .asciz "tcp_rst_ratelimit"
+name_tcp_rf:        .asciz "tcp_rst_refill"
 name_tcp_sevict:    .asciz "tcp_syn_evict"
 
 tcp_send_payload:
