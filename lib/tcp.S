@@ -971,6 +971,17 @@ tcp_listen_syn_handler:
     strb    wzr, [x21, #TCONN_TS_ENABLED]
 .Llsyn_ts_done:
 
+    /* Parse MSS option from incoming SYN */
+    ldrb    w1, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    lsr     w1, w1, #4
+    lsl     w1, w1, #2             /* tcp_header_len bytes */
+    mov     x0, x19
+    bl      tcp_parse_mss
+    cbz     w0, .Llsyn_mss_done
+    strh    w0, [x21, #TCONN_PEER_MSS]
+    strh    w0, [x21, #TCONN_CWND]
+.Llsyn_mss_done:
+
     /* Build SYN-ACK via tcp_build_frame (includes MSS option) */
     mov     x0, x21                 /* conn */
     mov     x1, x19                 /* frame buf */
@@ -1529,7 +1540,7 @@ tcp_close:
  * x0: connection pointer
  * x1: frame buffer (1514 bytes available)
  * x2: payload pointer
- * w3: payload length (1..1460)
+ * w3: payload length (1..peer_mss)
  * Returns: w0 = frame length (54 + payload_len), or 0 on error
  * Clobbers: x0-x6, x19-x25, x30
  */
@@ -1553,9 +1564,10 @@ tcp_send:
     ldrh    w0, [x19, #TCONN_RTXLEN]
     cbnz    w0, .Lts_err
 
-    /* Check 1 <= payload_len <= 1460 */
+    /* Check 1 <= payload_len <= peer MSS */
     cbz     w21, .Lts_err
-    cmp     w21, #1460
+    ldrh    w0, [x19, #TCONN_PEER_MSS]
+    cmp     w21, w0
     b.hi    .Lts_err
 
     /* Check payload_len <= SND_WND */
@@ -1674,10 +1686,10 @@ tcp_send_ready:
     /* Gate: retransmit pending → not ready */
     ldrh    w1, [x0, #TCONN_RTXLEN]
     cbnz    w1, .Ltsr_zero
+    ldrh    w1, [x0, #TCONN_PEER_MSS]
     ldrh    w0, [x0, #TCONN_SND_WND]
-    mov     w1, #1460
     cmp     w0, w1
-    csel    w0, w0, w1, lo          /* min(SND_WND, 1460) */
+    csel    w0, w0, w1, lo          /* min(SND_WND, peer_mss) */
     ret
 .Ltsr_zero:
     mov     w0, #0
@@ -1913,6 +1925,70 @@ tcp_timewait_cb:
     strb    wzr, [x0, #TCONN_STATE]
     mov     w1, #-1
     str     w1, [x0, #TCONN_TIMER_SLOT]
+    ret
+
+/*
+ * tcp_parse_mss — Parse MSS option from TCP header
+ *
+ * x0: frame pointer (Ethernet + IP + TCP)
+ * w1: tcp_header_len (bytes, from data offset field)
+ * Returns: w0 = MSS value (host order), or 0 if not found
+ * Clobbers: x0-x4
+ */
+tcp_parse_mss:
+    cmp     w1, #TCP_HDR_MIN
+    b.le    .Lmss_not_found
+
+    add     x2, x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_HDR_MIN)
+    add     x3, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x3, x3, x1
+
+.Lmss_loop:
+    cmp     x2, x3
+    b.hs    .Lmss_not_found
+
+    ldrb    w4, [x2]
+    cbz     w4, .Lmss_not_found     /* Kind 0 = EOL */
+    cmp     w4, #TCP_OPT_NOP
+    b.eq    .Lmss_nop
+
+    /* Variable-length option: need kind + length */
+    add     x0, x2, #1
+    cmp     x0, x3
+    b.hs    .Lmss_not_found
+
+    ldrb    w0, [x2, #1]           /* length byte */
+    cmp     w0, #2
+    b.lt    .Lmss_not_found        /* malformed */
+
+    cmp     w4, #TCP_OPT_MSS
+    b.ne    .Lmss_skip
+
+    cmp     w0, #TCP_OPT_MSS_LEN
+    b.ne    .Lmss_skip
+
+    /* Verify enough bytes remain */
+    add     x0, x2, #TCP_OPT_MSS_LEN
+    cmp     x0, x3
+    b.hi    .Lmss_not_found
+
+    /* MSS value at offset +2 (2 bytes, NBO) */
+    ldrh    w0, [x2, #2]
+    rev16   w0, w0
+    uxth    w0, w0
+    ret
+
+.Lmss_nop:
+    add     x2, x2, #1
+    b       .Lmss_loop
+
+.Lmss_skip:
+    ldrb    w0, [x2, #1]
+    add     x2, x2, x0
+    b       .Lmss_loop
+
+.Lmss_not_found:
+    mov     w0, #0
     ret
 
 /*

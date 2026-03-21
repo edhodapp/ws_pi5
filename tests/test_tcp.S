@@ -76,6 +76,7 @@ test_tcp:
     bl      test_tcp_init_test
     bl      test_tcp_syn_ack
     bl      test_tcp_synack_mss
+    bl      test_tcp_peer_mss
     bl      test_tcp_handshake
     bl      test_tcp_syn_no_listen
     bl      test_tcp_syn_rcvd_rst
@@ -1048,6 +1049,100 @@ test_tcp_synack_mss:
 
 .Ldone_tcp_samss:
     ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_peer_mss — SYN with MSS=1460 → TCONN_PEER_MSS=1460,
+ *                      tcp_send_ready clamps to 1460 (not 536 default)
+ * ======================================================================== */
+test_tcp_peer_mss:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Send SYN with MSS=1460 option */
+    ldr     x0, =tcp_syn_mss_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #58                     /* 54 + 4 MSS option */
+    bl      ttcp_fill_checksum
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #58                     /* SYN-ACK */
+    b.ne    .Lfail_tcp_pmss
+
+    /* Extract ISN from SYN-ACK */
+    ldr     x19, =tcp_test_buf
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    /* Find the SYN_RCVD connection */
+    ldr     x0, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lpmss_find:
+    cbz     w3, .Lfail_tcp_pmss
+    sub     w3, w3, #1
+    ldrb    w1, [x0, #TCONN_STATE]
+    cmp     w1, #TCPS_SYN_RCVD
+    b.eq    .Lpmss_found
+    add     x0, x0, #TCONN_SIZE
+    b       .Lpmss_find
+.Lpmss_found:
+    mov     x19, x0                     /* x19 = conn */
+
+    /* Verify TCONN_PEER_MSS = 1460 */
+    ldrh    w0, [x19, #TCONN_PEER_MSS]
+    mov     w1, #TCP_OUR_MSS
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_pmss
+
+    /* Complete handshake: ACK with SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    add     w1, w20, #1
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify state = ESTABLISHED */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_pmss
+
+    /* tcp_send_ready with SND_WND=2000 → should return 1460 (peer MSS) */
+    mov     w0, #2000
+    strh    w0, [x19, #TCONN_SND_WND]
+    mov     x0, x19
+    bl      tcp_send_ready
+    mov     w1, #TCP_OUR_MSS
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_pmss
+
+    ldr     x0, =name_tcp_pmss
+    bl      test_pass
+    b       .Ldone_tcp_pmss
+
+.Lfail_tcp_pmss:
+    ldr     x0, =name_tcp_pmss
+    bl      test_fail
+
+.Ldone_tcp_pmss:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /* ========================================================================
@@ -5467,12 +5562,12 @@ test_tcp_send_ready:
     cmp     w0, #500
     b.ne    .Lfail_tcp_tsr
 
-    /* Set SND_WND=2000 → tcp_send_ready returns 1460 (clamped) */
+    /* Set SND_WND=2000 → tcp_send_ready returns 536 (clamped to default peer MSS) */
     mov     w0, #2000
     strh    w0, [x21, #TCONN_SND_WND]
     mov     x0, x21
     bl      tcp_send_ready
-    cmp     w0, #1460
+    cmp     w0, #TCP_DEFAULT_MSS
     b.ne    .Lfail_tcp_tsr
 
     ldr     x0, =name_tcp_tsr
@@ -5629,10 +5724,10 @@ test_tcp_send_window_exhaustion:
     cmp     w0, w1
     b.ne    .Lfail_tcp_swe
 
-    /* Step 7: tcp_send_ready → returns 1000 */
+    /* Step 7: tcp_send_ready → returns 536 (min of SND_WND=1000, peer_mss=536) */
     mov     x0, x21
     bl      tcp_send_ready
-    cmp     w0, #1000
+    cmp     w0, #TCP_DEFAULT_MSS
     b.ne    .Lfail_tcp_swe
 
     /* Step 8: tcp_send 5 bytes → ret=59, SND_WND=995 */
@@ -8764,6 +8859,36 @@ tcp_syn_template:
     .byte   0x00, 0x00                               /* urgent: 0 */
 
 /*
+ * 58-byte TCP SYN to port 80 from 10.0.2.2:12345, SEQ=1, with MSS=1460
+ *
+ * Same as tcp_syn_template but with MSS option (Kind=2, Len=4, MSS=1460)
+ * IP totlen = 44 (0x002C), data offset = 6 (24 bytes)
+ */
+.balign 4
+tcp_syn_mss_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00                               /* ver/ihl, dscp */
+    .byte   0x00, 0x2C                               /* totlen: 44 */
+    .byte   0x12, 0x34                               /* id */
+    .byte   0x00, 0x00                               /* flags/frag */
+    .byte   0x40, 0x06                               /* ttl=64, proto=TCP */
+    .byte   0x50, 0x88                               /* IP checksum */
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src: 10.0.2.2 */
+    .byte   0x0A, 0x00, 0x02, 0x0F                   /* dst: 10.0.2.15 */
+    .byte   0x30, 0x39                               /* sport: 12345 */
+    .byte   0x00, 0x50                               /* dport: 80 */
+    .byte   0x00, 0x00, 0x00, 0x01                   /* seq: 1 */
+    .byte   0x00, 0x00, 0x00, 0x00                   /* ack: 0 */
+    .byte   0x60                                     /* data offset: 6 (24 bytes) */
+    .byte   0x02                                     /* flags: SYN */
+    .byte   0xFF, 0xFF                               /* window: 65535 */
+    .byte   0x00, 0x00                               /* checksum: 0 */
+    .byte   0x00, 0x00                               /* urgent: 0 */
+    .byte   0x02, 0x04, 0x05, 0xB4                   /* MSS option: 1460 */
+
+/*
  * 54-byte TCP ACK to port 80, SEQ=100, ACK=200, checksum=0
  */
 .balign 4
@@ -9188,6 +9313,7 @@ name_tcp_rstfin:    .asciz "tcp_rst_fin"
 name_tcp_init:      .asciz "tcp_init"
 name_tcp_synack:    .asciz "tcp_syn_ack"
 name_tcp_samss:     .asciz "tcp_synack_mss"
+name_tcp_pmss:      .asciz "tcp_peer_mss"
 name_tcp_hs:        .asciz "tcp_handshake"
 name_tcp_synnolist: .asciz "tcp_syn_no_listen"
 name_tcp_srst:      .asciz "tcp_syn_rcvd_rst"
