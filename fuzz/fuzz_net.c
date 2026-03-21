@@ -21,6 +21,8 @@ extern void timer_pool_init(void *pool, int capacity);
 extern void tcp_set_timer_pool(void *pool);
 extern void ip_reasm_init(void);
 extern void ip_reasm_set_timer_pool(void *pool);
+extern void icmp_init(void);
+extern void icmp_set_send_ctx(void *dwc2, void *ecm, void *tx_buf, void *send_fn);
 
 /* Override weak tcp_isn from tcp.S — CNTPCT_EL0 is not available
    under QEMU user mode, so provide a simple counter instead. */
@@ -39,10 +41,18 @@ void tcp_init_secret(void) { }
 unsigned long timer_now(void)  { return 0; }
 unsigned long timer_freq(void) { return 1; }
 
+/* Sink for ICMP error frames — exercises frame builder without I/O */
+static int icmp_send_sink(void *dwc2, void *ecm, void *buf, int len)
+{
+    (void)dwc2; (void)ecm; (void)buf; (void)len;
+    return 0;
+}
+
 /* Max Ethernet frame: 14-byte header + 1500-byte payload */
 #define ETH_FRAME_MAX 1514
 
 static char timer_pool[520] __attribute__((aligned(8)));
+static char icmp_tx_buf[70] __attribute__((aligned(16)));
 
 int main(void)
 {
@@ -59,6 +69,8 @@ int main(void)
     tcp_set_timer_pool(timer_pool);
     ip_reasm_init();
     ip_reasm_set_timer_pool(timer_pool);
+    icmp_init();
+    icmp_set_send_ctx(0, 0, icmp_tx_buf, icmp_send_sink);
 
     int n = read(0, buf, sizeof(buf));
     if (n > 0)

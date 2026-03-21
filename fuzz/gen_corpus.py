@@ -149,7 +149,48 @@ def main():
     eth = OUR_MAC + PEER_MAC + struct.pack('!H', 0x0800)
     seeds['ip_fragment.bin'] = eth + ip_hdr + icmp_frag
 
-    # 13. TCP SYN with MSS option (Kind=2, Len=4, Value=1460)
+    # 13. Wrong destination MAC — exercises net_recv_one MAC filter
+    wrong_mac = b'\xAA\xBB\xCC\x00\x00\x00' + PEER_MAC + struct.pack('!H', 0x0800)
+    wrong_mac += b'\x45\x00\x00\x1C\x12\x34\x00\x00\x40\x01\x00\x00'
+    wrong_mac += PEER_IP + OUR_IP + b'\x08\x00\x00\x00\x00\x01\x00\x01'
+    seeds['wrong_dst_mac.bin'] = wrong_mac
+
+    # 14. 802.3 length field EtherType (0x05DC) — exercises eth_type rejection
+    seeds['ethertype_802_3.bin'] = OUR_MAC + PEER_MAC + struct.pack('!H', 0x05DC) + b'\x00' * 28
+
+    # 15. IPv4 with TTL=0 — exercises ip_handle TTL check
+    icmp_ttl0 = struct.pack('!BBH HH', 8, 0, 0, 1, 1)
+    icmp_ck = ip_checksum(icmp_ttl0)
+    icmp_ttl0 = icmp_ttl0[:2] + struct.pack('!H', icmp_ck) + icmp_ttl0[4:]
+    ip_hdr_ttl0 = struct.pack('!BBHHHBBH4s4s',
+        0x45, 0x00, 28, 0x1234, 0x0000,
+        0, 1, 0, PEER_IP, OUR_IP)  # TTL=0
+    ck = ip_checksum(ip_hdr_ttl0)
+    ip_hdr_ttl0 = ip_hdr_ttl0[:10] + struct.pack('!H', ck) + ip_hdr_ttl0[12:]
+    seeds['ip_ttl_zero.bin'] = OUR_MAC + PEER_MAC + struct.pack('!H', 0x0800) + ip_hdr_ttl0 + icmp_ttl0
+
+    # 16. ARP reply from gateway — exercises new reply processing path
+    arp_reply = struct.pack('!HHBBH', 0x0001, 0x0800, 6, 4, 0x0002)  # OPER=reply
+    arp_reply += PEER_MAC + PEER_IP + OUR_MAC + OUR_IP
+    seeds['arp_reply.bin'] = OUR_MAC + PEER_MAC + struct.pack('!H', 0x0806) + arp_reply
+
+    # 17. ARP request with SPA=0.0.0.0 — exercises SPA validation
+    arp_spa0 = struct.pack('!HHBBH', 0x0001, 0x0800, 6, 4, 0x0001)
+    arp_spa0 += PEER_MAC + b'\x00\x00\x00\x00' + b'\x00' * 6 + OUR_IP
+    seeds['arp_spa_zero.bin'] = b'\xFF' * 6 + PEER_MAC + struct.pack('!H', 0x0806) + arp_spa0
+
+    # 18. Unknown IP protocol (99) — triggers ICMP Protocol Unreachable
+    seeds['ip_unknown_proto.bin'] = build_ip_frame(99, PEER_IP, OUR_IP, b'\x00' * 8)
+
+    # 19. UDP to unknown port 9999 — triggers ICMP Port Unreachable
+    udp_unknown = struct.pack('!HHHH', 9999, 9999, 8, 0)  # cksum=0 (skip)
+    seeds['udp_unknown_port.bin'] = build_ip_frame(17, PEER_IP, OUR_IP, udp_unknown)
+
+    # 20. ICMP with bad checksum — exercises checksum validation
+    icmp_badck = struct.pack('!BBH HH', 8, 0, 0xFFFF, 1, 1)  # wrong checksum
+    seeds['icmp_bad_checksum.bin'] = build_ip_frame(1, PEER_IP, OUR_IP, icmp_badck)
+
+    # 21. TCP SYN with MSS option
     #     Exercises tcp_parse_mss in tcp_listen_syn_handler
     tcp_mss = struct.pack('!HHIIBBHHH',
         12345, 80,
