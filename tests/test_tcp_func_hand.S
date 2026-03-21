@@ -34,6 +34,9 @@ test_tcp_func_handcrafted:
     bl      test_func_icmp_proto_unreach
     bl      test_func_icmp_port_unreach
     bl      test_func_multi_segment
+    bl      test_func_wscale_e2e
+    bl      test_func_sack_synack_wire
+    bl      test_func_sndbuf_retransmit
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1505,6 +1508,402 @@ test_func_multi_segment:
     ret
 
 /* ===========================================================================
+ * test_func_wscale_e2e — WSCALE negotiation through tcp_handle
+ *
+ * SYN with WSCALE=4 → SYN-ACK with WSCALE → handshake ACK with
+ * window=100 → verify SND_WND = 100 << 4 = 1600
+ * =========================================================================== */
+test_func_wscale_e2e:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build SYN with WSCALE=4: copy template, add NOP+WSCALE option */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfwe_cp1:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfwe_cp1
+
+    ldr     x19, =fh_scratch
+    /* doff = 6 (24 bytes) */
+    mov     w0, #0x60
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* NOP + Kind=3 + Len=3 + Shift=4 */
+    mov     w0, #1
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]
+    mov     w0, #TCP_OPT_WSCALE
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    mov     w0, #TCP_OPT_WSCALE_LEN
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w0, #4
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+    /* IP totlen = 44 */
+    mov     w0, #0x2C00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+    /* Recompute checksums */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #24
+    bl      tcp_checksum
+    mov     w2, w0
+    strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* SYN → SYN-ACK */
+    mov     x0, x19
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfwe_fail
+
+    /* Extract ISN from SYN-ACK */
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    /* Build handshake ACK with window=100 */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfwe_cp2:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfwe_cp2
+
+    mov     w0, #TCP_ACK_FLAG
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    mov     w0, #0x50
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    /* SEQ = 2 */
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* ACK = ISN+1 */
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    /* Window = 100 (NBO) */
+    mov     w0, #100
+    rev16   w0, w0
+    uxth    w0, w0
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+    /* Recompute checksums */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Find ESTABLISHED connection */
+    ldr     x21, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfwe_find:
+    cbz     w3, .Lfwe_fail
+    sub     w3, w3, #1
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Lfwe_found
+    add     x21, x21, #TCONN_SIZE
+    b       .Lfwe_find
+.Lfwe_found:
+
+    /* SND_WND should be 65535 << 4 = 1048560 (from SYN window, scaled)
+     * The handshake ACK's window is not applied by synrcvd_ack_handler. */
+    ldr     w0, [x21, #TCONN_SND_WND]
+    ldr     w1, =1048560
+    cmp     w0, w1
+    b.ne    .Lfwe_fail
+
+    /* SND_WSCALE should be 4 */
+    ldrb    w0, [x21, #TCONN_SND_WSCALE]
+    cmp     w0, #4
+    b.ne    .Lfwe_fail
+
+    ldr     x0, =name_fwe
+    bl      test_pass
+    b       .Lfwe_done
+.Lfwe_fail:
+    ldr     x0, =name_fwe
+    bl      test_fail
+.Lfwe_done:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ===========================================================================
+ * test_func_sack_synack_wire — SACK-Permitted on the wire in SYN-ACK
+ *
+ * SYN with SACK-Permitted → SYN-ACK must contain Kind=4 Len=2 in options
+ * =========================================================================== */
+test_func_sack_synack_wire:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Build SYN with SACK-Permitted: NOP NOP Kind=4 Len=2 */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfsw_cp:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfsw_cp
+
+    ldr     x19, =fh_scratch
+    mov     w0, #0x60              /* doff = 6 (24 bytes) */
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #1
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]     /* NOP */
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]     /* NOP */
+    mov     w0, #TCP_OPT_SACK_PERM
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w0, #TCP_OPT_SACK_PERM_LEN
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]
+    mov     w0, #0x2C00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #24
+    bl      tcp_checksum
+    mov     w2, w0
+    strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #58
+    bl      tcp_handle
+    /* SYN-ACK should be 66 bytes (62 base + 4 SACK-Perm) */
+    cmp     w0, #66
+    b.ne    .Lfsw_fail
+
+    /* Scan SYN-ACK options for Kind=4 (SACK-Permitted) */
+    /* Options start at ETH_PAYLOAD + IP_HDR_MIN + 20 = offset 54 in frame.
+     * With MSS(4) + WSCALE(4) + SACK-Perm(4) = 12 bytes of options,
+     * SACK-Perm should be at offsets 62-63 (after MSS+WSCALE). */
+    /* Scan for Kind=4 anywhere in option area (offsets 54-65) */
+    add     x0, x19, #(ETH_PAYLOAD + IP_HDR_MIN + 20)
+    mov     x1, #12                 /* option area size */
+    mov     w20, #0                 /* found flag */
+.Lfsw_scan:
+    cbz     x1, .Lfsw_check
+    ldrb    w3, [x0], #1
+    sub     x1, x1, #1
+    cmp     w3, #TCP_OPT_SACK_PERM
+    b.ne    .Lfsw_scan
+    mov     w20, #1                 /* found */
+.Lfsw_check:
+    cbz     w20, .Lfsw_fail
+
+    ldr     x0, =name_fsw
+    bl      test_pass
+    b       .Lfsw_done
+.Lfsw_fail:
+    ldr     x0, =name_fsw
+    bl      test_fail
+.Lfsw_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ===========================================================================
+ * test_func_sndbuf_retransmit — Retransmit rebuilds frame from send buffer
+ *
+ * Handshake → send data → call tcp_retransmit_cb → verify the mock send
+ * received a frame with correct SEQ (= SND_UNA) and payload from send buffer
+ * =========================================================================== */
+test_func_sndbuf_retransmit:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Complete handshake via SYN + ACK */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfsr_cp1:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfsr_cp1
+    ldr     x0, =fh_scratch
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    ldr     x0, =fh_scratch
+    strh    w2, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfsr_fail
+
+    /* Extract ISN */
+    ldr     x0, =fh_scratch
+    ldr     w20, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20
+
+    /* Send handshake ACK */
+    ldr     x0, =fh_syn_template
+    ldr     x1, =fh_scratch
+    mov     w2, #54
+.Lfsr_cp2:
+    ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    subs    w2, w2, #1
+    b.ne    .Lfsr_cp2
+    ldr     x19, =fh_scratch
+    mov     w0, #TCP_ACK_FLAG
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    mov     w0, #0x50
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    mov     w2, w0
+    strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Find ESTABLISHED connection */
+    ldr     x21, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lfsr_find:
+    cbz     w3, .Lfsr_fail
+    sub     w3, w3, #1
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Lfsr_found
+    add     x21, x21, #TCONN_SIZE
+    b       .Lfsr_find
+.Lfsr_found:
+
+    /* Set SND_WND large */
+    mov     w0, #2000
+    str     w0, [x21, #TCONN_SND_WND]
+
+    /* Save SND_UNA before send */
+    ldr     w22, [x21, #TCONN_SND_UNA]
+
+    /* Send 5 bytes */
+    mov     x0, x21
+    ldr     x1, =fh_scratch
+    ldr     x2, =fh_multi_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfsr_fail
+
+    /* Install mock send to capture retransmit */
+    ldr     x0, =fh_rtx_send_count
+    str     wzr, [x0]
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =fh_rtx_tx_buf
+    ldr     x3, =fh_rtx_send_fn
+    bl      tcp_set_send_ctx
+
+    /* Set RTXCOUNT=0 so retransmit_cb proceeds */
+    strb    wzr, [x21, #TCONN_RTXCOUNT]
+
+    /* Call tcp_retransmit_cb directly */
+    mov     x0, x21
+    bl      tcp_retransmit_cb
+
+    /* Mock send should have been called */
+    ldr     x0, =fh_rtx_send_count
+    ldr     w0, [x0]
+    cbz     w0, .Lfsr_fail
+
+    /* Retransmitted frame's SEQ should be SND_UNA */
+    ldr     x0, =fh_rtx_tx_buf
+    ldr     w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w0, w0
+    cmp     w0, w22
+    b.ne    .Lfsr_fail
+
+    /* Payload byte at frame offset 54 should be 'H' (from "Hello") */
+    ldr     x0, =fh_rtx_tx_buf
+    ldrb    w0, [x0, #54]
+    ldr     x1, =fh_multi_payload
+    ldrb    w1, [x1]
+    cmp     w0, w1
+    b.ne    .Lfsr_fail
+
+    ldr     x0, =name_fsr
+    bl      test_pass
+    b       .Lfsr_done
+.Lfsr_fail:
+    ldr     x0, =name_fsr
+    bl      test_fail
+.Lfsr_done:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* Fake send for retransmit capture */
+fh_rtx_send_fn:
+    ldr     x9, =fh_rtx_send_count
+    ldr     w10, [x9]
+    add     w10, w10, #1
+    str     w10, [x9]
+    mov     w0, #0
+    ret
+
+/* ===========================================================================
  * Test data
  * =========================================================================== */
 .section .rodata
@@ -1588,6 +1987,9 @@ name_fdae:  .asciz "func_data_ack_ts_echo"
 name_fpu:   .asciz "func_icmp_proto_unreach"
 name_fptu:  .asciz "func_icmp_port_unreach"
 name_fms:   .asciz "func_multi_segment"
+name_fwe:   .asciz "func_wscale_e2e"
+name_fsw:   .asciz "func_sack_synack_wire"
+name_fsr:   .asciz "func_sndbuf_retransmit"
 
 fh_multi_payload:
     .asciz "Hello"
@@ -1625,3 +2027,11 @@ fh_icmp_tx_buf:
 .balign 4
 fh_icmp_send_count:
     .word   0
+
+.balign 4
+fh_rtx_send_count:
+    .word   0
+
+.balign 16
+fh_rtx_tx_buf:
+    .space  ETH_FRAME_MAX
