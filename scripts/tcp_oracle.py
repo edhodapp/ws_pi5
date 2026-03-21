@@ -281,7 +281,7 @@ FSA_TABLE = {
         0: (TCPS_CLOSED, 'conn_close'),
         1: None,
         2: None,
-        3: (TCPS_TIME_WAIT, 'drop'),
+        3: (TCPS_TIME_WAIT, 'timewait_fin'),
         4: (TCPS_TIME_WAIT, 'drop'),
     },
     TCPS_CLOSING: {
@@ -417,9 +417,10 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
     if handler == 'estab_fin':
         next_state = entry[0]
         reply_seq = to_nbo_ldr(PRE_SND_NXT)
-        reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
+        # Data on FIN: data_bytes consumed first, then FIN consumes 1
+        reply_ack = to_nbo_ldr(PRE_RCV_NXT + data_bytes + 1)
         return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
-                PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
+                PRE_RCV_NXT + data_bytes + 1, data_bytes, PRE_SND_UNA)
 
     if handler == 'drop':
         next_state = entry[0]
@@ -448,6 +449,13 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
         reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
         return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
                 PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
+
+    if handler == 'timewait_fin':
+        next_state = entry[0]
+        reply_seq = to_nbo_ldr(PRE_SND_NXT)
+        reply_ack = to_nbo_ldr(PRE_RCV_NXT)
+        return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
+                PRE_RCV_NXT, 0, PRE_SND_UNA)
 
     if handler == 'closing_ack':
         next_state = entry[0]

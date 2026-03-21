@@ -447,9 +447,10 @@ test_func_paws_reject:
 /* ===========================================================================
  * test_func_icmp_teardown — ICMP Dest Unreachable through full stack
  *
- * Setup: tcp_init, tcp_listen(80), pre-seed ESTABLISHED conn in slot 1
+ * Setup: tcp_init, tcp_listen(80), pre-seed SYN_RCVD conn in slot 1
  * Send:  ICMP type 3 frame matching the conn via net_recv_one
  * Verify: return=0, conn state=CLOSED, slot 0 LISTEN preserved
+ * (RFC 5461: ICMP errors are hard errors for SYN_RCVD, soft for ESTABLISHED)
  * =========================================================================== */
 test_func_icmp_teardown:
     stp     x29, x30, [sp, #-48]!
@@ -460,11 +461,11 @@ test_func_icmp_teardown:
     mov     w0, #80
     bl      tcp_listen
 
-    /* Pre-seed slot 1 as ESTABLISHED */
+    /* Pre-seed slot 1 as SYN_RCVD (ICMP hard error only for opening state) */
     ldr     x19, =tcp_conn_table
     add     x19, x19, #TCONN_SIZE
 
-    mov     w0, #TCPS_ESTABLISHED
+    mov     w0, #TCPS_SYN_RCVD
     strb    w0, [x19, #TCONN_STATE]
 
     mov     w0, #0x5000             /* lport = 80 NBO */
@@ -787,11 +788,12 @@ test_func_handshake_ts:
 /* ===========================================================================
  * test_func_icmp_rtx_timer — ICMP teardown cancels active retransmit timer
  *
- * Setup: tcp_init, tcp_listen(80), init timer pool, pre-seed ESTABLISHED
+ * Setup: tcp_init, tcp_listen(80), init timer pool, pre-seed SYN_RCVD
  *        conn with active timer (TIMER_SLOT=0, RTXLEN=54, RTXCOUNT=2)
  * Send:  ICMP type 3 via net_recv_one
  * Verify: state=CLOSED, TIMER_SLOT=-1, RTXLEN=0, RTXCOUNT=0,
  *         timer pool slot callback cleared
+ * (RFC 5461: ICMP hard error only for SYN_RCVD)
  * =========================================================================== */
 test_func_icmp_rtx_timer:
     stp     x29, x30, [sp, #-48]!
@@ -810,11 +812,11 @@ test_func_icmp_rtx_timer:
     ldr     x0, =fh_timer_pool
     bl      tcp_set_timer_pool
 
-    /* Pre-seed slot 1 as ESTABLISHED */
+    /* Pre-seed slot 1 as SYN_RCVD (ICMP hard error only for opening state) */
     ldr     x19, =tcp_conn_table
     add     x19, x19, #TCONN_SIZE
 
-    mov     w0, #TCPS_ESTABLISHED
+    mov     w0, #TCPS_SYN_RCVD
     strb    w0, [x19, #TCONN_STATE]
     mov     w0, #0x5000
     strh    w0, [x19, #TCONN_LPORT]

@@ -45,6 +45,7 @@
 .global tcp_start_reaper
 .global tcp_persist_arm
 .global tcp_persist_cb
+.global tcp_timewait_fin_handler
 
 .section .text
 
@@ -448,7 +449,10 @@ tcp_icmp_err:
     cmp     w4, w20
     b.ne    .Licmpe_next
 
-    /* Match found — clear retransmit and close */
+    /* Match found — only hard-close SYN_RCVD (RFC 5461: soft error for established) */
+    ldrb    w4, [x2, #TCONN_STATE]
+    cmp     w4, #TCPS_SYN_RCVD
+    b.ne    .Licmpe_done             /* established+ → soft error, ignore */
     mov     x19, x2                 /* save conn ptr (x2 clobbered by rtx_clear) */
     mov     x0, x2
     bl      tcp_rtx_clear
@@ -606,8 +610,9 @@ tcp_build_reply:
     /* 5. Zero IP ID */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_ID)]
 
-    /* 6. Zero IP flags/frag */
-    strh    wzr, [x19, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    /* 6. IP flags/frag: DF bit set (0x4000 NBO = 0x0040 LE) */
+    mov     w3, #0x0040
+    strh    w3, [x19, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
 
     /* 8. Swap TCP sport ↔ dport */
     ldrh    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SPORT)]
@@ -1513,18 +1518,61 @@ tcp_estab_ack_handler:
  * Build ACK reply: SEQ=SND_NXT(NBO), ACK=new_RCV_NXT(NBO)
  */
 tcp_estab_fin_handler:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
 
-    mov     x21, x0                 /* x21 = conn (save for window) */
+    mov     x21, x0                 /* x21 = conn */
+    mov     x22, x1                 /* x22 = frame */
+    sub     w23, w2, w3             /* w23 = data_len */
+    mov     w24, w3                 /* w24 = header_len */
 
+    /* If data_len > 0, accept data before handling FIN */
+    cbz     w23, .Lefin_no_data
+
+    /* Verify SEQ == RCV_NXT (in-order) */
+    ldr     w5, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w5, w5
+    ldr     w6, [x21, #TCONN_RCV_NXT]
+    cmp     w5, w6
+    b.ne    .Lefin_no_data          /* out of order → skip data */
+
+    /* Check rx buffer overflow */
+    ldrh    w5, [x21, #TCONN_RXLEN]
+    add     w7, w5, w23
+    cmp     w7, #TCP_RXBUF_SIZE
+    b.hi    .Lefin_no_data          /* overflow → skip data */
+
+    /* Copy data to rxbuf */
+    ldr     x2, =tcp_conn_table
+    sub     x2, x21, x2
+    lsr     x2, x2, #7             /* slot index */
+    ldr     x0, =tcp_rxbuf_pool
+    add     x0, x0, x2, lsl #TCP_RXBUF_SHIFT
+    add     x0, x0, x5             /* + current RXLEN */
+    add     x1, x22, #(ETH_PAYLOAD + IP_HDR_MIN)
+    add     x1, x1, x24            /* skip TCP header */
+    mov     w2, w23
+.Lefin_dcopy:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lefin_dcopy
+
+    /* Update RXLEN and RCV_NXT */
+    strh    w7, [x21, #TCONN_RXLEN]
+    ldr     w6, [x21, #TCONN_RCV_NXT]
+    add     w6, w6, w23
+    str     w6, [x21, #TCONN_RCV_NXT]
+
+.Lefin_no_data:
     /* RCV_NXT += 1 (FIN consumes one seq) */
-    ldr     w5, [x0, #TCONN_RCV_NXT]
+    ldr     w5, [x21, #TCONN_RCV_NXT]
     add     w5, w5, #1
-    str     w5, [x0, #TCONN_RCV_NXT]
+    str     w5, [x21, #TCONN_RCV_NXT]
 
-    ldr     w19, [x0, #TCONN_SND_NXT]  /* SND_NXT (host order) */
+    ldr     w19, [x21, #TCONN_SND_NXT]  /* SND_NXT (host order) */
     rev     w20, w5                     /* new RCV_NXT → NBO */
 
     /* Dynamic window */
@@ -1534,7 +1582,7 @@ tcp_estab_fin_handler:
     rev16   w4, w4
     uxth    w4, w4
 
-    mov     x0, x1                  /* frame */
+    mov     x0, x22                 /* frame */
     rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG      /* flags = ACK */
@@ -1542,9 +1590,10 @@ tcp_estab_fin_handler:
     mov     x5, x21                 /* conn */
     bl      tcp_build_reply
 
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 /*
@@ -1611,8 +1660,9 @@ tcp_build_frame:
     /* id = 0 */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_ID)]
 
-    /* flags/frag = 0 */
-    strh    wzr, [x20, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    /* flags/frag: DF bit set (0x4000 NBO = 0x0040 LE) */
+    mov     w0, #0x0040
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
 
     /* ttl=64, proto=TCP(6) */
     mov     w0, #IP_DEFAULT_TTL
@@ -2684,6 +2734,72 @@ tcp_persist_cb:
     ret
     .ltorg
 
+/*
+ * tcp_timewait_fin_handler — Re-ACK retransmitted FIN in TIME_WAIT
+ *
+ * x0: connection, x1: frame
+ * Rebuilds ACK reply with current SEQ/ACK, restarts 2MSL timer.
+ * Returns: w0 = 54 or 66 (frame length)
+ */
+tcp_timewait_fin_handler:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = conn */
+
+    /* Build ACK: SEQ=SND_NXT(NBO), ACK=RCV_NXT(NBO) */
+    ldr     w20, [x19, #TCONN_SND_NXT]
+    ldr     w21, [x19, #TCONN_RCV_NXT]
+
+    /* Dynamic window */
+    ldrh    w4, [x19, #TCONN_RXLEN]
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
+    rev16   w4, w4
+    uxth    w4, w4
+
+    mov     x0, x1                  /* frame */
+    rev     w1, w20                 /* SEQ NBO */
+    rev     w2, w21                 /* ACK NBO */
+    mov     w3, #TCP_ACK_FLAG
+    mov     x5, x19                 /* conn */
+    bl      tcp_build_reply
+    mov     w22, w0                 /* save frame len */
+
+    /* Restart 2MSL timer: cancel old if active */
+    ldr     w1, [x19, #TCONN_TIMER_SLOT]
+    cmn     w1, #1
+    b.eq    .Ltwfin_arm
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Ltwfin_done
+    bl      timer_cancel
+
+.Ltwfin_arm:
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Ltwfin_done
+    mov     x20, x0                 /* pool */
+    bl      timer_freq
+    mov     x1, #60
+    mul     x21, x0, x1             /* 60s ticks */
+    bl      timer_now
+    add     x1, x0, x21             /* expiry */
+    mov     x0, x20                 /* pool */
+    ldr     x2, =tcp_timewait_cb
+    mov     x3, x19                 /* context = conn */
+    bl      timer_set
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+.Ltwfin_done:
+    mov     w0, w22                 /* return frame len */
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
 /* --- FSA transition table (9 states × 5 events = 45 entries × 16 bytes) ---
  *
  * Entry layout (matches vmio.inc TRANS_*):
@@ -2765,7 +2881,7 @@ tcp_fsa_table:
     .word TCPS_CLOSED, 0; .xword tcp_conn_close_handler         /* RST → CLOSED */
     .word 0, 0; .xword 0                                       /* SYN → RST */
     .word 0, 0; .xword 0                                       /* SYNACK → RST */
-    .word TCPS_TIME_WAIT, 0; .xword tcp_drop_handler             /* FIN → TIME_WAIT */
+    .word TCPS_TIME_WAIT, 0; .xword tcp_timewait_fin_handler       /* FIN → TIME_WAIT (re-ACK) */
     .word TCPS_TIME_WAIT, 0; .xword tcp_drop_handler             /* ACK → TIME_WAIT */
 
     /* State 9: CLOSING */

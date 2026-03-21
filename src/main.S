@@ -67,6 +67,9 @@ main:
     ldr     x0, =timer_pool
     bl      tcp_set_timer_pool
 
+    /* Start idle connection reaper */
+    bl      tcp_start_reaper
+
     /* Set up TCP retransmit send context */
     ldr     x0, =DWC2_BASE
     ldr     x1, =ecm_state

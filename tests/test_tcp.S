@@ -231,6 +231,9 @@ test_tcp:
     bl      test_tcp_persist_cb_no_send_fn
     bl      test_tcp_persist_cb_shift_cap
     bl      test_tcp_persist_arm_with_pool
+    bl      test_tcp_df_bit
+    bl      test_tcp_fin_with_data
+    bl      test_tcp_timewait_fin_reack
     ldp     x29, x30, [sp], #16
     ret
 
@@ -7695,7 +7698,7 @@ ttcp_build_icmp_err:
     ret
 
 /* ========================================================================
- * test_tcp_icmp_err_match — ICMP type 3 matching ESTABLISHED conn → CLOSED
+ * test_tcp_icmp_err_match — ICMP type 3 on ESTABLISHED → soft error (stays ESTABLISHED)
  * ======================================================================== */
 test_tcp_icmp_err_match:
     stp     x29, x30, [sp, #-32]!
@@ -7721,9 +7724,10 @@ test_tcp_icmp_err_match:
     /* Verify return value = 0 */
     cbnz    w0, .Lfail_tcp_iem
 
-    /* Verify connection is now CLOSED */
+    /* ESTABLISHED → soft error: connection stays ESTABLISHED (RFC 5461) */
     ldrb    w0, [x19, #TCONN_STATE]
-    cbnz    w0, .Lfail_tcp_iem
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_iem
 
     ldr     x0, =name_tcp_iem
     bl      test_pass
@@ -7775,21 +7779,42 @@ test_tcp_icmp_err_no_match:
     ret
 
 /* ========================================================================
- * test_tcp_icmp_err_rtx_clear — ICMP error clears retransmit state
+ * test_tcp_icmp_err_rtx_clear — ICMP error on SYN_RCVD clears retransmit state
  * ======================================================================== */
 test_tcp_icmp_err_rtx_clear:
     stp     x29, x30, [sp, #-32]!
     stp     x19, x20, [sp, #16]
 
-    bl      ttcp_do_handshake
-    cbz     x0, .Lfail_tcp_ierc
-    mov     x19, x0
+    /* SYN → SYN_RCVD (stop before completing handshake) */
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    mov     w1, #54
+    bl      tcp_handle
+    cmp     w0, #58
+    b.ne    .Lfail_tcp_ierc
 
-    /* Seed some fake retransmit state */
-    mov     w0, #100
-    strh    w0, [x19, #TCONN_RTXLEN]
-    mov     w0, #3
-    strb    w0, [x19, #TCONN_RTXCOUNT]
+    /* Find SYN_RCVD connection */
+    ldr     x19, =tcp_conn_table
+    mov     w3, #TCP_MAX_CONNS
+.Lierc_find:
+    cbz     w3, .Lfail_tcp_ierc
+    sub     w3, w3, #1
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_SYN_RCVD
+    b.eq    .Lierc_found
+    add     x19, x19, #TCONN_SIZE
+    b       .Lierc_find
+.Lierc_found:
+
+    /* Verify retransmit state is present (SYN-ACK saved) */
+    ldrh    w0, [x19, #TCONN_RTXLEN]
+    cbz     w0, .Lfail_tcp_ierc
 
     /* Build matching ICMP error */
     ldr     x0, =tcp_test_buf2
@@ -7806,6 +7831,10 @@ test_tcp_icmp_err_rtx_clear:
     ldrh    w0, [x19, #TCONN_RTXLEN]
     cbnz    w0, .Lfail_tcp_ierc
     ldrb    w0, [x19, #TCONN_RTXCOUNT]
+    cbnz    w0, .Lfail_tcp_ierc
+
+    /* Verify state is CLOSED */
+    ldrb    w0, [x19, #TCONN_STATE]
     cbnz    w0, .Lfail_tcp_ierc
 
     ldr     x0, =name_tcp_ierc
@@ -10879,6 +10908,240 @@ test_tcp_persist_arm_with_pool:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_df_bit — Verify DF bit set on outgoing TCP frames
+ * ======================================================================== */
+test_tcp_df_bit:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_df
+    mov     x19, x0                 /* conn */
+
+    /* tcp_build_frame: build a bare ACK */
+    mov     x0, x19
+    ldr     x1, =tcp_test_buf3
+    mov     w2, #TCP_ACK_FLAG
+    mov     x3, #0
+    mov     w4, #0
+    bl      tcp_build_frame
+
+    /* Check IP_FLAGS_FRAG field: expect 0x0040 (DF bit in LE halfword) */
+    ldr     x0, =tcp_test_buf3
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    mov     w2, #0x0040
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_df
+
+    /* Also verify tcp_build_reply path: SYN→SYN-ACK frame has DF */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf3
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf3
+    mov     w1, #54
+    bl      tcp_handle
+    cbz     w0, .Lfail_tcp_df
+
+    ldr     x0, =tcp_test_buf3
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_FLAGS_FRAG)]
+    mov     w2, #0x0040
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_df
+
+    ldr     x0, =name_tcp_df
+    bl      test_pass
+    b       .Ldone_tcp_df
+.Lfail_tcp_df:
+    ldr     x0, =name_tcp_df
+    bl      test_fail
+.Ldone_tcp_df:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_tcp_fin_with_data — FIN+ACK carrying data → data accepted + CLOSE_WAIT
+ * ======================================================================== */
+test_tcp_fin_with_data:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_fwd
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Build FIN+ACK with 5 bytes of data: SEQ=2, ACK=ISN+1 */
+    /* Use the finack template (54 bytes) but extend to 59 bytes */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x19, =tcp_test_buf
+
+    /* Fix ACK to ISN+1 */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Append 5 bytes of payload: "Hello" */
+    mov     w0, #'H'
+    strb    w0, [x19, #54]
+    mov     w0, #'e'
+    strb    w0, [x19, #55]
+    mov     w0, #'l'
+    strb    w0, [x19, #56]
+    mov     w0, #'l'
+    strb    w0, [x19, #57]
+    mov     w0, #'o'
+    strb    w0, [x19, #58]
+
+    /* Update IP TotalLength: 40 + 5 = 45 → 0x002D NBO → 0x2D00 LE */
+    mov     w0, #0x2D00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum over 25 bytes (20 hdr + 5 data) */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #25
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle with frame_len=59 (14+45) */
+    mov     x0, x19
+    mov     w1, #59
+    bl      tcp_handle
+
+    /* Verify reply generated (ACK) */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_fwd
+
+    /* Verify state = CLOSE_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_CLOSE_WAIT
+    b.ne    .Lfail_tcp_fwd
+
+    /* Verify RXLEN = 5 (data was accepted) */
+    ldrh    w0, [x21, #TCONN_RXLEN]
+    cmp     w0, #5
+    b.ne    .Lfail_tcp_fwd
+
+    /* Verify RCV_NXT = 2 + 5 + 1(FIN) = 8 */
+    ldr     w0, [x21, #TCONN_RCV_NXT]
+    cmp     w0, #8
+    b.ne    .Lfail_tcp_fwd
+
+    /* Verify data in rxbuf */
+    mov     x0, x21
+    bl      tcp_rx_peek
+    /* x0 = buf ptr, w1 = len */
+    cmp     w1, #5
+    b.ne    .Lfail_tcp_fwd
+    ldrb    w2, [x0]
+    cmp     w2, #'H'
+    b.ne    .Lfail_tcp_fwd
+    ldrb    w2, [x0, #4]
+    cmp     w2, #'o'
+    b.ne    .Lfail_tcp_fwd
+
+    ldr     x0, =name_tcp_fwd
+    bl      test_pass
+    b       .Ldone_tcp_fwd
+.Lfail_tcp_fwd:
+    ldr     x0, =name_tcp_fwd
+    bl      test_fail
+.Ldone_tcp_fwd:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_timewait_fin_reack — TIME_WAIT + FIN → re-ACK with frame output
+ * ======================================================================== */
+test_tcp_timewait_fin_reack:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_twfr
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Force connection into TIME_WAIT */
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+    /* Set RCV_NXT = 3 (as if we already processed FIN: initial 2 + 1 FIN) */
+    mov     w0, #3
+    str     w0, [x21, #TCONN_RCV_NXT]
+
+    /* Send retransmitted FIN+ACK: SEQ=2, ACK=ISN+1 */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+
+    /* Fix ACK to ISN+1 */
+    add     w0, w22, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Call tcp_handle */
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify ACK reply was generated (>0) */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_twfr
+
+    /* Verify state is still TIME_WAIT */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_twfr
+
+    /* Verify reply has ACK flag */
+    ldrb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    cmp     w0, #TCP_ACK_FLAG
+    b.ne    .Lfail_tcp_twfr
+
+    ldr     x0, =name_tcp_twfr
+    bl      test_pass
+    b       .Ldone_tcp_twfr
+.Lfail_tcp_twfr:
+    ldr     x0, =name_tcp_twfr
+    bl      test_fail
+.Ldone_tcp_twfr:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+    .ltorg
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -11517,6 +11780,9 @@ name_tcp_pcwo:      .asciz "tcp_persist_cb_wnd_open"
 name_tcp_pcns:      .asciz "tcp_persist_cb_no_send_fn"
 name_tcp_pcsc:      .asciz "tcp_persist_cb_shift_cap"
 name_tcp_pawp:      .asciz "tcp_persist_arm_with_pool"
+name_tcp_df:        .asciz "tcp_df_bit"
+name_tcp_fwd:       .asciz "tcp_fin_with_data"
+name_tcp_twfr:      .asciz "tcp_timewait_fin_reack"
 
 tcp_send_payload:
     .ascii  "World"
