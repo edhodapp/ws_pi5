@@ -1,15 +1,16 @@
-/* PL011 UART register addresses for BCM2711 (Raspberry Pi 4)
- * Peripheral base: 0xFE000000 (was 0x3F000000 on BCM2837/Pi 3) */
+/* PL011 UART register addresses — derived from platform.inc */
 
-.equ UART_BASE,    0xFE201000
+.include "platform.inc"
 
-.equ UART_DR,      0xFE201000           /* Data Register */
-.equ UART_FR,      0xFE201018           /* Flag Register */
-.equ UART_IBRD,    0xFE201024           /* Integer Baud Rate Divisor */
-.equ UART_FBRD,    0xFE201028           /* Fractional Baud Rate Divisor */
-.equ UART_LCRH,    0xFE20102C           /* Line Control Register */
-.equ UART_CR,      0xFE201030           /* Control Register */
-.equ UART_ICR,     0xFE201044           /* Interrupt Clear Register */
+.equ UART_BASE,    (PERIPH_BASE + UART_OFFSET)
+
+.equ UART_DR,      (UART_BASE + 0x000)  /* Data Register */
+.equ UART_FR,      (UART_BASE + 0x018)  /* Flag Register */
+.equ UART_IBRD,    (UART_BASE + 0x024)  /* Integer Baud Rate Divisor */
+.equ UART_FBRD,    (UART_BASE + 0x028)  /* Fractional Baud Rate Divisor */
+.equ UART_LCRH,    (UART_BASE + 0x02C)  /* Line Control Register */
+.equ UART_CR,      (UART_BASE + 0x030)  /* Control Register */
+.equ UART_ICR,     (UART_BASE + 0x044)  /* Interrupt Clear Register */
 
 /* Flag Register bits */
 .equ UART_FR_TXFF, 0x20                 /* Transmit FIFO full (bit 5) */

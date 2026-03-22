@@ -66,7 +66,7 @@ _start:
     bl      test_usb_xfer_status_fail
     bl      test_usb_enum_set_addr_fail
     bl      test_usb_enum_get_full_fail
-    /* bl      test_usb_xfer_out_data — skip to isolate hang */
+    bl      test_usb_xfer_out_data
     bl      test_parse_bulk_eps
     bl      test_parse_no_bulk
     bl      test_parse_zero_blength

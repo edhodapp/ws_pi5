@@ -12,14 +12,14 @@ if [ ! -f "$TEST_KERNEL" ]; then
     exit 1
 fi
 
-echo "Running tests on QEMU raspi4b..."
+echo "Running tests on QEMU raspi3b..."
 
 OUTFILE=$(mktemp)
 trap "rm -f $OUTFILE" EXIT
 
 # Run QEMU in background with serial output to file
 qemu-system-aarch64 \
-    -M raspi4b \
+    -M raspi3b \
     -kernel "$TEST_KERNEL" \
     -nographic \
     -serial file:"$OUTFILE" \

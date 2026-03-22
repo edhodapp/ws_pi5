@@ -1,7 +1,8 @@
-/* DWC2 USB Host Controller registers for BCM2837 (Raspberry Pi 3) */
+/* DWC2 USB Host Controller registers — derived from platform.inc */
 
-/* BCM2711 (Pi 4) peripheral base = 0xFE000000 */
-.equ DWC2_BASE,        0xFE980000
+.include "platform.inc"
+
+.equ DWC2_BASE,        (PERIPH_BASE + DWC2_OFFSET)
 
 /* Global registers (offsets from DWC2_BASE) */
 .equ DWC2_GOTGCTL,     0x000       /* OTG Control */

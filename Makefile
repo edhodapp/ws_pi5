@@ -4,6 +4,11 @@ OBJCOPY = aarch64-linux-gnu-objcopy
 CC_AARCH64 = aarch64-linux-gnu-gcc
 
 ASFLAGS = -I include/
+
+# For Pi 4 hardware build: make PLATFORM=pi4
+ifeq ($(PLATFORM),pi4)
+ASFLAGS += --defsym PLATFORM_PI4=1
+endif
 LDFLAGS = -T linker.ld -nostdlib
 
 BUILD   = build
