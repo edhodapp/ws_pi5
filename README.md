@@ -89,11 +89,10 @@ hw_test/        Hardware test scripts for Pi 4 test fixture
 
 ## Building
 
-Requires the AArch64 cross-toolchain and QEMU 10+ (for raspi4b support):
+Requires the AArch64 cross-toolchain and QEMU:
 
 ```
-sudo apt install gcc-aarch64-linux-gnu
-sudo apt install -t bookworm-backports qemu-system-arm   # QEMU 10.0 from backports
+sudo apt install gcc-aarch64-linux-gnu qemu-system-arm ninja-build
 ```
 
 For functional tests, install [PICT](https://github.com/microsoft/pict) (Microsoft's pairwise/combinatorial testing tool):
@@ -101,6 +100,17 @@ For functional tests, install [PICT](https://github.com/microsoft/pict) (Microso
 ```
 sudo apt install pict
 ```
+
+### Dual-Platform Build
+
+The codebase supports two target platforms via `include/platform.inc`:
+
+| Target | Peripheral Base | Build Command | Test Command |
+|--------|----------------|---------------|-------------|
+| **Pi 3** (QEMU testing) | `0x3F000000` | `make` | `make test` |
+| **Pi 4** (production hardware) | `0xFE000000` | `make PLATFORM=pi4` | Real hardware |
+
+Default builds target Pi 3 for QEMU 7.2 `raspi3b` testing. Pi 4 production builds use `make PLATFORM=pi4` which defines `PLATFORM_PI4`, switching all peripheral addresses.
 
 Build the kernel image:
 
@@ -130,7 +140,7 @@ make clean
 
 ### Unit Tests
 
-358 tests run on `qemu-system-aarch64 -M raspi4b`, covering every layer from UART output through USB enumeration to the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
+358 tests run on `qemu-system-aarch64 -M raspi3b` (QEMU 7.2), covering every layer from UART output through USB enumeration to the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -405,12 +415,25 @@ The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **BCM2711 peripheral addresses** | Done | 0x3F → 0xFE for UART, DWC2, mailbox |
+| **Platform switching** | Done | `platform.inc` derives addresses from `PERIPH_BASE`; `make PLATFORM=pi4` for hardware |
 | **EL2→EL1 drop** | Done | Pi 4 boots at EL2; boot.S configures HCR/CNTHCTL/CPTR and erets to EL1 |
 | **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM |
 | **UART3 on GPIO 4/5** | Planned | ALT4 function, frees GPIO 14 for fan |
 | **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
-| **QEMU 10 test regression** | Investigating | Tests hang after ~27 passes; appears to be QEMU emulation issue, not code bug |
+
+### QEMU Situation
+
+QEMU 7.2 (Debian stable) is used for testing on `raspi3b`. All 358 unit + 153 functional tests pass.
+
+QEMU 9.x and 10.x have a regression that causes tests to hang after ~27 passes on both `raspi3b` and `raspi4b` machines. Investigation found:
+- The hang occurs in pure computation functions (no MMIO) that work correctly in standalone test binaries
+- The EL2→EL1 transition works (27 tests pass before the hang)
+- BSS zeroing completes (boot banner prints)
+- The QEMU execution trace shows a jump to address 0x200 (exception vector), suggesting a spurious data abort in QEMU's instruction translation
+
+QEMU 8.2.10 was tested but lacks `raspi4b` support. The `raspi4b` machine type was added in QEMU 9.0.
+
+**Decision:** Use QEMU 7.2/raspi3b for CI testing, real Pi 4 hardware for production validation. The `platform.inc` build flag makes switching between Pi 3 (test) and Pi 4 (production) addresses trivial.
 
 ### HTTPS / TLS 1.3
 
