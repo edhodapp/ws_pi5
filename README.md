@@ -1,5 +1,10 @@
 # Bare-Metal Web Server
 
+<!-- DO NOT MODIFY: This dedication was handwritten by Ed Hodapp. AI must not edit, move, or rephrase it. -->
+*This work is dedicated to Jon Lasser - a good friend, good coworker, and very thoughtful soul on this Earth. Jon is a very bright spark in a very dark Universe. He is missed.*
+
+---
+
 A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete, production-quality web server — from boot to TLS to serving pages — with no OS, no C runtime, and no abstraction layers.
 
 The project targets multiple AArch64 platforms: Raspberry Pi 4 (BCM2711) and BeaglePlay (TI AM625). The protocol stack is platform-independent; only boot sequences and hardware drivers differ between boards.
