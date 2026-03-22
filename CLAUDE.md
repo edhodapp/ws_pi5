@@ -27,16 +27,16 @@
 
 ---
 
-# Project: Bare-Metal AArch64 Raspberry Pi 3
+# Project: Bare-Metal AArch64 Raspberry Pi 4
 
 ## Overview
-Bare-metal ARM assembly project targeting Raspberry Pi 3 (AArch64). No OS — runs directly on hardware (or QEMU `raspi3b`).
+Bare-metal ARM assembly project targeting Raspberry Pi 4 (AArch64, BCM2711). No OS — runs directly on hardware (or QEMU `raspi4b`).
 
 ## Toolchain
 - Assembler: `aarch64-linux-gnu-as`
 - Linker: `aarch64-linux-gnu-ld`
 - Objcopy: `aarch64-linux-gnu-objcopy`
-- Emulator: `qemu-system-aarch64 -M raspi3b`
+- Emulator: `qemu-system-aarch64 -M raspi4b`
 - Build: `make` (GNU Make 4.3)
 
 ## Project Structure
@@ -68,10 +68,14 @@ Bare-metal ARM assembly project targeting Raspberry Pi 3 (AArch64). No OS — ru
 - Use `.section .text._start` for the entry point so the linker places it first
 
 ## Hardware Details
-- Target: BCM2837 (Raspberry Pi 3)
+- Target: BCM2711 (Raspberry Pi 4, 8 GB)
 - Kernel load address: `0x80000` (aarch64 boot)
-- PL011 UART base: `0x3F201000`
-- Stack top: `0x100000`
+- Boot: EL2 → EL1 drop in boot.S (Pi 4 starts at EL2)
+- Peripheral base: `0xFE000000`
+- PL011 UART base: `0xFE201000`
+- DWC2 USB base: `0xFE980000`
+- Mailbox base: `0xFE00B880`
+- Stack top: dynamically placed above BSS (`ALIGN(__bss_end, 16) + 0x10000`)
 
 ## Git
 - user.name: edhodapp
