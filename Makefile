@@ -70,9 +70,13 @@ BP_TEST_OBJS =
 ifeq ($(PLATFORM_TAG),beagleplay)
   PLAT_OBJS      = $(BP_OBJS)
   PLAT_TEST_OBJS = $(BP_TEST_OBJS)
+  # Non-Pi platforms need Pi UART for test output (QEMU raspi3b)
+  TEST_UART      = $(BUILD)/test_uart.o
 else
   PLAT_OBJS      = $(PI_OBJS)
   PLAT_TEST_OBJS = $(PI_TEST_OBJS)
+  # Pi already has uart.o in PLAT_OBJS
+  TEST_UART      =
 endif
 
 # ---------------------------------------------------------------------------
@@ -89,7 +93,7 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_ntp.o $(BUILD)/test_md5.o $(BUILD)/test_http.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
-    $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
+    $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
 
 FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
     $(BUILD)/test_tcp_func_hand.o \
@@ -165,6 +169,12 @@ $(BUILD):
 
 clean:
 	rm -rf $(BUILD) kernel8.img
+
+# ===========================================================================
+# Test UART — always Pi PL011 (test kernel runs on QEMU raspi3b)
+# ===========================================================================
+$(BUILD)/test_uart.o: platform/pi/drivers/uart.S $(PI_INC)/uart.inc | $(BUILD)
+	$(AS) -I include/ -I $(PI_INC)/ $< -o $@
 
 # ===========================================================================
 # Platform boot + main (selected by PLATFORM_DIR)
