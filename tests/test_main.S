@@ -1,3 +1,10 @@
+/*
+ * Weak default for test_platform_drivers — overridden by
+ * tests/pi/test_pi_all.S or tests/beagleplay/test_bp_all.S
+ * when the platform's test objects are linked.
+ */
+.weak test_platform_drivers
+
 .section .text._start
 
 .global _start
@@ -54,43 +61,7 @@ _start:
     bl      test_example
     bl      test_vmio_queue
     bl      test_vmio_engine
-    bl      test_mailbox
-    bl      test_mbox_response_fail
-    bl      test_dwc2
-    bl      test_dwc2_timeout
-    bl      test_usb_enum
-    bl      test_dwc2_mbox_fail
-    bl      test_dwc2_xfer_timeout
-    bl      test_usb_xfer_setup_fail
-    bl      test_usb_xfer_data_fail
-    bl      test_usb_xfer_status_fail
-    bl      test_usb_enum_set_addr_fail
-    bl      test_usb_enum_get_full_fail
-    bl      test_usb_xfer_out_data
-    bl      test_parse_bulk_eps
-    bl      test_parse_no_bulk
-    bl      test_parse_zero_blength
-    bl      test_get_config_desc
-    bl      test_parse_overrun
-    bl      test_gcd_pass1_fail
-    bl      test_gcd_pass2_fail
-    bl      test_gcd_clamp
-    bl      test_cdc_ecm_init
-    bl      test_cdc_ecm_enum_fail
-    bl      test_cdc_ecm_cfg_fail
-    bl      test_cdc_ecm_no_bulk
-    bl      test_cdc_ecm_set_cfg_fail
-    bl      test_bulk_xfer_out
-    bl      test_bulk_xfer_in
-    bl      test_bulk_xfer_fail
-    bl      test_ecm_activate
-    bl      test_ecm_activate_fail
-    bl      test_ecm_send
-    bl      test_ecm_recv
-    bl      test_main_success
-    bl      test_main_dwc2_fail
-    bl      test_main_ecm_init_fail
-    bl      test_main_ecm_activate_fail
+    bl      test_platform_drivers
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr
