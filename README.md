@@ -1,10 +1,12 @@
-# Bare-Metal Web Server Appliance
+# Bare-Metal Web Server
 
-A bare-metal HTTPS web server for Raspberry Pi 4, written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete, production-quality web server — from boot to TLS to serving pages — with no OS, no C runtime, and no abstraction layers.
+A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete, production-quality web server — from boot to TLS to serving pages — with no OS, no C runtime, and no abstraction layers.
+
+The project targets multiple AArch64 platforms: Raspberry Pi 4 (BCM2711) and BeaglePlay (TI AM625). The protocol stack is platform-independent; only boot sequences and hardware drivers differ between boards.
 
 ## The Experiment
 
-This project is two things at once: a real artifact (a bare-metal web server appliance built from scratch in assembly) and an experiment in how humans and AI can collaborate on systems programming.
+This project is two things at once: a real artifact (a bare-metal web server built from scratch in assembly) and an experiment in how humans and AI can collaborate on systems programming.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -25,13 +27,13 @@ This is an open question, not a conclusion. The hypothesis is that the human rul
 
 ## What It Does
 
-Boots on a Raspberry Pi 4 (BCM2711, 8 GB), brings up the native GENET Ethernet MAC, and serves HTTP. The full path:
+Boots on an AArch64 board, brings up Ethernet, and serves HTTP. The full path:
 
 ```
-boot.S          Core 0 init, EL2→EL1 drop, stack, BSS zero
-  main.S        uart_init → genet_init (planned, currently USB CDC-ECM)
-                  → timer_pool_init → ip_reasm_init → icmp_init
-                  → tcp_init → tcp_listen(80) → tcp_set_timer_pool
+boot.S          Core 0 init, EL2→EL1 drop (Pi 4), stack, BSS zero
+  main.S        uart_init → ethernet_init → timer_pool_init
+                  → ip_reasm_init → icmp_init → tcp_init
+                  → tcp_listen(80) → tcp_set_timer_pool
                   → tcp_start_reaper → tcp_set_send_ctx
                   → arp_start → ntp_init → ntp_start → http_init
     net_loop    Receive Ethernet frames, dispatch, send replies
@@ -50,41 +52,77 @@ Kernel image: 25 KB. Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP sen
 ## Project Structure
 
 ```
-src/            Main kernel source
-  boot.S          Entry point — EL2→EL1 drop, park cores 1-3, stack, BSS, call main
-  main.S          Hardware bring-up, net_loop dispatcher, http_poll integration
-lib/            Pure computation libraries (no MMIO dependencies)
-  eth.S           Ethernet frame utilities — EtherType, header builder, MAC compare
-  net_cfg.S       Wire-format MAC and IP address data
-  net.S           Receive dispatcher — routes by EtherType with MAC filtering
-  arp.S           ARP request/reply handler, proactive cache refresh (timer-driven)
-  ip.S            RFC 1071 checksum, IPv4 header validation, protocol dispatch
-  ip_reasm.S      IP fragment reassembly — 4-slot engine with overlap detection
-  icmp.S          ICMP echo reply + error generation (rate-limited, loop-suppressed)
-  udp.S           UDP checksum with pseudo-header, validation, echo service (port 7)
-  tcp.S           TCP — 3600-line implementation: 128-conn FSA, WSCALE, SACK,
-                    multi-segment send, 256 KB circular send buffer, RFC 6298 RTO
-  http.S          HTTP/1.1 server — GET parser, 200/404 responses, cooperative poll
-  ntp.S           SNTP client — timer-driven polling, auth, monotonicity, backoff
-  md5.S           MD5 hash — used for TCP ISN generation (RFC 6528)
-  timer_pool.S    Software timer pool — set, cancel, check expired
-  vmio_queue.S    Circular event queue with priority levels
-  vmio_engine.S   Finite state automaton engine — init, single-step
-drivers/        Hardware drivers (BCM2711 / Pi 4)
-  uart.S          PL011 UART init at 115200, putc, puts
-  mailbox.S       VideoCore mailbox IPC (USB power-on, temperature)
-  dwc2.S          DWC2 USB host controller init and port reset
-  usb_enum.S      USB device enumeration via control transfers
-  usb_desc.S      Config descriptor reading and bulk endpoint parsing
-  usb_bulk.S      Bulk transfer execution with DATA toggle tracking
-  cdc_ecm.S       CDC-ECM device init, activate, send/recv
-  timer_hw.S      ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0)
-include/        Shared constants and macros (.inc files)
-tests/          Test sources — 358 unit tests across 27 files
-tests/func/     PICT-based functional test models
-fuzz/           Fuzz harness for network packet parsers
-scripts/        Build and test automation (including Python oracle)
-hw_test/        Hardware test scripts for Pi 4 test fixture
+lib/                Platform-independent protocol stack (no MMIO dependencies)
+  eth.S               Ethernet frame utilities — EtherType, header builder, MAC compare
+  net_cfg.S           Wire-format MAC and IP address data
+  net.S               Receive dispatcher — routes by EtherType with MAC filtering
+  arp.S               ARP request/reply handler, proactive cache refresh (timer-driven)
+  ip.S                RFC 1071 checksum, IPv4 header validation, protocol dispatch
+  ip_reasm.S          IP fragment reassembly — 4-slot engine with overlap detection
+  icmp.S              ICMP echo reply + error generation (rate-limited, loop-suppressed)
+  udp.S               UDP checksum with pseudo-header, validation, echo service (port 7)
+  tcp.S               TCP — 3600 lines: 128-conn FSA, WSCALE, SACK, RFC 6298 RTO,
+                        multi-segment send, 256 KB circular send buffer
+  http.S              HTTP/1.1 server — GET parser, 200/404 responses, cooperative poll
+  ntp.S               SNTP client — timer-driven polling, auth, monotonicity, backoff
+  md5.S               MD5 hash — used for TCP ISN generation (RFC 6528)
+  timer_hw.S          ARM generic timer access (CNTPCT_EL0, CNTFRQ_EL0) — architectural
+  timer_pool.S        Software timer pool — set, cancel, check expired
+  vmio_queue.S        Circular event queue with priority levels
+  vmio_engine.S       Finite state automaton engine — init, single-step
+include/            Shared constants and macros (.inc files)
+  tcp.inc             TCONN struct layout, TCP constants
+  http.inc            HCONN struct layout, HTTP state machine constants
+  net.inc             Ethernet/ARP/IP/ICMP constants
+  ntp.inc             NTP constants
+  timer.inc           Timer pool constants
+  vmio.inc            VMIO engine constants
+platform/pi/        Raspberry Pi (BCM2837 / BCM2711)
+  boot.S              Entry point — EL2→EL1 drop, park cores 1-3, stack, BSS, call main
+  main.S              DWC2 USB → CDC-ECM init, net_loop, http_poll
+  include/            Pi-specific constants
+    platform.inc        PERIPH_BASE (0x3F for Pi 3 / 0xFE for Pi 4)
+    dwc2.inc            DWC2 USB host register map
+    usb.inc             USB protocol constants
+    usb_desc.inc        USB descriptor parsing constants
+    cdc_ecm.inc         CDC-ECM constants
+    uart.inc            PL011 UART register offsets
+    mailbox.inc         VideoCore mailbox constants
+  drivers/            Pi hardware drivers
+    uart.S              PL011 UART init at 115200, putc, puts
+    mailbox.S           VideoCore mailbox IPC (USB power-on, temperature)
+    dwc2.S              DWC2 USB host controller init and port reset
+    usb_enum.S          USB device enumeration via control transfers
+    usb_desc.S          Config descriptor reading and bulk endpoint parsing
+    usb_bulk.S          Bulk transfer execution with DATA toggle tracking
+    cdc_ecm.S           CDC-ECM device init, activate, send/recv
+platform/beagleplay/ BeaglePlay (TI AM625)
+  boot.S              Entry point — core parking, stack, BSS (A53 enters at EL1)
+  main.S              CPSW Ethernet init (stub), net_loop
+  include/            AM625-specific constants
+    platform.inc        AM625 peripheral addresses (UART0, CPSW, DMTIMER, GPIO, GTC)
+    uart.inc            16550 UART register offsets and bit masks
+    cpsw.inc            CPSW 3G Ethernet MAC constants (stub)
+  drivers/            (TBD: uart.S, cpsw.S)
+tests/              Unit and functional tests
+  test_main.S         Test runner (boot, dispatch, pass/fail reporting)
+  test_*.S            Shared protocol stack tests (322 tests)
+  pi/                 Pi-specific driver tests (36 tests)
+    test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
+    test_dwc2.S         DWC2 USB host tests
+    test_usb_enum.S     USB enumeration tests
+    test_usb_desc.S     USB descriptor parsing tests
+    test_usb_bulk.S     USB bulk transfer tests
+    test_usb_fail.S     USB failure-path tests
+    test_cdc_ecm.S      CDC-ECM tests
+    test_cdc_ecm_data.S CDC-ECM data transfer tests
+    test_mailbox.S      VideoCore mailbox tests
+    test_boot_main.S    Boot/main integration tests
+  beagleplay/         BeaglePlay-specific driver tests (TBD)
+  func/               PICT-based functional test model
+fuzz/               Fuzz harness for network packet parsers
+scripts/            Build and test automation (including Python oracle)
+hw_test/            Hardware test scripts for Pi 4 test fixture
 ```
 
 ## Building
@@ -101,16 +139,17 @@ For functional tests, install [PICT](https://github.com/microsoft/pict) (Microso
 sudo apt install pict
 ```
 
-### Dual-Platform Build
+### Multi-Platform Build
 
-The codebase supports two target platforms via `include/platform.inc`:
+The codebase supports multiple target platforms. Each platform has its own boot sequence, drivers, and peripheral addresses under `platform/<name>/`. The shared protocol stack in `lib/` compiles identically for all platforms — only the assembler include path (`-I platform/<name>/include/`) changes.
 
-| Target | Peripheral Base | Build Command | Test Command |
-|--------|----------------|---------------|-------------|
-| **Pi 3** (QEMU testing) | `0x3F000000` | `make` | `make test` |
-| **Pi 4** (production hardware) | `0xFE000000` | `make PLATFORM=pi4` | Real hardware |
+| Target | Build Command | Test Command | Notes |
+|--------|---------------|--------------|-------|
+| **Pi 3** (QEMU testing) | `make` | `make test` | Default. PERIPH_BASE `0x3F000000` |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware | PERIPH_BASE `0xFE000000` |
+| **BeaglePlay** (AM625) | `make PLATFORM=beagleplay` | `make test PLATFORM=beagleplay` | Stubs — drivers TBD |
 
-Default builds target Pi 3 for QEMU 7.2 `raspi3b` testing. Pi 4 production builds use `make PLATFORM=pi4` which defines `PLATFORM_PI4`, switching all peripheral addresses.
+All test kernels run on QEMU 7.2 `raspi3b`. For non-Pi platforms, the Pi PL011 UART is automatically linked into test kernels for serial output on QEMU. Platform-specific driver tests are included only for the selected platform; shared protocol tests run for all platforms.
 
 Build the kernel image:
 
@@ -140,7 +179,9 @@ make clean
 
 ### Unit Tests
 
-358 tests run on `qemu-system-aarch64 -M raspi3b` (QEMU 7.2), covering every layer from UART output through USB enumeration to the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
+358 tests (Pi) / 322 tests (BeaglePlay shared) run on `qemu-system-aarch64 -M raspi3b` (QEMU 7.2). The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling. Pi-specific tests cover the DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration. BeaglePlay driver tests will be added as drivers are implemented.
+
+The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override (e.g., `tests/pi/test_pi_all.S`) that calls its platform-specific tests. Platforms with no driver tests yet use the weak default (a bare `ret`), so the shared protocol tests run cleanly.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
@@ -149,9 +190,9 @@ Branch coverage is audited after each feature: every conditional branch in produ
 The TDD workflow:
 
 1. Write a test in `tests/` — call `test_pass` or `test_fail` with a test name string
-2. Register it with `bl test_xxx` in `tests/test_main.S`
+2. Register it with `bl test_xxx` in `tests/test_main.S` (shared) or `tests/pi/test_pi_all.S` (Pi)
 3. `make test` — verify it fails (red)
-4. Implement in `lib/`, `drivers/`, or `src/`
+4. Implement in `lib/` or `platform/<name>/`
 5. `make test` — verify it passes (green)
 6. Commit
 
@@ -191,6 +232,8 @@ Thirteen multi-step protocol-level tests verify correctness properties across se
 Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
 
 Six independent parameters — connection state (10 states), TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 138 PICT-generated test vectors plus 15 handcrafted scenario tests for a total of 153 functional tests. The handcrafted tests cover cross-layer integration paths that PICT cannot reach: multi-port listen, timestamp negotiation, PAWS rejection, ICMP teardown, ICMP error generation (Protocol/Port Unreachable), multi-segment send with partial ACK, WSCALE end-to-end, SACK-Permitted wire format, send buffer retransmit, RTT measurement, and SACK-aware dup-ACK fast retransmit. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, post-state, reply flags, SEQ/ACK values, and post-connection fields (RCV_NXT, RXLEN, SND_UNA). This gives two independent specifications of TCP correctness written in different languages — if both agree on all 145 cases, confidence is very high.
+
+Functional tests are platform-independent (they test protocol logic, not drivers) and pass identically for all platforms.
 
 The pipeline:
 
@@ -341,28 +384,32 @@ afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 | `tcp_ts_handshake.bin` | SYN(TSopt) + ACK | Timestamp negotiation |
 | `tcp_ooo_merge.bin` | Handshake + OOO + in-order | OOO buffering and merge |
 
-## Hardware Test Plan
+## Platform Details
 
-### Target Platform: Raspberry Pi 4 (8 GB)
+### Raspberry Pi 4 (BCM2711)
 
-The target hardware is a Pi 4 Model B with the official case and fan, connected to a Chromebook for development.
+- **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
+- **Kernel load:** `0x80000` (standard AArch64 boot)
+- **Boot:** EL2 → EL1 drop in `platform/pi/boot.S` (Pi 4 starts at EL2; Pi 3/QEMU starts at EL1, drop is skipped)
+- **Ethernet:** Native Gigabit MAC (BCM GENET) — planned, currently using USB CDC-ECM
+- **UART:** PL011 at PERIPH_BASE + `0x201000` (Pi 4 hardware will use UART3 on GPIO 4/5)
+- **USB:** DWC2 host at PERIPH_BASE + `0x980000`
+- **Mailbox:** VideoCore IPC at PERIPH_BASE + `0x00B880`
 
-### GPIO Pin Assignments
+#### GPIO Pin Assignments
 
 | Header Pin | GPIO | Function | Notes |
 |------------|------|----------|-------|
-| Pin 7 | GPIO 4 | **UART3 TX** | Serial debug output to Chromebook |
-| Pin 29 | GPIO 5 | **UART3 RX** | Serial debug input from Chromebook |
+| Pin 7 | GPIO 4 | **UART3 TX** | Serial debug output |
+| Pin 29 | GPIO 5 | **UART3 RX** | Serial debug input |
 | Pin 8 | GPIO 14 | **Fan control** | Official Pi 4 case fan (on/off) |
 | Pin 4 | — | **5V** | Fan power |
 | Pin 6 | — | **GND** | Fan ground |
 | Pin 9 or 14 | — | **GND** | Serial adapter ground |
 
-UART0 (the default PL011 on GPIO 14/15) is not used — GPIO 14 is reassigned to fan control. UART3 (ALT4 function on GPIO 4/5) provides serial debug instead.
+#### Serial Debug Wiring
 
-### Serial Debug Wiring
-
-Connect a **3.3V** USB-to-serial adapter (CP2102 or FTDI FT232RL) to the Pi 4 GPIO header:
+Connect a **3.3V** USB-to-serial adapter (CP2102 or FTDI FT232RL):
 
 ```
 Pi 4 Pin 7  (GPIO 4 / UART3 TX) → Adapter RX
@@ -370,20 +417,19 @@ Pi 4 Pin 29 (GPIO 5 / UART3 RX) → Adapter TX
 Pi 4 Pin 9  (GND)                → Adapter GND
 ```
 
-**Do NOT connect the adapter's VCC/3.3V pin** — the Pi powers itself. **Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO.
+**Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO. Do not connect the adapter's VCC pin.
 
-On the Chromebook:
-```
-screen /dev/ttyUSB0 115200
-```
+### BeaglePlay (TI AM625)
 
-### Fan Control
+- **SoC:** TI AM625, Cortex-A53 quad-core, 2 GB RAM
+- **Kernel load:** `0x80000` (standard AArch64 boot)
+- **Boot:** A53 enters at EL1 after TI ROM/SPL — no EL drop needed
+- **Ethernet:** CPSW 3G native Gigabit MAC at `0x08000000` — direct memory-mapped, no USB involved
+- **UART:** 16550-compatible UART0 at `0x02800000`
+- **Documentation:** TI AM62x TRM (SPRUJ87A) — full register-level documentation publicly available
+- **Supply chain:** TI guarantees 10-15 year production availability
 
-The official Raspberry Pi 4 case fan is controlled via GPIO 14 (on/off). The kernel reads CPU temperature from the VideoCore mailbox and toggles the fan based on a configurable threshold (default: on at 60°C, off at 45°C, with hysteresis to prevent rapid cycling).
-
-### Network
-
-The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This replaces the Pi 3's USB CDC-ECM path with a direct memory-mapped driver.
+The BeaglePlay platform is a port target. The entire shared protocol stack (`lib/`) compiles and tests cleanly for BeaglePlay — 322 unit tests and 153 functional tests pass. Platform-specific drivers (CPSW Ethernet, 16550 UART) are stubbed and will be implemented during hardware bringup.
 
 ## Current Status
 
@@ -399,41 +445,45 @@ The Pi 4 has a native Gigabit Ethernet MAC (BCM GENET) — no USB involved. This
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
 | **TLS/HTTPS** | Planned | TLS 1.3 with ARMv8 crypto extensions |
-| **Pi 4 platform** | In progress | EL2 drop done, addresses updated; GENET/UART3/fan pending |
+| **Pi 4 drivers** | Partial | DWC2 USB, CDC-ECM working; GENET Ethernet, UART3, fan planned |
+| **BeaglePlay drivers** | Stubbed | CPSW Ethernet and 16550 UART stubs; implementation pending |
 
 **Kernel image:** 25 KB (text: 17.5 KB, data: 4.4 KB, BSS: 32.6 MB runtime)
 
-**Test coverage:** 358 unit tests + 153 functional tests (138 PICT + 15 handcrafted) + 39 fuzz seeds (23 single-packet + 16 multi-packet). Complete branch coverage on all new code.
+**Test coverage:**
+- **Pi:** 358 unit tests + 153 functional tests + 39 fuzz seeds = **550 total**
+- **BeaglePlay:** 322 unit tests + 153 functional tests = **475 total** (shared protocol stack)
+- Complete branch coverage on all production code
 
-**Next:**
-- Pi 4 hardware bringup (GENET Ethernet, UART3, fan control)
-- TLS 1.3 / HTTPS
+### QEMU Situation
+
+QEMU 7.2 (Debian stable) is used for testing on `raspi3b`. All tests pass for both Pi and BeaglePlay platform builds.
+
+QEMU 9.x and 10.x have a regression that causes tests to hang after ~27 passes on both `raspi3b` and `raspi4b` machines. Investigation found the hang occurs in pure computation functions (no MMIO) that work correctly in standalone test binaries. The QEMU execution trace shows a jump to address 0x200 (exception vector), suggesting a spurious data abort in QEMU's instruction translation.
+
+**Decision:** Use QEMU 7.2/raspi3b for CI testing, real hardware for production validation.
 
 ## Work in Progress
+
+### BeaglePlay Port (AM625)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **Directory structure** | Done | `platform/beagleplay/` with boot, main, include stubs |
+| **Shared test suite** | Done | 322 unit + 153 functional tests pass on QEMU |
+| **16550 UART driver** | Stubbed | Register definitions in `uart.inc`, driver TBD |
+| **CPSW Ethernet driver** | Stubbed | Constants in `cpsw.inc`, driver TBD |
+| **Hardware bringup** | Pending | Waiting for board |
 
 ### Pi 4 Hardware Bringup
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Platform switching** | Done | `platform.inc` derives addresses from `PERIPH_BASE`; `make PLATFORM=pi4` for hardware |
+| **Platform switching** | Done | `platform/pi/include/platform.inc` derives addresses; `make PLATFORM=pi4` |
 | **EL2→EL1 drop** | Done | Pi 4 boots at EL2; boot.S configures HCR/CNTHCTL/CPTR and erets to EL1 |
 | **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM |
 | **UART3 on GPIO 4/5** | Planned | ALT4 function, frees GPIO 14 for fan |
 | **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
-
-### QEMU Situation
-
-QEMU 7.2 (Debian stable) is used for testing on `raspi3b`. All 358 unit + 153 functional tests pass.
-
-QEMU 9.x and 10.x have a regression that causes tests to hang after ~27 passes on both `raspi3b` and `raspi4b` machines. Investigation found:
-- The hang occurs in pure computation functions (no MMIO) that work correctly in standalone test binaries
-- The EL2→EL1 transition works (27 tests pass before the hang)
-- BSS zeroing completes (boot banner prints)
-- The QEMU execution trace shows a jump to address 0x200 (exception vector), suggesting a spurious data abort in QEMU's instruction translation
-
-QEMU 8.2.10 was tested but lacks `raspi4b` support. The `raspi4b` machine type was added in QEMU 9.0.
-
-**Decision:** Use QEMU 7.2/raspi3b for CI testing, real Pi 4 hardware for production validation. The `platform.inc` build flag makes switching between Pi 3 (test) and Pi 4 (production) addresses trivial.
 
 ### HTTPS / TLS 1.3
 
@@ -457,17 +507,21 @@ QEMU 8.2.10 was tested but lacks `raspi4b` support. The `raspi4b` machine type w
 | Single-entry ARP cache | We only talk to the gateway |
 | NTP 32-bit seconds | Sub-second precision not needed for HTTP timestamps |
 | No PMTUD | Target network is direct Ethernet, MTU 1500; DF bit set |
+| Shared protocol stack | `lib/` is pure computation — ports to any AArch64 board with zero changes |
+| Platform-specific boot/drivers | Each board has its own boot.S, main.S, and drivers under `platform/<name>/` |
 
-## Future: Multi-Pi Architecture
+## Future: Multi-Board Architecture
 
-The network stack is composed of plain functions that operate on buffers — nothing ties them to a specific role. This opens the door to a cluster of bare-metal Pis, each with a single narrow responsibility, sharing the same assembly library:
+The network stack is composed of plain functions that operate on buffers — nothing ties them to a specific role or board. This opens the door to a cluster of bare-metal boards, each with a single narrow responsibility, sharing the same assembly library:
 
 - **Firewall/filter** — inspects packets at the IP level, forwards or drops. No TCP state needed. Defends against DoS by rejecting traffic before it reaches the web server.
 - **Load balancer** — parses through TCP, rewrites headers, distributes connections across multiple web server nodes. Needs connection tracking but not HTTP parsing.
 - **Web server** — the current project. Handles TLS, TCP, serves HTTPS responses. No persistent storage — reads files from the NAS over the local network.
 - **NAS** — serves a fixed set of files over a minimal read-only protocol. No directory paths, no filesystem traversal — files identified by index. Nothing to steal, nothing to overwrite.
 
-Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. With TLS termination on the web server node and hardware AES-GCM on the Cortex-A72, encryption adds negligible latency.
+Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. With TLS termination on the web server node and hardware AES-GCM, encryption adds negligible latency.
+
+The multi-platform build system (`platform/pi/`, `platform/beagleplay/`) means different boards can fill different roles — a BeaglePlay with native Gigabit Ethernet as the front-end, Pi 4s as compute nodes — all running the same tested protocol stack.
 
 ## License
 
