@@ -42,14 +42,14 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 - Linker: `aarch64-linux-gnu-ld`
 - Objcopy: `aarch64-linux-gnu-objcopy`
 - Test emulator: `qemu-system-aarch64 -M raspi3b` (QEMU 7.2)
-- Build: `make` (default: Pi 3 for QEMU) or `make PLATFORM=pi4` (Pi 4 hardware)
+- Build: `make` (Pi 3/QEMU), `make PLATFORM=pi4` (Pi 4), `make PLATFORM=beagleplay` (BeaglePlay)
 
 ## Project Structure
-- `src/` — Main kernel source (boot.S with EL2→EL1 drop, main.S with net_loop + http_poll)
-- `lib/` — Pure computation libraries (eth, arp, ip, icmp, udp, tcp, http, ntp, md5, timers, vmio)
-- `drivers/` — Hardware drivers (UART, USB/DWC2, timers, mailbox)
-- `include/` — Shared constants: platform.inc (Pi 3/Pi 4 switching), tcp.inc (256-byte TCONN), http.inc
-- `tests/` — 358 unit tests across 27 files + 15 handcrafted functional tests
+- `lib/` — Platform-independent protocol stack (eth, arp, ip, icmp, udp, tcp, http, ntp, md5, timers, vmio)
+- `include/` — Shared constants: tcp.inc (256-byte TCONN), http.inc, net.inc, timer.inc
+- `platform/pi/` — Pi boot.S, main.S, drivers/ (UART, DWC2, USB, CDC-ECM, mailbox), include/ (platform.inc, dwc2.inc, etc.)
+- `platform/beagleplay/` — BeaglePlay boot.S, main.S (stubs), drivers/ (TBD), include/ (AM625 addresses, 16550 UART, CPSW)
+- `tests/` — 358 unit tests (shared protocol tests + tests/pi/ for Pi driver tests)
 - `tests/func/` — PICT model for exhaustive TCP functional testing (138 vectors)
 - `fuzz/` — Fuzz harness: 23 single-packet + 16 multi-packet seeds, http_poll integrated
 - `scripts/` — Build/test automation, Python TCP oracle
@@ -57,6 +57,7 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 ## Build Commands
 - `make` — Build `kernel8.img` (Pi 3 addresses for QEMU testing)
 - `make PLATFORM=pi4` — Build for Pi 4 hardware (0xFE peripheral base)
+- `make PLATFORM=beagleplay` — Build for BeaglePlay (AM625)
 - `make test` — Build test kernel + run on QEMU raspi3b
 - `make test-functional` — Run PICT + handcrafted functional tests
 - `make fuzz` / `make fuzz-seq` — Build fuzz harnesses
@@ -72,7 +73,7 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 7. Commit
 
 ## Assembly Conventions
-- `-I include/` is passed to the assembler for `.include` search path
+- `-I include/ -I platform/<name>/include/` is passed to the assembler for `.include` search path
 - Callee-saved registers: save/restore `x19-x28`, `x29` (FP), `x30` (LR) per AAPCS64
 - Use `.section .text._start` for the entry point so the linker places it first
 - TCONN struct: 256 bytes per connection, indexed via `lsr x, x, #TCONN_SHIFT` (8)
@@ -83,7 +84,7 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 - Test target: BCM2837 (Raspberry Pi 3 via QEMU 7.2 raspi3b)
 - Kernel load address: `0x80000` (aarch64 boot)
 - Boot: EL2 → EL1 drop in boot.S (Pi 4 starts at EL2; Pi 3/QEMU 7.2 starts at EL1, drop is skipped)
-- Platform switching: `include/platform.inc` derives PERIPH_BASE from build flag
+- Platform switching: `platform/<name>/include/platform.inc` derives PERIPH_BASE from build flag
 - Pi 3 peripheral base: `0x3F000000` (default, for QEMU testing)
 - Pi 4 peripheral base: `0xFE000000` (via `make PLATFORM=pi4`)
 - UART: PL011 at PERIPH_BASE + 0x201000 (Pi 4 hardware will use UART3 on GPIO 4/5)
@@ -105,8 +106,9 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 - 10-state FSA, OOO buffering, persist timer, idle reaper, RST rate limiting
 
 ## Next Steps
-1. Pi 4 hardware bringup (serial adapter arriving): GENET Ethernet, UART3, fan control
-2. TLS 1.3 / HTTPS (~3000-5000 lines): ARMv8 crypto extensions for AES-GCM, SHA-256
+1. BeaglePlay (AM625) port: CPSW Ethernet driver, 16550 UART driver, boot bringup
+2. Pi 4 hardware bringup (serial adapter arriving): GENET Ethernet, UART3, fan control
+3. TLS 1.3 / HTTPS (~3000-5000 lines): ARMv8 crypto extensions for AES-GCM, SHA-256
 
 ## Git
 - user.name: edhodapp
