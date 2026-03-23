@@ -4,7 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TEST_KERNEL="$PROJECT_DIR/build/func_kernel8.img"
-QEMU=${QEMU:-qemu-system-aarch64}
+QEMU=${QEMU:-$HOME/qemu-dev/qemu/build/qemu-system-aarch64}
 TIMEOUT=${QEMU_TIMEOUT:-30}
 
 if [ ! -f "$TEST_KERNEL" ]; then
