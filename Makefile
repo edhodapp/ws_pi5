@@ -120,7 +120,7 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq clean
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean
 
 all: kernel8.img
 
@@ -176,8 +176,12 @@ fuzz-corpus-seq: fuzz/gen_corpus_seq.py
 $(BUILD):
 	mkdir -p $(BUILD)
 
+chainload:
+	$(MAKE) -C chainload
+
 clean:
 	rm -rf $(BUILD) kernel8.img
+	$(MAKE) -C chainload clean
 
 # ===========================================================================
 # Test UART — always Pi PL011 (test kernel runs on QEMU raspi3b)
