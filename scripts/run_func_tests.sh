@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TEST_KERNEL="$PROJECT_DIR/build/func_kernel8.img"
+QEMU=${QEMU:-qemu-system-aarch64}
 TIMEOUT=${QEMU_TIMEOUT:-30}
 
 if [ ! -f "$TEST_KERNEL" ]; then
@@ -18,7 +19,7 @@ OUTFILE=$(mktemp)
 trap "rm -f $OUTFILE" EXIT
 
 # Run QEMU in background with serial output to file
-qemu-system-aarch64 \
+"$QEMU" \
     -M raspi3b \
     -kernel "$TEST_KERNEL" \
     -nographic \

@@ -23,11 +23,12 @@
 - `.equ` symbols are file-local — they cannot be exported via `.global`. Use labels for cross-file constants.
 - Linker warning about RWX LOAD segment is expected for simple bare-metal projects.
 - `ldr/str` with register offset: `lsl #3` is NOT valid for word loads. Use `add` then `ldr` at base.
+- `ldrh`/`strh` require 2-byte aligned addresses with MMU off. For packed byte streams (USB descriptors), use two `ldrb` + `orr w, w, w, lsl #8` instead.
 
 ## QEMU Gotchas
 - Don't use `timeout` to kill QEMU — it won't flush `-serial file:` output. Instead, run QEMU in background and poll the output file, then `kill` cleanly.
 - `-serial mon:stdio` doesn't work reliably when stdout is redirected. Use `-serial file:<path>` instead.
-- QEMU 9.x and 10.x have a raspi emulation regression — tests hang after ~27 passes. Use QEMU 7.2 (Debian stable) for testing.
+- QEMU 9+/10+ enforce alignment with MMU off (Device-nGnRnE) — QEMU 7.2 silently ignored this. Fix: enable MMU with Normal memory type in boot.S (pending).
 - QEMU 7.2 does NOT support `raspi4b`. Test on `raspi3b` with Pi 3 addresses (default build).
 
 ---
