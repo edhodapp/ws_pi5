@@ -21,6 +21,14 @@ SECTIONS
         __bss_start = .;
         *(.bss*)
         *(COMMON)
+
+        /* MMU page tables — page-aligned, zeroed with BSS, filled by boot code */
+        . = ALIGN(4096);
+        __mmu_l1_table = .;
+        . += 4096;
+        __mmu_l2_table = .;
+        . += 4096;
+
         __bss_end = .;
     }
 
