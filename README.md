@@ -9,36 +9,41 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets multiple AArch64 platforms: Raspberry Pi 4 (BCM2711) and BeaglePlay (TI AM625). The protocol stack is platform-independent; only boot sequences and hardware drivers differ between boards.
 
+**Current stage:** The protocol stack is complete and verified. The project is entering hardware integration on Pi 4 — first bare-metal boot on real silicon.
+
 ## The Experiment
 
-This project is two things at once: a real artifact (a bare-metal web server built from scratch in assembly) and an experiment in how humans and AI can collaborate on systems programming.
+This project started as two questions:
+
+1. Can humans and AI collaborate effectively on real systems programming in assembly?
+2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
+
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 872 verified tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
 - **The human** provides architectural direction, testability discipline, and decides what abstractions to form.
 - **The AI** handles the combinatorial detail — register allocation, calling conventions, protocol byte layouts, checksum algorithms — and proposes implementations that the human reviews and tests.
 
-TDD at the ISA level keeps both parties honest. The test suite is the shared source of truth: if the tests pass on QEMU, the implementation is correct regardless of who wrote it. This eliminates the trust problem — you don't have to take the AI's word for anything.
+TDD at the ISA level keeps both parties honest. The test suite is the shared source of truth: if the tests pass, the implementation is correct regardless of who wrote it. This eliminates the trust problem — you don't have to take the AI's word for anything.
 
 ### Implementation-specific tests as an AI constraint
 
-Conventional wisdom says: don't write tests that are tightly coupled to implementation details, because they break during refactors and create maintenance burden. This project deliberately violates that rule as an experiment.
+Conventional wisdom says: don't write tests that are tightly coupled to implementation details, because they break during refactors and create maintenance burden. This project deliberately violates that rule.
 
 The reasoning: that conventional wisdom is calibrated to human costs. When a human has to rewrite 10 tests after a structural change, that's real friction. When an AI can regenerate the entire test file in seconds, the maintenance cost drops to near zero — and the value of catching bugs in internal logic dominates.
 
 Implementation-specific tests serve as a ratchet against AI hallucination. A behavioral test says "the callback fired" — the AI could produce a broken scan loop that happens to work for one timer. An implementation-specific test says "slot 0's callback field is zero after cancel" — there's nowhere to hide. Every test that pins internal state narrows the space of wrong-but-compiles outputs the AI could produce.
 
-This is an open question, not a conclusion. The hypothesis is that the human rule "don't test implementation details" is really "don't create maintenance burdens that outlive their value," and that AI collaboration changes the cost structure enough to flip the tradeoff. Whether this holds up across larger refactors remains to be seen.
-
 ## What It Does
 
-Boots on an AArch64 board, brings up Ethernet, and serves HTTP. The full path:
+Boots on a Raspberry Pi 4, brings up USB Ethernet (CDC-ECM), and serves HTTP on port 80. The full path:
 
 ```
-boot.S          Core 0 init, EL2→EL1 drop (Pi 4), stack, BSS zero
-  main.S        uart_init → ethernet_init → timer_pool_init
-                  → ip_reasm_init → icmp_init → tcp_init
-                  → tcp_listen(80) → tcp_set_timer_pool
+boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
+  main.S        uart_init → GPIO mux (UART3) → dwc2_init → cdc_ecm_init
+                  → timer_pool_init → ip_reasm_init → icmp_init
+                  → tcp_init → tcp_listen(80) → tcp_set_timer_pool
                   → tcp_start_reaper → tcp_set_send_ctx
                   → arp_start → ntp_init → ntp_start → http_init
     net_loop    Receive Ethernet frames, dispatch, send replies
@@ -82,19 +87,21 @@ include/            Shared constants and macros (.inc files)
   ntp.inc             NTP constants
   timer.inc           Timer pool constants
   vmio.inc            VMIO engine constants
-platform/pi/        Raspberry Pi (BCM2837 / BCM2711)
-  boot.S              Entry point — EL2→EL1 drop, park cores 1-3, stack, BSS, call main
-  main.S              DWC2 USB → CDC-ECM init, net_loop, http_poll
+platform/pi/        Raspberry Pi 4 (BCM2711)
+  boot.S              Entry point — EL2→EL1 drop, MMU setup, park cores 1-3, stack, BSS
+  main.S              GPIO mux, UART3 init, DWC2 USB → CDC-ECM, net_loop, http_poll
   include/            Pi-specific constants
-    platform.inc        PERIPH_BASE (0x3F for Pi 3 / 0xFE for Pi 4)
+    platform.inc        PERIPH_BASE (0xFE for Pi 4, 0x3F for QEMU testing)
     dwc2.inc            DWC2 USB host register map
     usb.inc             USB protocol constants
     usb_desc.inc        USB descriptor parsing constants
     cdc_ecm.inc         CDC-ECM constants
     uart.inc            PL011 UART register offsets
+    gpio.inc            GPIO function select constants
     mailbox.inc         VideoCore mailbox constants
   drivers/            Pi hardware drivers
-    uart.S              PL011 UART init at 115200, putc, puts
+    uart.S              PL011 UART with configurable base (UART0 or UART3)
+    gpio.S              GPIO function select (generic, any pin/function)
     mailbox.S           VideoCore mailbox IPC (USB power-on, temperature)
     dwc2.S              DWC2 USB host controller init and port reset
     usb_enum.S          USB device enumeration via control transfers
@@ -103,30 +110,41 @@ platform/pi/        Raspberry Pi (BCM2837 / BCM2711)
     cdc_ecm.S           CDC-ECM device init, activate, send/recv
 platform/beagleplay/ BeaglePlay (TI AM625)
   boot.S              Entry point — core parking, stack, BSS (A53 enters at EL1)
-  main.S              CPSW Ethernet init (stub), net_loop
+  main.S              CPSW Ethernet init, net_loop with full protocol stack wiring
   include/            AM625-specific constants
     platform.inc        AM625 peripheral addresses (UART0, CPSW, DMTIMER, GPIO, GTC)
     uart.inc            16550 UART register offsets and bit masks
-    cpsw.inc            CPSW 3G Ethernet MAC constants (stub)
-  drivers/            (TBD: uart.S, cpsw.S)
+    cpsw.inc            CPSW 3G Ethernet MAC + MDIO + ALE + port register offsets
+  drivers/            BeaglePlay hardware drivers
+    cpsw_mdio.S         MDIO bus — PHY register read/write, link status, PHY detect
+    cpsw_port.S         CPSW port/ALE/MACSL — port config, MAC address, ALE bypass
+    cpsw.S              Top-level CPSW init (wires MDIO + port/ALE), send/recv stubs
+chainload/          UART chainloader for Pi 4 development
+  boot.S              Receives kernel over UART3, writes to 0x80000, jumps to it
+  chainload.ld        Linked at 0x200000 (doesn't overlap kernel target)
 tests/              Unit and functional tests
-  test_main.S         Test runner (boot, dispatch, pass/fail reporting)
+  test_main.S         Test runner (boot, MMU, dispatch, pass/fail reporting)
   test_*.S            Shared protocol stack tests (322 tests)
-  pi/                 Pi-specific driver tests (36 tests)
+  pi/                 Pi-specific driver tests (41 tests)
     test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
+    test_gpio.S         GPIO function select tests (5 tests)
     test_dwc2.S         DWC2 USB host tests
-    test_usb_enum.S     USB enumeration tests
-    test_usb_desc.S     USB descriptor parsing tests
-    test_usb_bulk.S     USB bulk transfer tests
-    test_usb_fail.S     USB failure-path tests
-    test_cdc_ecm.S      CDC-ECM tests
-    test_cdc_ecm_data.S CDC-ECM data transfer tests
+    test_usb_*.S        USB enumeration, descriptor, bulk, failure tests
+    test_cdc_ecm*.S     CDC-ECM tests
     test_mailbox.S      VideoCore mailbox tests
     test_boot_main.S    Boot/main integration tests
-  beagleplay/         BeaglePlay-specific driver tests (TBD)
+  beagleplay/         BeaglePlay-specific driver tests (35 tests)
+    test_bp_all.S       Aggregates BeaglePlay tests
+    test_cpsw_mdio.S    MDIO bus tests (13 tests)
+    test_cpsw_port.S    Port/ALE/MACSL tests (15 tests)
+    test_cpsw.S         Top-level init + stub tests (7 tests)
   func/               PICT-based functional test model
 fuzz/               Fuzz harness for network packet parsers
-scripts/            Build and test automation (including Python oracle)
+scripts/            Build and test automation
+  run_tests.sh        QEMU test runner (configurable QEMU binary)
+  run_func_tests.sh   QEMU functional test runner
+  tcp_oracle.py       PICT functional test oracle (Python)
+  send_kernel.py      Host-side UART kernel sender for chainloader
 hw_test/            Hardware test scripts for Pi 4 test fixture
 ```
 
@@ -150,11 +168,11 @@ The codebase supports multiple target platforms. Each platform has its own boot 
 
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
-| **Pi 3** (QEMU testing) | `make` | `make test` | Default. PERIPH_BASE `0x3F000000` |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware | PERIPH_BASE `0xFE000000` |
-| **BeaglePlay** (AM625) | `make PLATFORM=beagleplay` | `make test PLATFORM=beagleplay` | Stubs — drivers TBD |
+| **Pi 4** (QEMU testing) | `make` | `make test` | Default. Uses QEMU raspi3b with Pi 3 peripheral addresses |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART3 on GPIO 4/5 |
+| **BeaglePlay** (AM625) | `make PLATFORM=beagleplay` | `make test PLATFORM=beagleplay` | CPSW driver with send/recv stubs |
 
-All test kernels run on QEMU 7.2 `raspi3b`. For non-Pi platforms, the Pi PL011 UART is automatically linked into test kernels for serial output on QEMU. Platform-specific driver tests are included only for the selected platform; shared protocol tests run for all platforms.
+Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on both QEMU 7.2 and QEMU 11.0-rc0.
 
 Build the kernel image:
 
@@ -174,34 +192,51 @@ Run exhaustive functional tests:
 make test-functional
 ```
 
+Build the UART chainloader for Pi 4 development:
+
+```
+make chainload
+```
+
 Clean build artifacts:
 
 ```
 make clean
 ```
 
+### Pi 4 Development Workflow
+
+A UART chainloader (671 bytes) sits on the SD card permanently and receives new kernels over serial:
+
+```
+make PLATFORM=pi4
+python3 scripts/send_kernel.py kernel8.img
+```
+
+No SD card swaps needed — the development loop is edit → build → send over serial → running.
+
 ## Testing
 
 ### Unit Tests
 
-358 tests (Pi) / 322 tests (BeaglePlay shared) run on `qemu-system-aarch64 -M raspi3b` (QEMU 7.2). The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling. Pi-specific tests cover the DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration. BeaglePlay driver tests will be added as drivers are implemented.
+363 tests (Pi) / 356 tests (BeaglePlay) run on QEMU `raspi3b`. The shared tests (322) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
 
-The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override (e.g., `tests/pi/test_pi_all.S`) that calls its platform-specific tests. Platforms with no driver tests yet use the weak default (a bare `ret`), so the shared protocol tests run cleanly.
+Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration. BeaglePlay tests (35) cover CPSW MDIO bus, port/ALE configuration, MACSL reset/speed, and top-level init sequencing.
+
+The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
-Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths. Dedicated coverage-gap tests exist solely to close branches that no behavioral test would naturally hit — examples include FSA null-handler dispatch, connection scan miss paths, ICMP soft-error state guards, FIN-with-data SEQ/overflow rejection, and TIME_WAIT timer-cancel edge cases.
+Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths.
 
 The TDD workflow:
 
 1. Write a test in `tests/` — call `test_pass` or `test_fail` with a test name string
-2. Register it with `bl test_xxx` in `tests/test_main.S` (shared) or `tests/pi/test_pi_all.S` (Pi)
+2. Register it in the platform's test aggregator (`tests/pi/test_pi_all.S` or `tests/beagleplay/test_bp_all.S`)
 3. `make test` — verify it fails (red)
 4. Implement in `lib/` or `platform/<name>/`
 5. `make test` — verify it passes (green)
 6. Commit
-
-The QEMU test runner (`scripts/run_tests.sh`) runs the test kernel in the background, polls serial output for pass/fail markers, and kills QEMU cleanly to ensure output is flushed.
 
 ### Scenario Tests — Windowing and Buffer Contents
 
@@ -225,20 +260,20 @@ Thirteen multi-step protocol-level tests verify correctness properties across se
 
 **Send window scenario tests (S8-S13):**
 
-- **`test_tcp_send_window_exhaustion`** (S8) — Full send-window lifecycle: drain, block, reopen, resume. Sets SND_WND=15, sends three 5-byte segments (SND_WND drains 15→10→5→0), verifies a fourth send is rejected and `tcp_send_ready` returns 0. Then injects a pure ACK with window=1000, verifies SND_WND reopens to 1000, `tcp_send_ready` returns 1000, and a subsequent send succeeds with SND_WND=995. This is the most important scenario — it proves the complete flow that motivated the feature.
-- **`test_tcp_window_update_partial`** (S9) — Window update with non-empty receive buffer. Handshakes, receives 500 bytes, then calls `tcp_window_update`. Verifies the returned frame advertises window = `rev16(2048-500)` = `rev16(1548)`. The existing window update tests only check empty buffer (window=2048) or invalid state — this verifies `tcp_build_frame`'s dynamic window computation when RXLEN > 0 via the explicit window-update path.
-- **`test_tcp_send_boundary`** (S10) — Payload length exactly equals SND_WND. Sets SND_WND=5, sends 5 bytes. Verifies ret=59 (succeeds) and SND_WND=0. Tests the `cmp`/`b.hi` guard at the exact boundary — a `b.hs` bug would reject this case.
-- **`test_tcp_send_ready_zero`** (S11) — SND_WND=0 returns 0. The existing `tcp_send_ready` tests check SND_WND=500 and SND_WND=2000; this tests the zero case — the caller's signal to stop sending and wait for a window update.
-- **`test_tcp_snd_wnd_pure_ack`** (S12) — Pure ACK (no data) updates SND_WND. Sets SND_WND=0, injects a pure ACK with window=4096. Verifies `tcp_handle` returns 0 (pure ACK drop) and SND_WND=4096. This exercises the SND_WND update through the `cbz w4, .Leak_pure_ack` code path, which the existing data-carrying ACK test doesn't reach.
-- **`test_tcp_snd_wnd_data_ack`** (S13) — Data ACK updates both rx buffer and SND_WND. Sets SND_WND=100, sends a 5-byte data frame with window=8192. Verifies ret=54 (ACK reply), RXLEN=5 (data accepted), and SND_WND=8192. Proves the SND_WND write at the handler top isn't clobbered by the data-copy or ACK-reply logic that follows.
+- **`test_tcp_send_window_exhaustion`** (S8) — Full send-window lifecycle: drain, block, reopen, resume. Sets SND_WND=15, sends three 5-byte segments (SND_WND drains 15→10→5→0), verifies a fourth send is rejected and `tcp_send_ready` returns 0. Then injects a pure ACK with window=1000, verifies SND_WND reopens to 1000, `tcp_send_ready` returns 1000, and a subsequent send succeeds with SND_WND=995.
+- **`test_tcp_window_update_partial`** (S9) — Window update with non-empty receive buffer. Handshakes, receives 500 bytes, then calls `tcp_window_update`. Verifies the returned frame advertises window = `rev16(2048-500)` = `rev16(1548)`.
+- **`test_tcp_send_boundary`** (S10) — Payload length exactly equals SND_WND. Sets SND_WND=5, sends 5 bytes. Verifies ret=59 (succeeds) and SND_WND=0.
+- **`test_tcp_send_ready_zero`** (S11) — SND_WND=0 returns 0.
+- **`test_tcp_snd_wnd_pure_ack`** (S12) — Pure ACK (no data) updates SND_WND.
+- **`test_tcp_snd_wnd_data_ack`** (S13) — Data ACK updates both rx buffer and SND_WND.
 
 ### Functional Tests (PICT-Based Exhaustive Testing)
 
 Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
 
-Six independent parameters — connection state (10 states), TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 138 PICT-generated test vectors plus 15 handcrafted scenario tests for a total of 153 functional tests. The handcrafted tests cover cross-layer integration paths that PICT cannot reach: multi-port listen, timestamp negotiation, PAWS rejection, ICMP teardown, ICMP error generation (Protocol/Port Unreachable), multi-segment send with partial ACK, WSCALE end-to-end, SACK-Permitted wire format, send buffer retransmit, RTT measurement, and SACK-aware dup-ACK fast retransmit. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector: return value, post-state, reply flags, SEQ/ACK values, and post-connection fields (RCV_NXT, RXLEN, SND_UNA). This gives two independent specifications of TCP correctness written in different languages — if both agree on all 145 cases, confidence is very high.
+Six independent parameters — connection state (10 states), TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 138 PICT-generated test vectors plus 15 handcrafted scenario tests for a total of 153 functional tests. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector. This gives two independent specifications of TCP correctness written in different languages.
 
-Functional tests are platform-independent (they test protocol logic, not drivers) and pass identically for all platforms.
+Functional tests are platform-independent and pass identically for all platforms.
 
 The pipeline:
 
@@ -246,14 +281,6 @@ The pipeline:
 tcp_func.pict  →  pict /o:max  →  tcp_vectors.tsv  →  tcp_oracle.py  →  tcp_vectors.bin
                                                                               ↓
                                               test_tcp_func.S (.incbin)  →  QEMU  →  PASS/FAIL
-```
-
-The assembly harness (`tests/test_tcp_func.S`) loads the binary table via `.incbin`, loops over every entry, calls `tcp_init` and pre-seeds connection state, invokes `tcp_handle`, and verifies the result against the oracle's expectations. A strong `tcp_isn` symbol overrides the weak default to ensure deterministic ISN values.
-
-If PICT is unavailable, the oracle has a `--generate` fallback that enumerates the full cross-product directly in Python:
-
-```
-python3 scripts/tcp_oracle.py --generate > build/tcp_vectors.bin
 ```
 
 ## TCP: Table-Driven Finite State Automaton
@@ -305,8 +332,6 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 - DF bit set on all outgoing IP packets
 - RST generation for invalid packets, unknown ports, and unpopulated FSA entries
 
-The FSA approach made adding each new feature trivial — a new handler function and a populated table entry, with no changes to the dispatch logic.
-
 ## Fuzzing
 
 Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `udp_handle`, `tcp_handle`, `net_recv_one`). All functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
@@ -356,38 +381,7 @@ make fuzz-seq
 make fuzz-corpus-seq
 ```
 
-Run a single seed manually:
-
-```
-qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/fuzz_tcp_seq < fuzz/corpus_seq/tcp_handshake.bin
-```
-
-With AFL++:
-
-```
-afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
-```
-
-**16 seed files** (generated by `fuzz/gen_corpus_seq.py`):
-
-| File | Frames | TCP path exercised |
-|------|--------|--------------------|
-| `tcp_handshake.bin` | SYN + ACK | ESTABLISHED state |
-| `tcp_handshake_data.bin` | SYN + ACK + PSH+ACK("Hello") | Data acceptance, rx buffer copy |
-| `tcp_handshake_fin.bin` | SYN + ACK + FIN+ACK | Passive close (CLOSE_WAIT) |
-| `tcp_handshake_rst.bin` | SYN + ACK + RST | ESTABLISHED → CLOSED |
-| `tcp_handshake_multi.bin` | SYN + ACK + 3× PSH+ACK data | Multi-segment buffering, window shrink |
-| `tcp_full_close.bin` | Handshake + FIN + ACK | Full passive close to CLOSED |
-| `tcp_active_close.bin` | Handshake + close sentinel | Active close (FIN_WAIT path) |
-| `tcp_simultaneous_close.bin` | Handshake + cross-FINs | CLOSING → TIME_WAIT |
-| `tcp_last_ack.bin` | Handshake + FIN + close sentinel | LAST_ACK → CLOSED |
-| `tcp_dup_data.bin` | Handshake + 2× same data | Duplicate segment handling |
-| `tcp_dup_syn.bin` | 2× SYN to same port | Duplicate SYN |
-| `tcp_dup_syn_flood.bin` | 17× SYN (exceeds 16 slots) | SYN_RCVD eviction |
-| `tcp_data_then_rst.bin` | Handshake + data + RST | Mid-transfer teardown |
-| `tcp_bad_seq_data.bin` | Handshake + wrong-SEQ data | OOO / bad SEQ rejection |
-| `tcp_ts_handshake.bin` | SYN(TSopt) + ACK | Timestamp negotiation |
-| `tcp_ooo_merge.bin` | Handshake + OOO + in-order | OOO buffering and merge |
+**16 seed files** cover: handshake, data transfer, passive/active/simultaneous close, duplicate SYN flood, OOO merge, timestamp negotiation, and bad-sequence rejection.
 
 ## Platform Details
 
@@ -395,9 +389,10 @@ afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 
 - **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
 - **Kernel load:** `0x80000` (standard AArch64 boot)
-- **Boot:** EL2 → EL1 drop in `platform/pi/boot.S` (Pi 4 starts at EL2; Pi 3/QEMU starts at EL1, drop is skipped)
-- **Ethernet:** Native Gigabit MAC (BCM GENET) — planned, currently using USB CDC-ECM
-- **UART:** PL011 at PERIPH_BASE + `0x201000` (Pi 4 hardware will use UART3 on GPIO 4/5)
+- **Boot:** EL2 → EL1 drop, MMU setup (4 GB identity map, Normal + Device), caches enabled
+- **Ethernet:** USB CDC-ECM (via DWC2 host controller). Native GENET Gigabit MAC planned.
+- **UART:** PL011 — UART0 for early boot, UART3 on GPIO 4/5 (ALT4) for serial debug
+- **GPIO:** Generic function select driver (`gpio_set_function`) using hardware divide for GPFSEL register/bit computation
 - **USB:** DWC2 host at PERIPH_BASE + `0x980000`
 - **Mailbox:** VideoCore IPC at PERIPH_BASE + `0x00B880`
 
@@ -407,10 +402,7 @@ afl-fuzz -Q -i fuzz/corpus_seq -o fuzz/findings_seq -- ./build/fuzz_tcp_seq
 |------------|------|----------|-------|
 | Pin 7 | GPIO 4 | **UART3 TX** | Serial debug output |
 | Pin 29 | GPIO 5 | **UART3 RX** | Serial debug input |
-| Pin 8 | GPIO 14 | **Fan control** | Official Pi 4 case fan (on/off) |
-| Pin 4 | — | **5V** | Fan power |
-| Pin 6 | — | **GND** | Fan ground |
-| Pin 9 or 14 | — | **GND** | Serial adapter ground |
+| Pin 8 | GPIO 14 | **Fan control** | Official Pi 4 case fan (on/off, planned) |
 
 #### Serial Debug Wiring
 
@@ -432,14 +424,14 @@ Pi 4 Pin 9  (GND)                → Adapter GND
 - **Ethernet:** CPSW 3G native Gigabit MAC at `0x08000000` — direct memory-mapped, no USB involved
 - **UART:** 16550-compatible UART0 at `0x02800000`
 - **Documentation:** TI AM62x TRM (SPRUJ87A) — full register-level documentation publicly available
-- **Supply chain:** TI guarantees 10-15 year production availability
 
-The BeaglePlay platform is a port target. The entire shared protocol stack (`lib/`) compiles and tests cleanly for BeaglePlay — 322 unit tests and 153 functional tests pass. Platform-specific drivers (CPSW Ethernet, 16550 UART) are stubbed and will be implemented during hardware bringup.
+The CPSW Ethernet driver stack (MDIO, port/ALE, top-level init) is implemented and tested. Send/recv are stubbed pending PKTDMA implementation on hardware.
 
 ## Current Status
 
 | Layer | Status | Key Features |
 |-------|--------|-------------|
+| **Boot** | Production ready | EL2→EL1, MMU (identity map), data + instruction caches |
 | **Ethernet** | Production ready | Frame validation, MAC filtering, 802.3 rejection |
 | **ARP** | Production ready | Request/reply, SPA validation, timer-driven cache refresh |
 | **IP** | Production ready | Checksum, TTL, fragment reassembly with overlap detection |
@@ -449,46 +441,52 @@ The BeaglePlay platform is a port target. The entire shared protocol stack (`lib
 | **HTTP** | Implemented | GET parser, 200/404 responses, cooperative poll loop |
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
+| **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART3, MMU — entering hardware validation |
+| **BeaglePlay drivers** | Tested (stubs) | CPSW MDIO + port/ALE + init tested; send/recv pending PKTDMA on hardware |
 | **TLS/HTTPS** | Planned | TLS 1.3 with ARMv8 crypto extensions |
-| **Pi 4 drivers** | Partial | DWC2 USB, CDC-ECM working; GENET Ethernet, UART3, fan planned |
-| **BeaglePlay drivers** | Stubbed | CPSW Ethernet and 16550 UART stubs; implementation pending |
 
-**Kernel image:** 25 KB (text: 17.5 KB, data: 4.4 KB, BSS: 32.6 MB runtime)
+**Kernel image:** 25 KB (text + rodata + data; BSS: 32.6 MB runtime)
 
 **Test coverage:**
-- **Pi:** 358 unit tests + 153 functional tests + 39 fuzz seeds = **550 total**
-- **BeaglePlay:** 322 unit tests + 153 functional tests = **475 total** (shared protocol stack)
+- **Pi:** 363 unit tests + 153 functional tests + 39 fuzz seeds = **555 total**
+- **BeaglePlay:** 356 unit tests + 153 functional tests = **509 total**
+- All tests pass on both QEMU 7.2 and QEMU 11.0-rc0
 - Complete branch coverage on all production code
 
-### QEMU Situation
+### MMU and Caches
 
-QEMU 7.2 (Debian stable) is used for testing on `raspi3b`. All tests pass for both Pi and BeaglePlay platform builds.
+The kernel enables the MMU with identity-mapped page tables immediately after BSS zeroing. RAM is mapped as Normal cacheable (write-back, read/write-allocate); peripheral regions are mapped as Device-nGnRnE. This provides:
 
-QEMU 9.x and 10.x have a regression that causes tests to hang after ~27 passes on both `raspi3b` and `raspi4b` machines. Investigation found the hang occurs in pure computation functions (no MMIO) that work correctly in standalone test binaries. The QEMU execution trace shows a jump to address 0x200 (exception vector), suggesting a spurious data abort in QEMU's instruction translation.
-
-**Decision:** Use QEMU 7.2/raspi3b for CI testing, real hardware for production validation.
+- **Data cache** — critical for the 32.6 MB TCP connection table and send buffers
+- **Instruction cache** — reduces fetch latency for the net_loop hot path
+- **Correct alignment semantics** — Normal memory allows unaligned accesses; Device memory requires natural alignment (enforced by QEMU 9+ and real hardware)
 
 ## Work in Progress
+
+### Pi 4 Hardware Integration
+
+Entering hardware validation — all software is built, UART chainloader is ready, waiting for serial adapter.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **EL2→EL1 drop** | Done | Pi 4 boots at EL2; boot.S configures HCR/CNTHCTL/CPTR and erets to EL1 |
+| **MMU + caches** | Done | 4 GB identity map, Normal RAM + Device peripherals |
+| **UART3 on GPIO 4/5** | Done | GPIO driver + UART base switching in main.S |
+| **UART chainloader** | Done | 671 bytes, receives kernels over serial at 115200 |
+| **USB CDC-ECM** | Built, untested on hardware | DWC2 + USB enum + CDC-ECM — needs hardware validation |
+| **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM path |
+| **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
 
 ### BeaglePlay Port (AM625)
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Directory structure** | Done | `platform/beagleplay/` with boot, main, include stubs |
-| **Shared test suite** | Done | 322 unit + 153 functional tests pass on QEMU |
-| **16550 UART driver** | Stubbed | Register definitions in `uart.inc`, driver TBD |
-| **CPSW Ethernet driver** | Stubbed | Constants in `cpsw.inc`, driver TBD |
-| **Hardware bringup** | Pending | Waiting for board |
-
-### Pi 4 Hardware Bringup
-
-| Item | Status | Notes |
-|------|--------|-------|
-| **Platform switching** | Done | `platform/pi/include/platform.inc` derives addresses; `make PLATFORM=pi4` |
-| **EL2→EL1 drop** | Done | Pi 4 boots at EL2; boot.S configures HCR/CNTHCTL/CPTR and erets to EL1 |
-| **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM |
-| **UART3 on GPIO 4/5** | Planned | ALT4 function, frees GPIO 14 for fan |
-| **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
+| **CPSW MDIO driver** | Done (13 tests) | PHY register read/write, link status, BFI field composition |
+| **CPSW port/ALE** | Done (15 tests) | Port config, MAC address, MACSL reset/speed, ALE bypass |
+| **CPSW top-level** | Done (7 tests) | Init sequence wires all sub-drivers; send/recv stubbed |
+| **PKTDMA** | Pending | Deferred to hardware — descriptor rings can't be meaningfully tested on QEMU |
+| **16550 UART driver** | Pending | Register definitions ready, driver TBD |
+| **Hardware bringup** | Pending | Board not yet acquired |
 
 ### HTTPS / TLS 1.3
 
@@ -514,6 +512,7 @@ QEMU 9.x and 10.x have a regression that causes tests to hang after ~27 passes o
 | No PMTUD | Target network is direct Ethernet, MTU 1500; DF bit set |
 | Shared protocol stack | `lib/` is pure computation — ports to any AArch64 board with zero changes |
 | Platform-specific boot/drivers | Each board has its own boot.S, main.S, and drivers under `platform/<name>/` |
+| MMU identity map | Virtual = physical, all existing code works unchanged, caches enabled |
 
 ## Future: Multi-Board Architecture
 
@@ -526,7 +525,7 @@ The network stack is composed of plain functions that operate on buffers — not
 
 Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. With TLS termination on the web server node and hardware AES-GCM, encryption adds negligible latency.
 
-The multi-platform build system (`platform/pi/`, `platform/beagleplay/`) means different boards can fill different roles — a BeaglePlay with native Gigabit Ethernet as the front-end, Pi 4s as compute nodes — all running the same tested protocol stack.
+The multi-platform build system (`platform/pi/`, `platform/beagleplay/`) means different boards can fill different roles — all running the same tested protocol stack.
 
 ## License
 
