@@ -1,43 +1,52 @@
 .include "uart.inc"
 
 .global uart_init
+.global uart_set_base
 .global uart_putc
 .global uart_puts
 
 .section .text
 
 /*
- * uart_init - Initialize PL011 UART
- * Clobbers: x0, x1
+ * uart_set_base - Override the UART base address
+ * x0: new UART base address
+ * Call before uart_init to switch from UART0 to UART3.
+ * Leaf function.
+ */
+uart_set_base:
+    ldr     x1, =uart_hw_base
+    str     x0, [x1]
+    ret
+
+/*
+ * uart_init - Initialize PL011 UART at the stored base address
+ * Clobbers: x0, x1, x2
  */
 uart_init:
-    ldr     x1, =UART_CR
-    str     wzr, [x1]              /* Disable UART */
+    ldr     x2, =uart_hw_base
+    ldr     x2, [x2]               /* x2 = UART base */
 
-    ldr     x1, =UART_ICR
+    str     wzr, [x2, #UART_CR_OFS]    /* Disable UART */
+
     mov     w0, #0x7FF
-    str     w0, [x1]               /* Clear all interrupts */
+    str     w0, [x2, #UART_ICR_OFS]    /* Clear all interrupts */
 
     /* Set baud rate: 115200 at 48MHz clock
      * Divider = 48000000 / (16 * 115200) = 26.0416...
      * IBRD = 26, FBRD = round(0.0416 * 64) = 3 */
-    ldr     x1, =UART_IBRD
     mov     w0, #26
-    str     w0, [x1]
+    str     w0, [x2, #UART_IBRD_OFS]
 
-    ldr     x1, =UART_FBRD
     mov     w0, #3
-    str     w0, [x1]
+    str     w0, [x2, #UART_FBRD_OFS]
 
     /* 8 bits, FIFOs enabled, no parity */
-    ldr     x1, =UART_LCRH
     mov     w0, #UART_LCRH_WLEN8_FEN
-    str     w0, [x1]
+    str     w0, [x2, #UART_LCRH_OFS]
 
     /* Enable UART, TX and RX */
-    ldr     x1, =UART_CR
     mov     w0, #UART_CR_EN_TXRX
-    str     w0, [x1]
+    str     w0, [x2, #UART_CR_OFS]
 
     ret
 
@@ -47,13 +56,13 @@ uart_init:
  * Clobbers: x1, x2
  */
 uart_putc:
-    ldr     x1, =UART_FR
-1:  ldr     w2, [x1]
+    ldr     x1, =uart_hw_base
+    ldr     x1, [x1]               /* x1 = UART base */
+1:  ldr     w2, [x1, #UART_FR_OFS]
     tst     w2, #UART_FR_TXFF
     b.ne    1b                     /* Wait while TX FIFO is full */
 
-    ldr     x1, =UART_DR
-    str     w0, [x1]
+    str     w0, [x1, #UART_DR_OFS]
     ret
 
 /*
@@ -74,3 +83,8 @@ uart_puts:
 .Lputs_done:
     ldp     x19, x30, [sp], #16
     ret
+
+/* Default UART base address (UART0) — overridable via uart_set_base */
+.section .data
+.balign 8
+uart_hw_base: .quad UART_BASE

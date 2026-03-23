@@ -18,5 +18,7 @@
 
 /* All peripheral addresses derived from PERIPH_BASE */
 .equ UART_OFFSET,      0x201000
+.equ UART3_OFFSET,     0x201600    /* Pi 4 only: PL011 UART3 */
+.equ GPIO_OFFSET,      0x200000
 .equ DWC2_OFFSET,      0x980000
 .equ MBOX_OFFSET,      0x00B880

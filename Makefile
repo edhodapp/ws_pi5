@@ -46,12 +46,13 @@ SHARED_OBJS = \
 # Pi platform objects
 # ---------------------------------------------------------------------------
 PI_OBJS = \
-    $(BUILD)/uart.o $(BUILD)/mailbox.o \
+    $(BUILD)/uart.o $(BUILD)/gpio.o $(BUILD)/mailbox.o \
     $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o \
     $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o
 
 PI_TEST_OBJS = \
     $(BUILD)/test_pi_all.o \
+    $(BUILD)/test_gpio.o \
     $(BUILD)/test_mailbox.o \
     $(BUILD)/test_dwc2.o $(BUILD)/test_usb_enum.o \
     $(BUILD)/test_usb_fail.o $(BUILD)/test_usb_desc.o \
@@ -253,6 +254,9 @@ $(BUILD)/uart.o: platform/pi/drivers/uart.S $(PI_INC)/uart.inc | $(BUILD)
 $(BUILD)/mailbox.o: platform/pi/drivers/mailbox.S $(PI_INC)/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/gpio.o: platform/pi/drivers/gpio.S $(PI_INC)/gpio.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 $(BUILD)/dwc2.o: platform/pi/drivers/dwc2.S $(PI_INC)/dwc2.inc $(PI_INC)/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -332,6 +336,9 @@ $(BUILD)/test_http.o: tests/test_http.S include/http.inc include/tcp.inc include
 # Pi platform test objects (tests/pi/)
 # ===========================================================================
 $(BUILD)/test_pi_all.o: tests/pi/test_pi_all.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_gpio.o: tests/pi/test_gpio.S $(PI_INC)/gpio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_mailbox.o: tests/pi/test_mailbox.S $(PI_INC)/mailbox.inc | $(BUILD)

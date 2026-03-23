@@ -11,6 +11,13 @@
 test_platform_drivers:
     stp     x29, x30, [sp, #-16]!
 
+    /* GPIO */
+    bl      test_gpio_pin4_alt4
+    bl      test_gpio_pin5_alt4
+    bl      test_gpio_pin14_output
+    bl      test_gpio_no_clobber
+    bl      test_gpio_pin0_input
+
     /* Mailbox */
     bl      test_mailbox
     bl      test_mbox_response_fail
