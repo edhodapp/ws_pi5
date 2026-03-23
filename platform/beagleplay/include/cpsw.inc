@@ -151,3 +151,19 @@
 .equ NU_FAKE_SIZE,          0x2400
 /* ALE: covers through THREADMAPDEF at 0x134 + 4 */
 .equ ALE_FAKE_SIZE,         0x140
+/* Whole subsystem: covers CPSW_BASE through ALE at 0x3E000 + 0x140 */
+.equ CPSW_FAKE_SIZE,        0x40000
+
+/* -----------------------------------------------------------------------
+ * CPSW state struct offsets
+ * ----------------------------------------------------------------------- */
+.equ CPSW_ST_MDIO_BASE,     0      /* u64 */
+.equ CPSW_ST_NU_BASE,       8      /* u64 */
+.equ CPSW_ST_ALE_BASE,      16     /* u64 */
+.equ CPSW_ST_MACSL_BASE,    24     /* u64 */
+.equ CPSW_ST_PHY_ADDR,      32     /* u32 */
+.equ CPSW_ST_LINK_SPEED,    36     /* u32 */
+.equ CPSW_ST_DMA_TX_RING,   40     /* u64 (reserved for PKTDMA) */
+.equ CPSW_ST_DMA_RX_RING,   48     /* u64 (reserved for PKTDMA) */
+.equ CPSW_ST_DMA_DESC_POOL, 56     /* u64 (reserved for PKTDMA) */
+.equ CPSW_ST_SIZE,          64

@@ -43,5 +43,14 @@ test_platform_drivers:
     bl      test_ale_init_port_modes
     bl      test_port_init_mac_encoding
 
+    /* CPSW top-level (init, send/recv stubs) */
+    bl      test_cpsw_init_success
+    bl      test_cpsw_init_state_populated
+    bl      test_cpsw_init_mdio_fail
+    bl      test_cpsw_init_phy_detect_fail
+    bl      test_cpsw_init_macsl_fail
+    bl      test_cpsw_send_stub
+    bl      test_cpsw_recv_stub
+
     ldp     x29, x30, [sp], #16
     ret

@@ -63,12 +63,14 @@ PI_TEST_OBJS = \
 # ---------------------------------------------------------------------------
 BP_OBJS = \
     $(BUILD)/cpsw_mdio.o \
-    $(BUILD)/cpsw_port.o
+    $(BUILD)/cpsw_port.o \
+    $(BUILD)/cpsw.o
 
 BP_TEST_OBJS = \
     $(BUILD)/test_bp_all.o \
     $(BUILD)/test_cpsw_mdio.o \
-    $(BUILD)/test_cpsw_port.o
+    $(BUILD)/test_cpsw_port.o \
+    $(BUILD)/test_cpsw.o
 
 # ---------------------------------------------------------------------------
 # Select platform objects
@@ -275,6 +277,9 @@ $(BUILD)/cpsw_mdio.o: platform/beagleplay/drivers/cpsw_mdio.S $(BP_INC)/cpsw.inc
 $(BUILD)/cpsw_port.o: platform/beagleplay/drivers/cpsw_port.S $(BP_INC)/cpsw.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/cpsw.o: platform/beagleplay/drivers/cpsw.S $(BP_INC)/cpsw.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # ===========================================================================
 # Shared test objects (tests/)
 # ===========================================================================
@@ -366,6 +371,9 @@ $(BUILD)/test_cpsw_mdio.o: tests/beagleplay/test_cpsw_mdio.S $(BP_INC)/cpsw.inc 
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_cpsw_port.o: tests/beagleplay/test_cpsw_port.S $(BP_INC)/cpsw.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_cpsw.o: tests/beagleplay/test_cpsw.S $(BP_INC)/cpsw.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
