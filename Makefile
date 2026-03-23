@@ -9,19 +9,12 @@ BUILD   = build
 # Platform selection
 #   make                      — Pi 3 (QEMU raspi3b, default)
 #   make PLATFORM=pi4         — Pi 4 hardware
-#   make PLATFORM=beagleplay  — BeaglePlay (AM625)
 # ---------------------------------------------------------------------------
 PLATFORM_DIR = platform/pi
-PLATFORM_TAG = pi
 PLATFORM_ASFLAGS =
 
 ifeq ($(PLATFORM),pi4)
-  PLATFORM_DIR = platform/pi
-  PLATFORM_TAG = pi
   PLATFORM_ASFLAGS = --defsym PLATFORM_PI4=1
-else ifeq ($(PLATFORM),beagleplay)
-  PLATFORM_DIR = platform/beagleplay
-  PLATFORM_TAG = beagleplay
 endif
 
 ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS)
@@ -29,7 +22,6 @@ LDFLAGS = -T linker.ld -nostdlib
 
 # Shorthand for platform include directories
 PI_INC = platform/pi/include
-BP_INC = platform/beagleplay/include
 
 # ---------------------------------------------------------------------------
 # Shared library objects (platform-independent)
@@ -60,33 +52,12 @@ PI_TEST_OBJS = \
     $(BUILD)/test_cdc_ecm_data.o $(BUILD)/test_boot_main.o
 
 # ---------------------------------------------------------------------------
-# BeaglePlay platform objects
-# ---------------------------------------------------------------------------
-BP_OBJS = \
-    $(BUILD)/cpsw_mdio.o \
-    $(BUILD)/cpsw_port.o \
-    $(BUILD)/cpsw.o
-
-BP_TEST_OBJS = \
-    $(BUILD)/test_bp_all.o \
-    $(BUILD)/test_cpsw_mdio.o \
-    $(BUILD)/test_cpsw_port.o \
-    $(BUILD)/test_cpsw.o
-
-# ---------------------------------------------------------------------------
 # Select platform objects
 # ---------------------------------------------------------------------------
-ifeq ($(PLATFORM_TAG),beagleplay)
-  PLAT_OBJS      = $(BP_OBJS)
-  PLAT_TEST_OBJS = $(BP_TEST_OBJS)
-  # Non-Pi platforms need Pi UART for test output (QEMU raspi3b)
-  TEST_UART      = $(BUILD)/test_uart.o
-else
-  PLAT_OBJS      = $(PI_OBJS)
-  PLAT_TEST_OBJS = $(PI_TEST_OBJS)
-  # Pi already has uart.o in PLAT_OBJS
-  TEST_UART      =
-endif
+PLAT_OBJS      = $(PI_OBJS)
+PLAT_TEST_OBJS = $(PI_TEST_OBJS)
+# Pi already has uart.o in PLAT_OBJS
+TEST_UART      =
 
 # ---------------------------------------------------------------------------
 # Kernel, test, functional-test, and fuzz object lists
@@ -277,18 +248,6 @@ $(BUILD)/usb_bulk.o: platform/pi/drivers/usb_bulk.S $(PI_INC)/dwc2.inc | $(BUILD
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
-# BeaglePlay platform drivers (platform/beagleplay/)
-# ===========================================================================
-$(BUILD)/cpsw_mdio.o: platform/beagleplay/drivers/cpsw_mdio.S $(BP_INC)/cpsw.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD)/cpsw_port.o: platform/beagleplay/drivers/cpsw_port.S $(BP_INC)/cpsw.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD)/cpsw.o: platform/beagleplay/drivers/cpsw.S $(BP_INC)/cpsw.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-# ===========================================================================
 # Shared test objects (tests/)
 # ===========================================================================
 $(BUILD)/test_main.o: tests/test_main.S | $(BUILD)
@@ -370,21 +329,6 @@ $(BUILD)/test_cdc_ecm_data.o: tests/pi/test_cdc_ecm_data.S $(PI_INC)/dwc2.inc $(
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_boot_main.o: tests/pi/test_boot_main.S $(PI_INC)/dwc2.inc $(PI_INC)/usb.inc $(PI_INC)/usb_desc.inc $(PI_INC)/cdc_ecm.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-# ===========================================================================
-# BeaglePlay platform test objects (tests/beagleplay/)
-# ===========================================================================
-$(BUILD)/test_bp_all.o: tests/beagleplay/test_bp_all.S | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD)/test_cpsw_mdio.o: tests/beagleplay/test_cpsw_mdio.S $(BP_INC)/cpsw.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD)/test_cpsw_port.o: tests/beagleplay/test_cpsw_port.S $(BP_INC)/cpsw.inc | $(BUILD)
-	$(AS) $(ASFLAGS) $< -o $@
-
-$(BUILD)/test_cpsw.o: tests/beagleplay/test_cpsw.S $(BP_INC)/cpsw.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================

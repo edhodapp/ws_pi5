@@ -1,6 +1,6 @@
 /*
  * Weak default for test_platform_drivers — overridden by
- * tests/pi/test_pi_all.S or tests/beagleplay/test_bp_all.S
+ * tests/pi/test_pi_all.S
  * when the platform's test objects are linked.
  */
 .weak test_platform_drivers

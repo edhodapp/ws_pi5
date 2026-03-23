@@ -7,7 +7,7 @@
 
 A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete, production-quality web server — from boot to TLS to serving pages — with no OS, no C runtime, and no abstraction layers.
 
-The project targets multiple AArch64 platforms: Raspberry Pi 4 (BCM2711) and BeaglePlay (TI AM625). The protocol stack is platform-independent; only boot sequences and hardware drivers differ between boards.
+The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
 **Current stage:** The protocol stack is complete and verified. The project is entering hardware integration on Pi 4 — first bare-metal boot on real silicon.
 
@@ -108,17 +108,6 @@ platform/pi/        Raspberry Pi 4 (BCM2711)
     usb_desc.S          Config descriptor reading and bulk endpoint parsing
     usb_bulk.S          Bulk transfer execution with DATA toggle tracking
     cdc_ecm.S           CDC-ECM device init, activate, send/recv
-platform/beagleplay/ BeaglePlay (TI AM625)
-  boot.S              Entry point — core parking, stack, BSS (A53 enters at EL1)
-  main.S              CPSW Ethernet init, net_loop with full protocol stack wiring
-  include/            AM625-specific constants
-    platform.inc        AM625 peripheral addresses (UART0, CPSW, DMTIMER, GPIO, GTC)
-    uart.inc            16550 UART register offsets and bit masks
-    cpsw.inc            CPSW 3G Ethernet MAC + MDIO + ALE + port register offsets
-  drivers/            BeaglePlay hardware drivers
-    cpsw_mdio.S         MDIO bus — PHY register read/write, link status, PHY detect
-    cpsw_port.S         CPSW port/ALE/MACSL — port config, MAC address, ALE bypass
-    cpsw.S              Top-level CPSW init (wires MDIO + port/ALE), send/recv stubs
 chainload/          UART chainloader for Pi 4 development
   boot.S              Receives kernel over UART3, writes to 0x80000, jumps to it
   chainload.ld        Linked at 0x200000 (doesn't overlap kernel target)
@@ -133,11 +122,6 @@ tests/              Unit and functional tests
     test_cdc_ecm*.S     CDC-ECM tests
     test_mailbox.S      VideoCore mailbox tests
     test_boot_main.S    Boot/main integration tests
-  beagleplay/         BeaglePlay-specific driver tests (35 tests)
-    test_bp_all.S       Aggregates BeaglePlay tests
-    test_cpsw_mdio.S    MDIO bus tests (13 tests)
-    test_cpsw_port.S    Port/ALE/MACSL tests (15 tests)
-    test_cpsw.S         Top-level init + stub tests (7 tests)
   func/               PICT-based functional test model
 fuzz/               Fuzz harness for network packet parsers
 scripts/            Build and test automation
@@ -162,15 +146,12 @@ For functional tests, install [PICT](https://github.com/microsoft/pict) (Microso
 sudo apt install pict
 ```
 
-### Multi-Platform Build
-
-The codebase supports multiple target platforms. Each platform has its own boot sequence, drivers, and peripheral addresses under `platform/<name>/`. The shared protocol stack in `lib/` compiles identically for all platforms — only the assembler include path (`-I platform/<name>/include/`) changes.
+### Build Targets
 
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
 | **Pi 4** (QEMU testing) | `make` | `make test` | Default. Uses QEMU raspi3b with Pi 3 peripheral addresses |
 | **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART3 on GPIO 4/5 |
-| **BeaglePlay** (AM625) | `make PLATFORM=beagleplay` | `make test PLATFORM=beagleplay` | CPSW driver with send/recv stubs |
 
 Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on both QEMU 7.2 and QEMU 11.0-rc0.
 
@@ -219,9 +200,9 @@ No SD card swaps needed — the development loop is edit → build → send over
 
 ### Unit Tests
 
-363 tests (Pi) / 356 tests (BeaglePlay) run on QEMU `raspi3b`. The shared tests (322) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
+363 tests run on QEMU `raspi3b`. The shared tests (322) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
 
-Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration. BeaglePlay tests (35) cover CPSW MDIO bus, port/ALE configuration, MACSL reset/speed, and top-level init sequencing.
+Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
 The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
 
@@ -232,7 +213,7 @@ Branch coverage is audited after each feature: every conditional branch in produ
 The TDD workflow:
 
 1. Write a test in `tests/` — call `test_pass` or `test_fail` with a test name string
-2. Register it in the platform's test aggregator (`tests/pi/test_pi_all.S` or `tests/beagleplay/test_bp_all.S`)
+2. Register it in the platform's test aggregator (`tests/pi/test_pi_all.S`)
 3. `make test` — verify it fails (red)
 4. Implement in `lib/` or `platform/<name>/`
 5. `make test` — verify it passes (green)
@@ -416,17 +397,6 @@ Pi 4 Pin 9  (GND)                → Adapter GND
 
 **Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO. Do not connect the adapter's VCC pin.
 
-### BeaglePlay (TI AM625)
-
-- **SoC:** TI AM625, Cortex-A53 quad-core, 2 GB RAM
-- **Kernel load:** `0x80000` (standard AArch64 boot)
-- **Boot:** A53 enters at EL1 after TI ROM/SPL — no EL drop needed
-- **Ethernet:** CPSW 3G native Gigabit MAC at `0x08000000` — direct memory-mapped, no USB involved
-- **UART:** 16550-compatible UART0 at `0x02800000`
-- **Documentation:** TI AM62x TRM (SPRUJ87A) — full register-level documentation publicly available
-
-The CPSW Ethernet driver stack (MDIO, port/ALE, top-level init) is implemented and tested. Send/recv are stubbed pending PKTDMA implementation on hardware.
-
 ## Current Status
 
 | Layer | Status | Key Features |
@@ -442,14 +412,12 @@ The CPSW Ethernet driver stack (MDIO, port/ALE, top-level init) is implemented a
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
 | **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART3, MMU — entering hardware validation |
-| **BeaglePlay drivers** | Tested (stubs) | CPSW MDIO + port/ALE + init tested; send/recv pending PKTDMA on hardware |
 | **TLS/HTTPS** | Planned | TLS 1.3 with ARMv8 crypto extensions |
 
 **Kernel image:** 25 KB (text + rodata + data; BSS: 32.6 MB runtime)
 
 **Test coverage:**
-- **Pi:** 363 unit tests + 153 functional tests + 39 fuzz seeds = **555 total**
-- **BeaglePlay:** 356 unit tests + 153 functional tests = **509 total**
+- 363 unit tests + 153 functional tests + 39 fuzz seeds = **555 total**
 - All tests pass on both QEMU 7.2 and QEMU 11.0-rc0
 - Complete branch coverage on all production code
 
@@ -477,17 +445,6 @@ Entering hardware validation — all software is built, UART chainloader is read
 | **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM path |
 | **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
 
-### BeaglePlay Port (AM625)
-
-| Item | Status | Notes |
-|------|--------|-------|
-| **CPSW MDIO driver** | Done (13 tests) | PHY register read/write, link status, BFI field composition |
-| **CPSW port/ALE** | Done (15 tests) | Port config, MAC address, MACSL reset/speed, ALE bypass |
-| **CPSW top-level** | Done (7 tests) | Init sequence wires all sub-drivers; send/recv stubbed |
-| **PKTDMA** | Pending | Deferred to hardware — descriptor rings can't be meaningfully tested on QEMU |
-| **16550 UART driver** | Pending | Register definitions ready, driver TBD |
-| **Hardware bringup** | Pending | Board not yet acquired |
-
 ### HTTPS / TLS 1.3
 
 | Item | Status | Notes |
@@ -510,8 +467,8 @@ Entering hardware validation — all software is built, UART chainloader is read
 | Single-entry ARP cache | We only talk to the gateway |
 | NTP 32-bit seconds | Sub-second precision not needed for HTTP timestamps |
 | No PMTUD | Target network is direct Ethernet, MTU 1500; DF bit set |
-| Shared protocol stack | `lib/` is pure computation — ports to any AArch64 board with zero changes |
-| Platform-specific boot/drivers | Each board has its own boot.S, main.S, and drivers under `platform/<name>/` |
+| Shared protocol stack | `lib/` is pure computation — portable to any AArch64 board with zero changes |
+| Platform-specific boot/drivers | Boot.S, main.S, and drivers live under `platform/pi/` |
 | MMU identity map | Virtual = physical, all existing code works unchanged, caches enabled |
 
 ## Future: Multi-Board Architecture
@@ -525,7 +482,7 @@ The network stack is composed of plain functions that operate on buffers — not
 
 Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. With TLS termination on the web server node and hardware AES-GCM, encryption adds negligible latency.
 
-The multi-platform build system (`platform/pi/`, `platform/beagleplay/`) means different boards can fill different roles — all running the same tested protocol stack.
+The protocol stack is board-independent — different boards can fill different roles, all running the same tested library code.
 
 ## License
 
