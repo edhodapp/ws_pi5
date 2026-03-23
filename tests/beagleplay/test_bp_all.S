@@ -26,5 +26,22 @@ test_platform_drivers:
     bl      test_mdio_read_field_encoding
     bl      test_mdio_write_field_encoding
 
+    /* CPSW Port / ALE */
+    bl      test_nu_init_ctl_reg
+    bl      test_nu_init_stat_ptype
+    bl      test_port_init_host_maxlen
+    bl      test_port_init_host_flowid
+    bl      test_port_init_ext_maxlen
+    bl      test_port_init_ext_mac
+    bl      test_macsl_reset_success
+    bl      test_macsl_reset_timeout
+    bl      test_macsl_config_1000
+    bl      test_macsl_config_100
+    bl      test_macsl_config_10
+    bl      test_macsl_config_unknown
+    bl      test_ale_init_ctl
+    bl      test_ale_init_port_modes
+    bl      test_port_init_mac_encoding
+
     ldp     x29, x30, [sp], #16
     ret
