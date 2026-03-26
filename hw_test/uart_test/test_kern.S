@@ -17,9 +17,42 @@
 .equ DWC2_BASE_PI4,  0xFE980000
 .equ MBOX_BASE_PI4,  0xFE00B880
 .equ GENET_BASE_PI4, 0xFD580000
-.equ GENET_SYS_REV,  0x000
 .equ PM_WDOG,        0xFE100024
 .equ PM_RSTC,        0xFE10001C
+
+/* GENET register offsets */
+.equ GENET_SYS_REV,           0x000
+.equ GENET_SYS_PORT_CTRL,     0x004
+.equ GENET_SYS_RBUF_FLUSH,    0x008
+.equ GENET_EXT_RGMII_OOB,     0x08C
+.equ GENET_INTRL2_0_CLEAR,    0x208
+.equ GENET_INTRL2_0_MASK_SET, 0x210
+.equ GENET_INTRL2_1_CLEAR,    0x248
+.equ GENET_INTRL2_1_MASK_SET, 0x250
+.equ GENET_RBUF_CTRL,         0x300
+.equ GENET_UMAC_CMD,          0x808
+.equ GENET_UMAC_MAX_FRAME,    0x814
+.equ GENET_UMAC_MIB_CTRL,     0xD80
+.equ UMAC_MDIO_CMD,           0xE14
+
+/* UMAC_CMD bits */
+.equ UMAC_CMD_TX_EN,     (1 << 0)
+.equ UMAC_CMD_RX_EN,     (1 << 1)
+.equ UMAC_CMD_SW_RESET,  (1 << 13)
+.equ UMAC_CMD_LCL_LOOP,  (1 << 15)
+
+/* MDIO */
+.equ MDIO_START_BUSY,  (1 << 29)
+.equ MDIO_READ,        (1 << 27)
+.equ MDIO_WRITE,       (1 << 26)
+.equ MDIO_PMD_SHIFT,   21
+.equ MDIO_REG_SHIFT,   16
+.equ PHY_ADDR,         1
+
+/* PHY registers */
+.equ PHY_BMCR,    0
+.equ PHY_BMSR,    1
+.equ PHY_AUX_STS, 0x19
 
 /* Mailbox constants */
 .equ MBOX_CH_PROP,     8
@@ -191,6 +224,157 @@ _start:
     mov     w0, #'\n'
     bl      putc
 
+    /* ===== TEST 3: MDIO — read PHY ID ===== */
+
+.Ltest_phy:
+    ldr     x19, =GENET_BASE_PI4
+
+    /* Read PHYSID1 (reg 2): expect 0x600D */
+    mov     w0, #2                  /* register 2 */
+    bl      mdio_read
+    mov     w20, w0                 /* save PHYSID1 */
+
+    /* Read PHYSID2 (reg 3): expect 0x84A2 */
+    mov     w0, #3
+    bl      mdio_read
+    mov     w22, w0                 /* save PHYSID2 (w21 clobbered by print_hex32) */
+
+    /* Print "PHY ID=XXXX.XXXX" */
+    adr     x10, msg_phy_id
+    bl      puts
+    mov     w0, w20
+    bl      print_hex32
+    mov     w0, #'.'
+    bl      putc
+    mov     w0, w22
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* ===== TEST 4: UMAC reset + PHY link ===== */
+
+.Ltest_link:
+    ldr     x19, =GENET_BASE_PI4
+
+    /* --- UMAC reset --- */
+
+    /* Flush RBUF */
+    mov     w0, #2                  /* bit 1 */
+    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_SYS_RBUF_FLUSH]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+
+    /* SW reset */
+    str     wzr, [x19, #GENET_UMAC_CMD]
+    mov     w0, #(UMAC_CMD_LCL_LOOP | UMAC_CMD_SW_RESET)
+    str     w0, [x19, #GENET_UMAC_CMD]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_UMAC_CMD]
+
+    /* Port mode: EXT_GPHY (3) */
+    mov     w0, #3
+    str     w0, [x19, #GENET_SYS_PORT_CTRL]
+
+    /* Reset MIB counters */
+    mov     w0, #7
+    str     w0, [x19, #GENET_UMAC_MIB_CTRL]
+    str     wzr, [x19, #GENET_UMAC_MIB_CTRL]
+
+    /* Max frame length */
+    mov     w0, #1536
+    str     w0, [x19, #GENET_UMAC_MAX_FRAME]
+
+    /* Mask all interrupts */
+    mov     w0, #-1                /* 0xFFFFFFFF */
+    str     w0, [x19, #GENET_INTRL2_0_MASK_SET]
+    str     w0, [x19, #GENET_INTRL2_0_CLEAR]
+    str     w0, [x19, #GENET_INTRL2_1_MASK_SET]
+    str     w0, [x19, #GENET_INTRL2_1_CLEAR]
+
+    adr     x10, msg_umac_ok
+    bl      puts
+
+    /* --- Configure RGMII interface --- */
+    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
+    bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
+    orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
+    orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
+    bic     w0, w0, #(1 << 16)     /* clear ID_MODE_DIS (enable RX delay) */
+    str     w0, [x19, #GENET_EXT_RGMII_OOB]
+
+    /* --- PHY reset --- */
+    mov     w0, #PHY_BMCR
+    mov     w1, #0x8000             /* bit 15 = reset */
+    bl      mdio_write
+
+    /* Poll BMCR bit 15 until clear (reset complete) */
+    mov     w22, #50000
+.Lphy_rst_poll:
+    mov     w0, #PHY_BMCR
+    bl      mdio_read
+    tbz     w0, #15, .Lphy_rst_done
+    subs    w22, w22, #1
+    b.ne    .Lphy_rst_poll
+    adr     x10, msg_phy_rst_fail
+    bl      puts
+    b       .Ltests_done
+
+.Lphy_rst_done:
+    /* Enable auto-negotiation + restart */
+    mov     w0, #PHY_BMCR
+    ldr     w1, =0x1340             /* AN enable + restart AN + 1000M */
+    bl      mdio_write
+
+    adr     x10, msg_phy_an
+    bl      puts
+
+    /* Poll BMSR bit 5 for AN complete (up to ~5 seconds) */
+    ldr     w22, =5000000
+.Lan_poll:
+    mov     w0, #PHY_BMSR
+    bl      mdio_read
+    tbnz    w0, #5, .Lan_done
+    subs    w22, w22, #1
+    b.ne    .Lan_poll
+    adr     x10, msg_an_fail
+    bl      puts
+    b       .Ltests_done
+
+.Lan_done:
+    /* Check link (BMSR bit 2) */
+    mov     w0, #PHY_BMSR
+    bl      mdio_read
+    tbz     w0, #2, .Lno_link
+
+    /* Read negotiated speed from AUX_STS reg 0x19, bits [10:8] */
+    mov     w0, #PHY_AUX_STS
+    bl      mdio_read
+    lsr     w0, w0, #8
+    and     w20, w0, #7             /* speed code */
+
+    adr     x10, msg_link_ok
+    bl      puts
+    mov     w0, w20
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    b       .Ltests_done
+
+.Lno_link:
+    adr     x10, msg_no_link
+    bl      puts
+
 .Ltests_done:
     adr     x10, msg_done
     bl      puts
@@ -260,6 +444,75 @@ print_hex32:
     ldp     x30, x20, [sp], #16
     ret
 
+/*
+ * mdio_write — Write a PHY register via UMAC MDIO
+ * x19: GENET base address
+ * w0: register number
+ * w1: 16-bit value to write
+ */
+mdio_write:
+    stp     x30, xzr, [sp, #-16]!
+
+    lsl     w2, w0, #MDIO_REG_SHIFT
+    mov     w0, #(PHY_ADDR << MDIO_PMD_SHIFT)
+    orr     w0, w0, w2
+    orr     w0, w0, #MDIO_WRITE
+    orr     w0, w0, #MDIO_START_BUSY
+    and     w1, w1, #0xFFFF
+    orr     w0, w0, w1
+    str     w0, [x19, #UMAC_MDIO_CMD]
+
+    mov     w2, #10000
+.Lmw_poll:
+    ldr     w0, [x19, #UMAC_MDIO_CMD]
+    tbz     w0, #29, .Lmw_done
+    subs    w2, w2, #1
+    b.ne    .Lmw_poll
+.Lmw_done:
+    ldp     x30, xzr, [sp], #16
+    ret
+
+/*
+ * mdio_read — Read a PHY register via UMAC MDIO
+ * x19: GENET base address
+ * w0: register number
+ * Returns: w0 = 16-bit register value (or 0xFFFF on timeout)
+ */
+mdio_read:
+    stp     x30, xzr, [sp, #-16]!
+
+    /* Build MDIO command: START_BUSY | READ | (PHY_ADDR << 21) | (reg << 16) */
+    lsl     w1, w0, #MDIO_REG_SHIFT
+    mov     w0, #(PHY_ADDR << MDIO_PMD_SHIFT)
+    orr     w0, w0, w1
+    orr     w0, w0, #MDIO_READ
+    orr     w0, w0, #MDIO_START_BUSY
+    str     w0, [x19, #UMAC_MDIO_CMD]
+
+    /* Poll until START_BUSY clears */
+    mov     w2, #10000
+.Lmdio_poll:
+    ldr     w0, [x19, #UMAC_MDIO_CMD]
+    tbz     w0, #29, .Lmdio_done
+    subs    w2, w2, #1
+    b.ne    .Lmdio_poll
+    /* Timeout */
+    mov     w0, #0xFFFF
+    b       .Lmdio_ret
+
+.Lmdio_done:
+    /* Check read-fail bit (28) */
+    tbnz    w0, #28, .Lmdio_fail
+    and     w0, w0, #0xFFFF         /* result in bits [15:0] */
+    b       .Lmdio_ret
+
+.Lmdio_fail:
+    mov     w0, #0xFFFF
+
+.Lmdio_ret:
+    ldp     x30, xzr, [sp], #16
+    ret
+
 .Lpark:
     wfe
     b       .Lpark
@@ -270,6 +523,13 @@ print_hex32:
 msg_mbox_ok:    .asciz "MBOX OK rev="
 msg_mbox_fail:  .asciz "MBOX FAIL\r\n"
 msg_genet_ver:  .asciz "GENET ver="
+msg_phy_id:     .asciz "PHY ID="
+msg_umac_ok:    .asciz "UMAC RESET OK\r\n"
+msg_phy_rst_fail: .asciz "PHY RESET FAIL\r\n"
+msg_phy_an:     .asciz "PHY AN started\r\n"
+msg_an_fail:    .asciz "AN TIMEOUT\r\n"
+msg_link_ok:    .asciz "LINK UP speed="
+msg_no_link:    .asciz "NO LINK\r\n"
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
