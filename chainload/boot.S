@@ -192,12 +192,26 @@ _start:
     ldr     x0, =msg_boot
     bl      cl_puts
 
-    /* Flush caches before jumping to new kernel */
-    /* Clean + invalidate D-cache, invalidate I-cache */
+    /* Clean D-cache for kernel region (dirty lines → RAM) */
+    ldr     x0, =CL_KERNEL_ADDR
+    add     x1, x0, x20            /* x20 = kernel size (w20 zero-extended) */
+.Lclean_dc:
+    dc      civac, x0              /* Clean + Invalidate by VA to PoC */
+    add     x0, x0, #64            /* cache line = 64 bytes */
+    cmp     x0, x1
+    b.lt    .Lclean_dc
     dsb     sy
+
+    /* Invalidate I-cache */
     ic      iallu
     dsb     sy
     isb
+
+    /* Drain UART TX FIFO before disabling MMU */
+.Luart_drain:
+    ldr     w0, [x19, #PL011_FR]
+    tst     w0, #0x08              /* BUSY bit (bit 3) */
+    b.ne    .Luart_drain
 
     /* --- Disable MMU before jumping (kernel will set up its own) --- */
     mrs     x0, SCTLR_EL1

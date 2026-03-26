@@ -2,9 +2,7 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* Loaded at 0x200000 via config.txt kernel_address=0x200000
-     * so it doesn't overlap the 0x80000 target where kernels are received */
-    . = 0x200000;
+    . = 0x80000;
 
     .text : {
         *(.text._start)
@@ -13,10 +11,6 @@ SECTIONS
 
     .rodata : {
         *(.rodata*)
-    }
-
-    .data : {
-        *(.data*)
     }
 
     .bss (NOLOAD) : ALIGN(8) {
@@ -33,4 +27,9 @@ SECTIONS
     }
 
     _stack_top = ALIGN(__bss_end, 16) + 0x4000;
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note*)
+    }
 }

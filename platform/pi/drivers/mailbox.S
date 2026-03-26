@@ -18,6 +18,11 @@
  * The buffer must be 16-byte aligned (low 4 bits available for channel).
  * Caller must construct a valid property tag buffer before calling.
  *
+ * Cache coherency: The VideoCore reads/writes the buffer directly in RAM,
+ * bypassing the ARM's D-cache. This function cleans the buffer to RAM
+ * before the request and invalidates the cache line after the response,
+ * so the ARM reads the VC's actual reply, not stale cached data.
+ *
  * Clobbers: x0-x5
  */
 mbox_call:
@@ -26,6 +31,10 @@ mbox_call:
     /* Combine buffer address with channel in low 4 bits */
     and     w2, w1, #0xF
     orr     x2, x0, x2             /* x2 = buffer | channel */
+
+    /* Flush buffer from D-cache to RAM so VC sees our request */
+    dc      civac, x0
+    dsb     sy
 
     /* Poll until mailbox is not full */
 .Lmbox_write_wait:
@@ -46,6 +55,10 @@ mbox_call:
     and     w5, w4, #0xF
     cmp     w5, w1
     b.ne    .Lmbox_read_wait      /* Not our channel, keep polling */
+
+    /* Invalidate buffer cache line — VC wrote response to RAM, not our cache */
+    dc      civac, x0
+    dsb     sy
 
     /* Check buffer response code (offset 4 in buffer = request/response code) */
     ldr     w0, [x0, #4]
