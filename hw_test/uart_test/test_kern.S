@@ -31,9 +31,55 @@
 .equ GENET_INTRL2_1_MASK_SET, 0x250
 .equ GENET_RBUF_CTRL,         0x300
 .equ GENET_UMAC_CMD,          0x808
+.equ GENET_UMAC_MAC0,         0x80C
+.equ GENET_UMAC_MAC1,         0x810
 .equ GENET_UMAC_MAX_FRAME,    0x814
+.equ GENET_UMAC_TX_FLUSH,     0xB34
 .equ GENET_UMAC_MIB_CTRL,     0xD80
 .equ UMAC_MDIO_CMD,           0xE14
+
+/* RX DMA */
+.equ GENET_RX_DESC_BASE,      0x2000
+.equ RDMA_WRITE_PTR,          0x3000
+.equ RDMA_PROD_INDEX,         0x3008
+.equ RDMA_CONS_INDEX,         0x300C
+.equ RDMA_RING_BUF_SIZE,      0x3010
+.equ RDMA_START_ADDR,         0x3014
+.equ RDMA_END_ADDR,           0x301C
+.equ RDMA_XON_XOFF_THRESH,    0x3028
+.equ RDMA_READ_PTR,           0x302C
+.equ RDMA_DMA_RING_CFG,       0x3040
+.equ RDMA_DMA_CTRL,           0x3044
+.equ RDMA_DMA_SCB_BURST_SIZE, 0x304C
+
+/* TX DMA */
+.equ GENET_TX_DESC_BASE,      0x4000
+.equ TDMA_READ_PTR,           0x5000
+.equ TDMA_CONS_INDEX,         0x5008
+.equ TDMA_PROD_INDEX,         0x500C
+.equ TDMA_RING_BUF_SIZE,      0x5010
+.equ TDMA_START_ADDR,         0x5014
+.equ TDMA_END_ADDR,           0x501C
+.equ TDMA_MBUF_DONE_THRESH,   0x5024
+.equ TDMA_FLOW_PERIOD,        0x5028
+.equ TDMA_WRITE_PTR,          0x502C
+.equ TDMA_DMA_RING_CFG,       0x5040
+.equ TDMA_DMA_CTRL,           0x5044
+.equ TDMA_DMA_SCB_BURST_SIZE, 0x504C
+
+/* DMA constants */
+.equ DMA_DESC_SIZE,       12          /* 3 words per descriptor */
+.equ DMA_DESC_COUNT,      256
+.equ RX_BUF_LENGTH,       2048
+.equ RX_POOL_ADDR,        0x200000   /* RX buffer pool in low RAM */
+.equ DMA_BUS_OFFSET,      0xC0000000 /* CPU phys → DMA bus */
+.equ DMA_RING_BUF_SIZE_VAL, ((DMA_DESC_COUNT << 16) | RX_BUF_LENGTH)
+.equ DMA_END_ADDR_VAL,    ((DMA_DESC_COUNT * DMA_DESC_SIZE / 4) - 1)
+.equ DMA_CTRL_EN,         0x00020001 /* ring 16 enable | DMA_EN */
+.equ DMA_RING_CFG_EN,     0x00010000 /* ring 16 */
+.equ DMA_BURST_SIZE,      0x08
+.equ RX_INIT_LEN_STATUS,  ((RX_BUF_LENGTH << 16) | 0x8000)  /* len | OWN */
+.equ TX_LEN_STATUS_FLAGS, 0x7FC0     /* SOP|EOP|QTAG|APPEND_CRC */
 
 /* UMAC_CMD bits */
 .equ UMAC_CMD_TX_EN,     (1 << 0)
@@ -369,10 +415,130 @@ _start:
     bl      putc
     mov     w0, #'\n'
     bl      putc
-    b       .Ltests_done
+    b       .Ltest_dma
 
 .Lno_link:
     adr     x10, msg_no_link
+    bl      puts
+    b       .Ltests_done
+
+    /* ===== TEST 5: DMA ring init + MAC enable ===== */
+
+.Ltest_dma:
+    ldr     x19, =GENET_BASE_PI4
+
+    /* Compute base registers for regions with large offsets */
+    add     x26, x19, #5, lsl #12  /* x26 = GENET + 0x5000 (TDMA ring 16) */
+    add     x27, x19, #4, lsl #12  /* x27 = GENET + 0x4000 (TX descs) */
+
+    /* --- Disable DMA first --- */
+    str     wzr, [x26, #0x044]     /* TDMA_DMA_CTRL */
+    str     wzr, [x19, #RDMA_DMA_CTRL]
+
+    /* Flush TX */
+    mov     w0, #1
+    str     w0, [x19, #GENET_UMAC_TX_FLUSH]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
+
+    /* --- Set MAC address (hardcoded for testing) --- */
+    /* Using DE:AD:BE:EF:CA:FE */
+    ldr     w0, =0xDEADBEEF
+    str     w0, [x19, #GENET_UMAC_MAC0]
+    mov     w0, #0xCAFE
+    str     w0, [x19, #GENET_UMAC_MAC1]
+
+    /* --- Init RX descriptors (256 entries) --- */
+    ldr     x23, =RX_POOL_ADDR
+    add     x24, x19, #2, lsl #12  /* x24 = GENET + 0x2000 (RX descs) */
+    mov     w25, #0
+
+.Lrx_desc_init:
+    /* DMA bus address = CPU physical + 0xC0000000 */
+    mov     w0, w23
+    mov     w1, #0xC000
+    lsl     w1, w1, #16
+    add     w0, w0, w1
+
+    /* Write descriptor: length_status, addr_lo, addr_hi */
+    ldr     w2, =RX_INIT_LEN_STATUS
+    str     w2, [x24, #0]
+    str     w0, [x24, #4]
+    str     wzr, [x24, #8]
+
+    add     x23, x23, #RX_BUF_LENGTH
+    add     x24, x24, #DMA_DESC_SIZE
+    add     w25, w25, #1
+    cmp     w25, #DMA_DESC_COUNT
+    b.lt    .Lrx_desc_init
+
+    /* --- Configure RX ring 16 (offsets from x19, all < 0x3FFC) --- */
+    str     wzr, [x19, #RDMA_WRITE_PTR]
+    str     wzr, [x19, #RDMA_PROD_INDEX]
+    str     wzr, [x19, #RDMA_CONS_INDEX]
+    ldr     w0, =DMA_RING_BUF_SIZE_VAL
+    str     w0, [x19, #RDMA_RING_BUF_SIZE]
+    str     wzr, [x19, #RDMA_START_ADDR]
+    ldr     w0, =DMA_END_ADDR_VAL
+    str     w0, [x19, #RDMA_END_ADDR]
+    ldr     w0, =0x00050010
+    str     w0, [x19, #RDMA_XON_XOFF_THRESH]
+    str     wzr, [x19, #RDMA_READ_PTR]
+
+    /* --- Init TX ring 16 (offsets from x26 = GENET + 0x5000) --- */
+    str     wzr, [x26, #0x000]     /* READ_PTR */
+    str     wzr, [x26, #0x008]     /* CONS_INDEX */
+    str     wzr, [x26, #0x00C]     /* PROD_INDEX */
+    ldr     w0, =DMA_RING_BUF_SIZE_VAL
+    str     w0, [x26, #0x010]      /* RING_BUF_SIZE */
+    str     wzr, [x26, #0x014]     /* START_ADDR */
+    ldr     w0, =DMA_END_ADDR_VAL
+    str     w0, [x26, #0x01C]      /* END_ADDR */
+    mov     w0, #1
+    str     w0, [x26, #0x024]      /* MBUF_DONE_THRESH */
+    str     wzr, [x26, #0x028]     /* FLOW_PERIOD */
+    str     wzr, [x26, #0x02C]     /* WRITE_PTR */
+
+    /* --- Enable DMA --- */
+    mov     w0, #DMA_BURST_SIZE
+    str     w0, [x19, #RDMA_DMA_SCB_BURST_SIZE]
+    str     w0, [x26, #0x04C]      /* TDMA_DMA_SCB_BURST_SIZE */
+
+    ldr     w0, =DMA_RING_CFG_EN
+    str     w0, [x19, #RDMA_DMA_RING_CFG]
+    str     w0, [x26, #0x040]      /* TDMA_DMA_RING_CFG */
+
+    ldr     w0, =DMA_CTRL_EN
+    str     w0, [x19, #RDMA_DMA_CTRL]
+    str     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
+
+    /* --- Enable RBUF 2-byte align (IP header alignment) --- */
+    ldr     w0, [x19, #GENET_RBUF_CTRL]
+    orr     w0, w0, #2
+    str     w0, [x19, #GENET_RBUF_CTRL]
+
+    /* --- Enable MAC TX + RX --- */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
+    str     w0, [x19, #GENET_UMAC_CMD]
+
+    /* --- Verify DMA enabled --- */
+    ldr     w0, [x19, #RDMA_DMA_CTRL]
+    tst     w0, #1
+    b.eq    .Ldma_fail
+
+    ldr     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
+    tst     w0, #1
+    b.eq    .Ldma_fail
+
+    adr     x10, msg_dma_ok
+    bl      puts
+    b       .Ltests_done
+
+.Ldma_fail:
+    adr     x10, msg_dma_fail
     bl      puts
 
 .Ltests_done:
@@ -530,6 +696,8 @@ msg_phy_an:     .asciz "PHY AN started\r\n"
 msg_an_fail:    .asciz "AN TIMEOUT\r\n"
 msg_link_ok:    .asciz "LINK UP speed="
 msg_no_link:    .asciz "NO LINK\r\n"
+msg_dma_ok:     .asciz "DMA INIT OK\r\n"
+msg_dma_fail:   .asciz "DMA INIT FAIL\r\n"
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
