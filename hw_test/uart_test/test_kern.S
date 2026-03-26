@@ -519,9 +519,28 @@ _start:
     orr     w0, w0, #2
     str     w0, [x19, #GENET_RBUF_CTRL]
 
-    /* --- Enable MAC TX + RX --- */
+    /* --- Enable MAC TX + RX with speed + promisc --- */
     ldr     w0, [x19, #GENET_UMAC_CMD]
     orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
+    /* Set speed from w20 (negotiated speed code from PHY AUX_STS):
+     * 7=1000FD, 5=100FD, 2=10FD. UMAC speed bits [3:2]: 00=10,01=100,10=1000 */
+    bic     w0, w0, #0x0C          /* clear speed bits [3:2] */
+    cmp     w20, #7
+    b.eq    .Lspeed_1000
+    cmp     w20, #6
+    b.eq    .Lspeed_1000
+    cmp     w20, #5
+    b.eq    .Lspeed_100
+    cmp     w20, #3
+    b.eq    .Lspeed_100
+    b       .Lspeed_set             /* default 10M */
+.Lspeed_1000:
+    orr     w0, w0, #0x08          /* bit 3 = 1000M */
+    b       .Lspeed_set
+.Lspeed_100:
+    orr     w0, w0, #0x04          /* bit 2 = 100M */
+.Lspeed_set:
+    orr     w0, w0, #0x10          /* bit 4 = PROMISC (accept all frames) */
     str     w0, [x19, #GENET_UMAC_CMD]
 
     /* --- Verify DMA enabled --- */
@@ -535,11 +554,101 @@ _start:
 
     adr     x10, msg_dma_ok
     bl      puts
-    b       .Ltests_done
+    b       .Ltest_rx
 
 .Ldma_fail:
     adr     x10, msg_dma_fail
     bl      puts
+    b       .Ltests_done
+
+    /* ===== TEST 6: Receive a frame ===== */
+
+.Ltest_rx:
+    ldr     x19, =GENET_BASE_PI4
+
+    /* Read initial PROD_INDEX (HW may not start at 0) */
+    ldr     w22, [x19, #RDMA_PROD_INDEX]
+    and     w22, w22, #0xFFFF       /* c_index = current prod_index */
+    and     w23, w22, #0xFF         /* rx_index = c_index & 255 */
+
+    /* Poll for a frame (up to ~5 seconds) */
+    adr     x10, msg_rx_wait
+    bl      puts
+    ldr     w24, =5000000
+.Lrx_poll:
+    ldr     w0, [x19, #RDMA_PROD_INDEX]
+    and     w0, w0, #0xFFFF
+    cmp     w0, w22
+    b.ne    .Lrx_got_frame
+    subs    w24, w24, #1
+    b.ne    .Lrx_poll
+
+    adr     x10, msg_rx_timeout
+    bl      puts
+    b       .Ltests_done
+
+.Lrx_got_frame:
+    /* Read descriptor at GENET_RX_DESC_BASE + rx_index * 12 */
+    add     x24, x19, #2, lsl #12  /* x24 = GENET + 0x2000 (RX descs) */
+    mov     w0, #DMA_DESC_SIZE
+    mul     w1, w23, w0
+    add     x24, x24, x1           /* x24 = descriptor address */
+
+    ldr     w25, [x24, #0]         /* length_status */
+
+    /* Extract length */
+    lsr     w20, w25, #16
+    and     w20, w20, #0xFFF       /* w20 = raw length (includes 2-byte pad) */
+
+    /* Compute CPU buffer address: RX_POOL_ADDR + rx_index * 2048 */
+    ldr     x0, =RX_POOL_ADDR
+    lsl     w1, w23, #11            /* rx_index * 2048 */
+    add     x28, x0, x1             /* x28 = buffer CPU address */
+
+    /* Invalidate D-cache for buffer (DMA wrote to RAM, not cache) */
+    mov     x0, x28
+    mov     w1, #0
+.Lrx_inval:
+    dc      civac, x0
+    add     x0, x0, #64
+    add     w1, w1, #64
+    cmp     w1, w20                 /* invalidate at least 'length' bytes */
+    b.lt    .Lrx_inval
+    dsb     sy
+
+    /* Print "RX len=XXXX" */
+    adr     x10, msg_rx_len
+    bl      puts
+    mov     w0, w20
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Print first 14 bytes of frame (after 2-byte pad): Ethernet header
+     * dst[6] src[6] ethertype[2] */
+    adr     x10, msg_rx_hdr
+    bl      puts
+    add     x28, x28, #2           /* skip 2-byte RBUF pad */
+    mov     w25, #0
+.Lrx_dump:
+    ldrb    w0, [x28, x25]
+    bl      print_hex8
+    mov     w0, #' '
+    bl      putc
+    add     w25, w25, #1
+    cmp     w25, #14
+    b.lt    .Lrx_dump
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Update consumer index to free buffer */
+    add     w22, w22, #1
+    and     w22, w22, #0xFFFF
+    str     w22, [x19, #RDMA_CONS_INDEX]
 
 .Ltests_done:
     adr     x10, msg_done
@@ -609,6 +718,24 @@ print_hex32:
 .Lphd:
     ldp     x30, x20, [sp], #16
     ret
+
+/* print_hex8: print w0 low byte as 2-digit hex */
+print_hex8:
+    stp     x30, x20, [sp, #-16]!
+    and     w20, w0, #0xFF
+    lsr     w0, w20, #4
+    bl      .Lnibble
+    and     w0, w20, #0xF
+    bl      .Lnibble
+    ldp     x30, x20, [sp], #16
+    ret
+.Lnibble:
+    cmp     w0, #10
+    b.lt    1f
+    add     w0, w0, #('A' - 10)
+    b       putc
+1:  add     w0, w0, #'0'
+    b       putc
 
 /*
  * mdio_write — Write a PHY register via UMAC MDIO
@@ -698,6 +825,10 @@ msg_link_ok:    .asciz "LINK UP speed="
 msg_no_link:    .asciz "NO LINK\r\n"
 msg_dma_ok:     .asciz "DMA INIT OK\r\n"
 msg_dma_fail:   .asciz "DMA INIT FAIL\r\n"
+msg_rx_wait:    .asciz "RX waiting...\r\n"
+msg_rx_timeout: .asciz "RX TIMEOUT\r\n"
+msg_rx_len:     .asciz "RX len="
+msg_rx_hdr:     .asciz "ETH: "
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
