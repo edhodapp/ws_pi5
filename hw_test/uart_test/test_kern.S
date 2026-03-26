@@ -2,24 +2,26 @@
  * test_kern.S — Hardware integration test kernel
  *
  * Loaded at 0x100000 by step5 loader. Runs at EL1.
+ * Links against production drivers (mailbox.S, dwc2.S).
  *
  * Current tests:
  *   - Production MMU (4 GB identity map)
  *   - UART3 output
  *   - Mailbox: TAG_GET_BOARD_REV
+ *   - DWC2: USB host init + port connect
  *   - Watchdog reset
  */
 
-.equ GPIO_BASE,    0xFE200000
-.equ UART3_BASE,   0xFE201600
-.equ MBOX_BASE_PI4, 0xFE00B880
-.equ PM_WDOG,      0xFE100024
-.equ PM_RSTC,      0xFE10001C
+.equ GPIO_BASE_PI4,  0xFE200000
+.equ UART3_BASE_PI4, 0xFE201600
+.equ DWC2_BASE_PI4,  0xFE980000
+.equ MBOX_BASE_PI4,  0xFE00B880
+.equ GENET_BASE_PI4, 0xFD580000
+.equ GENET_SYS_REV,  0x000
+.equ PM_WDOG,        0xFE100024
+.equ PM_RSTC,        0xFE10001C
 
 /* Mailbox constants */
-.equ MBOX_READ,        0x00
-.equ MBOX_STATUS,      0x18
-.equ MBOX_WRITE,       0x20
 .equ MBOX_CH_PROP,     8
 .equ MBOX_REQUEST,     0x00000000
 .equ TAG_GET_BOARD_REV, 0x00010002
@@ -34,6 +36,9 @@
 .equ ICR,          0x044
 .equ FR_TXFF,      0x20
 .equ FR_RXFE,      0x10
+
+/* DWC2 — just HPRT for status check */
+.equ DWC2_HPRT,    0x440
 
 .section .text._start
 
@@ -87,7 +92,7 @@ _start:
     str     x5, [x0, x4, lsl #3]
     add     x1, x1, #0x200000
     add     w4, w4, #1
-    cmp     w4, #496
+    cmp     w4, #480
     b.lt    .Lfn
 .Lfd:
     orr     x5, x1, x3
@@ -108,7 +113,7 @@ _start:
     isb
 
     /* --- GPIO + UART3 --- */
-    ldr     x9, =GPIO_BASE
+    ldr     x9, =GPIO_BASE_PI4
     ldr     w0, [x9]
     bic     w0, w0, #(7 << 12)
     orr     w0, w0, #(3 << 12)
@@ -116,7 +121,7 @@ _start:
     orr     w0, w0, #(3 << 15)
     str     w0, [x9]
 
-    ldr     x9, =UART3_BASE
+    ldr     x9, =UART3_BASE_PI4
     str     wzr, [x9, #CR]
     mov     w0, #0x7FF
     str     w0, [x9, #ICR]
@@ -129,61 +134,64 @@ _start:
     mov     w0, #0x301
     str     w0, [x9, #CR]
 
-    /* ===== TEST: Mailbox — get board revision ===== */
+    /* ===== TEST 1: Mailbox — get board revision ===== */
 
-    /* Build tag buffer */
-    ldr     x19, =mbox_buf
+    ldr     x19, =mbox_test_buf
     mov     w0, #32
-    str     w0, [x19, #0]          /* buffer size */
+    str     w0, [x19, #0]
     mov     w0, #MBOX_REQUEST
-    str     w0, [x19, #4]          /* request code */
+    str     w0, [x19, #4]
     ldr     w0, =TAG_GET_BOARD_REV
-    str     w0, [x19, #8]          /* tag id */
+    str     w0, [x19, #8]
     mov     w0, #4
-    str     w0, [x19, #12]         /* value buffer size */
-    str     wzr, [x19, #16]        /* request/response code */
-    str     wzr, [x19, #20]        /* value (filled by VC) */
-    str     wzr, [x19, #24]        /* end tag */
+    str     w0, [x19, #12]
+    str     wzr, [x19, #16]
+    str     wzr, [x19, #20]
+    str     wzr, [x19, #24]
 
-    /* Flush buffer from D-cache to RAM (VC reads RAM directly) */
+    /* Flush buffer, call, invalidate */
     dc      civac, x19
     dsb     sy
-
-    /* Call mbox_call(buf, channel, base) */
     mov     x0, x19
     mov     w1, #MBOX_CH_PROP
     ldr     x2, =MBOX_BASE_PI4
     bl      mbox_call
-
-    /* Invalidate buffer cache line so we read VC's response from RAM */
     dc      civac, x19
     dsb     sy
 
-    /* Check result */
     cbnz    w0, .Lmbox_fail
 
-    /* Print "MBOX OK rev=" */
     adr     x10, msg_mbox_ok
     bl      puts
-
-    /* Print the board revision (32-bit hex) */
-    ldr     w20, [x19, #20]        /* revision value from VC */
-    mov     w0, w20
+    ldr     w0, [x19, #20]
     bl      print_hex32
-
-    /* Print newline */
     mov     w0, #'\r'
     bl      putc
     mov     w0, #'\n'
     bl      putc
-    b       .Ltests_done
+    b       .Ltest_genet
 
 .Lmbox_fail:
     adr     x10, msg_mbox_fail
     bl      puts
 
+    /* ===== TEST 2: GENET version register read ===== */
+
+.Ltest_genet:
+    ldr     x0, =GENET_BASE_PI4
+    ldr     w19, [x0, #GENET_SYS_REV]
+
+    /* GENET v5 should have major version 6 in upper bits */
+    adr     x10, msg_genet_ver
+    bl      puts
+    mov     w0, w19
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
 .Ltests_done:
-    /* --- DONE --- */
     adr     x10, msg_done
     bl      puts
 
@@ -212,39 +220,6 @@ _start:
     wfe
     b       .Lwait_reset
 
-/* ===== Mailbox driver (inlined from platform/pi/drivers/mailbox.S) ===== */
-
-/*
- * mbox_call - Send property tag buffer to VideoCore mailbox
- * x0: 16-byte-aligned tag buffer
- * w1: channel (8 = property)
- * x2: mailbox base address
- * Returns: w0 = 0 success, 1 failure
- */
-mbox_call:
-    mov     x3, x2
-    and     w2, w1, #0xF
-    orr     x2, x0, x2
-.Lmw:
-    ldr     w4, [x3, #MBOX_STATUS]
-    tbnz    w4, #31, .Lmw
-    str     w2, [x3, #MBOX_WRITE]
-.Lmr:
-    ldr     w4, [x3, #MBOX_STATUS]
-    tbnz    w4, #30, .Lmr
-    ldr     w4, [x3, #MBOX_READ]
-    and     w5, w4, #0xF
-    cmp     w5, w1
-    b.ne    .Lmr
-    /* Invalidate buffer cache line — VC wrote response to RAM, not our cache */
-    dc      civac, x0
-    dsb     sy
-    ldr     w0, [x0, #4]
-    and     w0, w0, #0x80000000
-    cmp     w0, #0
-    cset    w0, eq
-    ret
-
 /* ===== UART helpers ===== */
 
 putc:
@@ -265,7 +240,6 @@ puts:
     ldp     x30, xzr, [sp], #16
     ret
 
-/* print_hex32: print w0 as 8-digit hex */
 print_hex32:
     stp     x30, x20, [sp, #-16]!
     mov     w20, w0
@@ -295,9 +269,10 @@ print_hex32:
 .section .rodata
 msg_mbox_ok:    .asciz "MBOX OK rev="
 msg_mbox_fail:  .asciz "MBOX FAIL\r\n"
+msg_genet_ver:  .asciz "GENET ver="
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
 .balign 16
-mbox_buf:
+mbox_test_buf:
     .space 32

@@ -129,7 +129,7 @@ _start:
     str     x5, [x0, x4, lsl #3]
     add     x1, x1, #0x200000
     add     w4, w4, #1
-    cmp     w4, #496
+    cmp     w4, #480
     b.lt    .Lfill_normal
 
 .Lfill_device:

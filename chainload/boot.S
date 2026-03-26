@@ -101,7 +101,7 @@ _start:
     orr     x1, x1, #0x3          /* table descriptor */
     str     x1, [x0, #24]         /* 0xC0000000 → L2 */
 
-    /* L2 for GB 3: 0-495 Normal, 496-511 Device */
+    /* L2 for GB 3: 0-479 Normal, 480-511 Device (extended peripherals at 0xFC000000) */
     ldr     x0, =__mmu_l2_table
     mov     x1, #0xC0000000
     mov     x2, #0x701
@@ -113,7 +113,7 @@ _start:
     str     x5, [x0, x4, lsl #3]
     add     x1, x1, #0x200000
     add     w4, w4, #1
-    cmp     w4, #496
+    cmp     w4, #480
     b.lt    .Lfill_normal
 
 .Lfill_device:

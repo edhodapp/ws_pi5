@@ -79,7 +79,9 @@ _start:
     str     x3, [x0, #16]         /* 0x80000000 - 0xBFFFFFFF */
     str     x1, [x0, #24]         /* 0xC0000000 - 0xFFFFFFFF → L2 table */
 
-    /* Fill L2 for GB 3: entries 0-495 Normal, 496-511 Device */
+    /* Fill L2 for GB 3: entries 0-479 Normal, 480-511 Device
+     * Device starts at 0xFC000000 (extended peripherals: GENET, PCIe, etc.)
+     * 480 = (0xFC000000 - 0xC0000000) / 2MB */
     ldr     x0, =__mmu_l2_table
     mov     x1, #0xC0000000        /* base PA for GB 3 */
     mov     x2, #0x701             /* Normal block */
@@ -91,7 +93,7 @@ _start:
     str     x5, [x0, x4, lsl #3]
     add     x1, x1, #0x200000
     add     w4, w4, #1
-    cmp     w4, #496               /* 496 = (0xFE000000 - 0xC0000000) / 2MB */
+    cmp     w4, #480               /* 480 = (0xFC000000 - 0xC0000000) / 2MB */
     b.lt    .Lfill_normal
 
 .Lfill_device:
