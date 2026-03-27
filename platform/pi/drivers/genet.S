@@ -313,8 +313,8 @@ genet_send:
     /* Increment and write PROD_INDEX */
     add     w3, w3, #1
     and     w3, w3, #0xFFFF
-    add     x0, x19, #5, lsl #12
-    str     w3, [x0, #TDMA_PROD_INDEX_OFS]
+    add     x5, x19, #5, lsl #12   /* x5 = TDMA ring base */
+    str     w3, [x5, #TDMA_PROD_INDEX_OFS]
 
     /* Update state */
     str     w3, [x20, #GENET_STATE_TX_PIDX]
@@ -322,10 +322,10 @@ genet_send:
     and     w4, w4, #0xFF
     str     w4, [x20, #GENET_STATE_TX_RIDX]
 
-    /* Poll CONS_INDEX for completion */
+    /* Poll CONS_INDEX for completion (x5 = TDMA base, preserved) */
     ldr     w4, =100000
 .Ltx_wait:
-    ldr     w0, [x0, #TDMA_CONS_INDEX_OFS]
+    ldr     w0, [x5, #TDMA_CONS_INDEX_OFS]
     and     w0, w0, #0xFFFF
     cmp     w0, w3
     b.eq    .Ltx_ok

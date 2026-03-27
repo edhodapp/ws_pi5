@@ -166,6 +166,11 @@ main:
     ldr     x3, =NET_SEND_SYM
     bl      http_set_send_ctx
 
+.ifdef PLATFORM_PI4
+    ldr     x0, =msg_entering_loop
+    bl      uart_puts
+.endif
+
     mov     w0, #0
     b       .Ldone
 
@@ -292,3 +297,4 @@ msg_hello_pi4:  .asciz "Hello from bare-metal Pi 4!\r\n"
 msg_genet_ok:   .asciz "GENET Gigabit Ethernet initialized\r\n"
 .endif
 msg_net_fail:   .asciz "Network bring-up failed\r\n"
+msg_entering_loop: .asciz "Entering net_loop\r\n"
