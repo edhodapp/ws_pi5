@@ -154,10 +154,8 @@ genet_init:
     mov     w26, #0
 
 .Lrx_init:
+    /* GENET DMA uses CPU physical addresses directly (no bus offset) */
     mov     w0, w24
-    mov     w1, #0xC000
-    lsl     w1, w1, #16
-    add     w0, w0, w1              /* DMA bus addr */
 
     ldr     w2, =((RX_BUF_LENGTH << 16) | RX_DMA_OWN)
     str     w2, [x25, #0]
@@ -301,11 +299,8 @@ genet_send:
     mul     w1, w4, w0
     add     x5, x5, x1
 
-    /* DMA bus address */
+    /* CPU physical address (GENET DMA uses physical directly) */
     mov     w0, w21
-    mov     w1, #0xC000
-    lsl     w1, w1, #16
-    add     w0, w0, w1
 
     /* Write descriptor: addr first, length_status last */
     str     w0, [x5, #4]

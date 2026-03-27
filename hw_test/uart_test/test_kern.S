@@ -456,11 +456,8 @@ _start:
     mov     w25, #0
 
 .Lrx_desc_init:
-    /* DMA bus address = CPU physical + 0xC0000000 */
+    /* Use CPU physical address directly (no bus offset) */
     mov     w0, w23
-    mov     w1, #0xC000
-    lsl     w1, w1, #16
-    add     w0, w0, w1
 
     /* Write descriptor: length_status, addr_lo, addr_hi */
     ldr     w2, =RX_INIT_LEN_STATUS
@@ -561,20 +558,24 @@ _start:
     bl      puts
     b       .Ltests_done
 
-    /* ===== TEST 6: Receive a frame ===== */
+    /* ===== TEST 6: Receive + dump frames (up to 10) ===== */
 
 .Ltest_rx:
     ldr     x19, =GENET_BASE_PI4
 
-    /* Read initial PROD_INDEX (HW may not start at 0) */
+    /* Read initial PROD_INDEX */
     ldr     w22, [x19, #RDMA_PROD_INDEX]
-    and     w22, w22, #0xFFFF       /* c_index = current prod_index */
-    and     w23, w22, #0xFF         /* rx_index = c_index & 255 */
+    and     w22, w22, #0xFFFF       /* c_index */
+    and     w23, w22, #0xFF         /* rx_index */
 
-    /* Poll for a frame (up to ~5 seconds) */
     adr     x10, msg_rx_wait
     bl      puts
-    ldr     w24, =5000000
+
+    mov     w27, #0                 /* frame counter */
+
+.Lrx_next:
+    /* Poll for a frame (up to ~3 seconds per frame) */
+    ldr     w24, =3000000
 .Lrx_poll:
     ldr     w0, [x19, #RDMA_PROD_INDEX]
     and     w0, w0, #0xFFFF
@@ -583,41 +584,59 @@ _start:
     subs    w24, w24, #1
     b.ne    .Lrx_poll
 
-    adr     x10, msg_rx_timeout
+    /* Timeout — print count and finish */
+    adr     x10, msg_rx_count
     bl      puts
+    mov     w0, w27
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
     b       .Ltests_done
 
 .Lrx_got_frame:
-    /* Read descriptor at GENET_RX_DESC_BASE + rx_index * 12 */
-    add     x24, x19, #2, lsl #12  /* x24 = GENET + 0x2000 (RX descs) */
+    /* Read descriptor */
+    add     x24, x19, #2, lsl #12
     mov     w0, #DMA_DESC_SIZE
     mul     w1, w23, w0
-    add     x24, x24, x1           /* x24 = descriptor address */
+    add     x24, x24, x1
 
     ldr     w25, [x24, #0]         /* length_status */
-
-    /* Extract length */
     lsr     w20, w25, #16
-    and     w20, w20, #0xFFF       /* w20 = raw length (includes 2-byte pad) */
+    and     w20, w20, #0xFFF       /* raw length (includes 2-byte pad) */
 
-    /* Compute CPU buffer address: RX_POOL_ADDR + rx_index * 2048 */
+    /* Compute CPU buffer address */
     ldr     x0, =RX_POOL_ADDR
-    lsl     w1, w23, #11            /* rx_index * 2048 */
-    add     x28, x0, x1             /* x28 = buffer CPU address */
+    lsl     w1, w23, #11
+    add     x28, x0, x1
 
-    /* Invalidate D-cache for buffer (DMA wrote to RAM, not cache) */
+    /* Invalidate D-cache */
     mov     x0, x28
     mov     w1, #0
 .Lrx_inval:
     dc      civac, x0
     add     x0, x0, #64
     add     w1, w1, #64
-    cmp     w1, w20                 /* invalidate at least 'length' bytes */
+    cmp     w1, w20
     b.lt    .Lrx_inval
     dsb     sy
 
-    /* Print "RX len=XXXX" */
-    adr     x10, msg_rx_len
+    /* Check ethertype at buffer+14,+15 (after 2-byte pad + 12-byte MACs)
+     * ARP = 0x08 0x06 in network order */
+    ldrb    w0, [x28, #14]
+    cmp     w0, #0x08
+    b.ne    .Lrx_skip
+    ldrb    w0, [x28, #15]
+    cmp     w0, #0x06
+    b.ne    .Lrx_skip
+
+    /* === ARP frame — print it === */
+    sub     w20, w20, #2            /* actual frame length */
+    add     x28, x28, #2           /* skip RBUF pad */
+
+    /* Print "ARP len=XXXX" */
+    adr     x10, msg_arp
     bl      puts
     mov     w0, w20
     bl      print_hex32
@@ -626,29 +645,47 @@ _start:
     mov     w0, #'\n'
     bl      putc
 
-    /* Print first 14 bytes of frame (after 2-byte pad): Ethernet header
-     * dst[6] src[6] ethertype[2] */
-    adr     x10, msg_rx_hdr
-    bl      puts
-    add     x28, x28, #2           /* skip 2-byte RBUF pad */
+    /* Print first 42 bytes (full ARP frame: 14 ETH + 28 ARP) */
     mov     w25, #0
+    mov     w26, #42
+    cmp     w20, #42
+    csel    w26, w20, w26, lt
 .Lrx_dump:
+    cmp     w25, w26
+    b.ge    .Lrx_dump_done
     ldrb    w0, [x28, x25]
     bl      print_hex8
     mov     w0, #' '
     bl      putc
     add     w25, w25, #1
-    cmp     w25, #14
-    b.lt    .Lrx_dump
+    b       .Lrx_dump
+
+.Lrx_dump_done:
     mov     w0, #'\r'
     bl      putc
     mov     w0, #'\n'
     bl      putc
 
-    /* Update consumer index to free buffer */
+    /* Count ARP frame */
+    add     w27, w27, #1
+    b       .Lrx_consume
+
+.Lrx_skip:
+    /* Print '.' for non-ARP */
+    mov     w0, #'.'
+    bl      putc
+
+.Lrx_consume:
+    /* Update consumer index */
     add     w22, w22, #1
     and     w22, w22, #0xFFFF
     str     w22, [x19, #RDMA_CONS_INDEX]
+    add     w23, w23, #1
+    and     w23, w23, #0xFF
+
+    /* Stop after 5 ARP frames or keep going */
+    cmp     w27, #5
+    b.lt    .Lrx_next
 
     /* ===== TEST 7: TX — send a broadcast ARP request ===== */
 
@@ -720,11 +757,8 @@ _start:
     mul     w1, w23, w0
     add     x24, x24, x1
 
-    /* DMA bus address of tx_frame */
+    /* Use CPU physical address directly */
     mov     w0, w28
-    mov     w1, #0xC000
-    lsl     w1, w1, #16
-    add     w0, w0, w1              /* DMA bus addr */
 
     /* Write descriptor: addr first, length_status last */
     str     w0, [x24, #4]          /* addr_lo */
@@ -935,11 +969,10 @@ msg_no_link:    .asciz "NO LINK\r\n"
 msg_dma_ok:     .asciz "DMA INIT OK\r\n"
 msg_dma_fail:   .asciz "DMA INIT FAIL\r\n"
 msg_rx_wait:    .asciz "RX waiting...\r\n"
-msg_rx_timeout: .asciz "RX TIMEOUT\r\n"
+msg_rx_count:   .asciz "ARP frames="
+msg_arp:        .asciz "ARP len="
 msg_tx_ok:      .asciz "TX OK\r\n"
 msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
-msg_rx_len:     .asciz "RX len="
-msg_rx_hdr:     .asciz "ETH: "
 msg_done:       .asciz "DONE\r\n"
 
 .section .data

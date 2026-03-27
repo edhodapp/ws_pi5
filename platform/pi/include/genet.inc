@@ -94,7 +94,7 @@
 .equ DMA_DESC_SIZE,            12
 .equ DMA_DESC_COUNT,           256
 .equ RX_BUF_LENGTH,           2048
-.equ DMA_BUS_OFFSET,          0xC0000000
+/* GENET DMA uses CPU physical addresses directly (no bus offset needed) */
 .equ DMA_BURST_SIZE,          8
 .equ DMA_RING_CFG_EN,         0x00010000   /* ring 16 */
 .equ DMA_CTRL_EN,             0x00020001   /* ring 16 enable | DMA_EN */
