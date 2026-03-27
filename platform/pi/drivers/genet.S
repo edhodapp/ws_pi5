@@ -234,6 +234,7 @@ genet_init:
 .Lsp_100:
     orr     w0, w0, #UMAC_CMD_SPEED_100
 .Lsp_set:
+    orr     w0, w0, #UMAC_CMD_PROMISC  /* accept all frames for now */
     str     w0, [x19, #GENET_UMAC_CMD]
 
     /* Init state indices */

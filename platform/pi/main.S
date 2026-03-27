@@ -197,6 +197,14 @@ net_loop:
 .endif
     cbnz    w0, .Lnet_timers        /* recv failed / no frame → check timers */
 
+.ifdef PLATFORM_PI4
+    /* Debug: print '.' for each received frame */
+    stp     x0, x1, [sp, #-16]!
+    mov     w0, #'.'
+    bl      uart_putc
+    ldp     x0, x1, [sp], #16
+.endif
+
     /* w1 = actual frame length */
     ldr     x0, =rx_buf
     bl      net_recv_one
