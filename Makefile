@@ -40,7 +40,8 @@ SHARED_OBJS = \
 PI_OBJS = \
     $(BUILD)/uart.o $(BUILD)/gpio.o $(BUILD)/mailbox.o \
     $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o \
-    $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o
+    $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o \
+    $(BUILD)/genet.o
 
 PI_TEST_OBJS = \
     $(BUILD)/test_pi_all.o \
@@ -245,6 +246,9 @@ $(BUILD)/cdc_ecm.o: platform/pi/drivers/cdc_ecm.S $(PI_INC)/dwc2.inc $(PI_INC)/u
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/usb_bulk.o: platform/pi/drivers/usb_bulk.S $(PI_INC)/dwc2.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/genet.o: platform/pi/drivers/genet.S $(PI_INC)/genet.inc $(PI_INC)/mailbox.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
