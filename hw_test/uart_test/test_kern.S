@@ -354,7 +354,7 @@ _start:
     bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
     orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
     orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
-    bic     w0, w0, #(1 << 16)     /* clear ID_MODE_DIS (enable RX delay) */
+    orr     w0, w0, #(1 << 16)     /* SET ID_MODE_DIS (no GENET internal delay) */
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
@@ -443,6 +443,10 @@ _start:
     b.ne    1b
     str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
 
+    /* RBUF_TBUF_SIZE_CTRL: must be 1 for TX to work */
+    mov     w0, #1
+    str     w0, [x19, #0x3B4]
+
     /* --- Set MAC address (hardcoded for testing) --- */
     /* Using DE:AD:BE:EF:CA:FE */
     ldr     w0, =0xDEADBEEF
@@ -516,12 +520,8 @@ _start:
     orr     w0, w0, #2
     str     w0, [x19, #GENET_RBUF_CTRL]
 
-    /* --- Enable MAC TX + RX with speed + promisc --- */
-    ldr     w0, [x19, #GENET_UMAC_CMD]
-    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
-    /* Set speed from w20 (negotiated speed code from PHY AUX_STS):
-     * 7=1000FD, 5=100FD, 2=10FD. UMAC speed bits [3:2]: 00=10,01=100,10=1000 */
-    bic     w0, w0, #0x0C          /* clear speed bits [3:2] */
+    /* --- Set speed (write speed alone, clear everything else) --- */
+    mov     w0, #0
     cmp     w20, #7
     b.eq    .Lspeed_1000
     cmp     w20, #6
@@ -530,14 +530,18 @@ _start:
     b.eq    .Lspeed_100
     cmp     w20, #3
     b.eq    .Lspeed_100
-    b       .Lspeed_set             /* default 10M */
+    b       .Lspeed_set
 .Lspeed_1000:
-    orr     w0, w0, #0x08          /* bit 3 = 1000M */
+    mov     w0, #0x08
     b       .Lspeed_set
 .Lspeed_100:
-    orr     w0, w0, #0x04          /* bit 2 = 100M */
+    mov     w0, #0x04
 .Lspeed_set:
-    orr     w0, w0, #0x10          /* bit 4 = PROMISC (accept all frames) */
+    str     w0, [x19, #GENET_UMAC_CMD]
+
+    /* Then enable TX + RX separately */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
     str     w0, [x19, #GENET_UMAC_CMD]
 
     /* --- Verify DMA enabled --- */
@@ -793,6 +797,27 @@ _start:
     adr     x10, msg_tx_ok
     bl      puts
 
+    /* Read UMAC MIB counters to verify actual TX/RX at MAC level */
+    ldr     x19, =GENET_BASE_PI4
+
+    adr     x10, msg_txpkt
+    bl      puts
+    ldr     w0, [x19, #0xA0C]      /* UMAC TX_GD_PKTS (good packets) */
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    adr     x10, msg_rxpkt
+    bl      puts
+    ldr     w0, [x19, #0xC0C]      /* UMAC RX_GD_PKTS (good packets) */
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
 .Ltests_done:
     adr     x10, msg_done
     bl      puts
@@ -973,6 +998,8 @@ msg_rx_count:   .asciz "ARP frames="
 msg_arp:        .asciz "ARP len="
 msg_tx_ok:      .asciz "TX OK\r\n"
 msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
+msg_txpkt:      .asciz "TX_GD_PKTS="
+msg_rxpkt:      .asciz "RX_GD_PKTS="
 msg_done:       .asciz "DONE\r\n"
 
 .section .data

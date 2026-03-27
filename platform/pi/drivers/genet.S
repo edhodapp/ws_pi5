@@ -92,7 +92,7 @@ genet_init:
     bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
     orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
     orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
-    bic     w0, w0, #(1 << 16)     /* clear ID_MODE_DIS */
+    orr     w0, w0, #(1 << 16)     /* SET ID_MODE_DIS (no GENET internal delay) */
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
@@ -110,6 +110,36 @@ genet_init:
     b       .Linit_fail
 
 .Lphy_rst_ok:
+    /* --- Configure BCM54213PE RGMII timing via shadow registers --- */
+
+    /* AUXCTL shadow 7: enable RGMII RXC-RXD skew
+     * Read: write (7 << 12 | 0x7) to reg 0x18, read reg 0x18
+     * Write: write (7 << 12 | value | 0x8000) to reg 0x18 */
+    mov     w0, #0x18              /* AUXCTL register */
+    ldr     w1, =0x7007            /* select shadow 7 for read */
+    bl      genet_mdio_write
+    mov     w0, #0x18
+    bl      genet_mdio_read
+    orr     w1, w0, #0x100         /* set bit 8: RGMII RXC DLY EN */
+    orr     w1, w1, #0x8000        /* write enable */
+    mov     w0, #0x18
+    bl      genet_mdio_write
+
+    /* Shadow register 3 via reg 0x1C: GTX clock delay
+     * Read: write (3 << 10) to reg 0x1C, read reg 0x1C
+     * Write: write (3 << 10 | value | 0x8000) to reg 0x1C */
+    mov     w0, #0x1C              /* SHADOW register */
+    mov     w1, #(3 << 10)         /* select shadow 3 */
+    bl      genet_mdio_write
+    mov     w0, #0x1C
+    bl      genet_mdio_read
+    orr     w1, w0, #(1 << 9)      /* set bit 9: GTX CLK delay enable */
+    movz    w2, #0x8000
+    orr     w1, w1, w2             /* write enable */
+    orr     w1, w1, #(3 << 10)    /* keep shadow 3 selected */
+    mov     w0, #0x1C
+    bl      genet_mdio_write
+
     /* Auto-negotiate */
     mov     w0, #PHY_BMCR
     ldr     w1, =0x1340
@@ -148,6 +178,10 @@ genet_init:
     b.ne    1b
     str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
 
+    /* RBUF_TBUF_SIZE_CTRL: must be set to 1 for TX to work (allocates TBUF space) */
+    mov     w0, #1
+    str     w0, [x19, #0x3B4]
+
     /* --- Init RX descriptors --- */
     mov     x24, x21                /* current buffer addr */
     add     x25, x19, #2, lsl #12  /* x25 = RX descriptor base */
@@ -183,8 +217,9 @@ genet_init:
 
     /* --- TX ring 16 registers --- */
     str     wzr, [x22, #TDMA_READ_PTR_OFS]
-    str     wzr, [x22, #TDMA_CONS_INDEX_OFS]
-    str     wzr, [x22, #TDMA_PROD_INDEX_OFS]
+    /* CONS_INDEX is write-once — read it and align PROD_INDEX to match */
+    ldr     w0, [x22, #TDMA_CONS_INDEX_OFS]
+    str     w0, [x22, #TDMA_PROD_INDEX_OFS]
     ldr     w0, =((DMA_DESC_COUNT << 16) | RX_BUF_LENGTH)
     str     w0, [x22, #TDMA_RING_BUF_SIZE_OFS]
     str     wzr, [x22, #TDMA_START_ADDR_OFS]
@@ -213,10 +248,8 @@ genet_init:
     orr     w0, w0, #2
     str     w0, [x19, #GENET_RBUF_CTRL]
 
-    /* --- Enable MAC with speed --- */
-    ldr     w0, [x19, #GENET_UMAC_CMD]
-    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
-    bic     w0, w0, #0x0C
+    /* --- Set speed (U-Boot writes speed alone, clearing all other bits) --- */
+    mov     w0, #0
     cmp     w23, #7
     b.eq    .Lsp_1000
     cmp     w23, #6
@@ -227,12 +260,16 @@ genet_init:
     b.eq    .Lsp_100
     b       .Lsp_set
 .Lsp_1000:
-    orr     w0, w0, #UMAC_CMD_SPEED_1000
+    mov     w0, #UMAC_CMD_SPEED_1000
     b       .Lsp_set
 .Lsp_100:
-    orr     w0, w0, #UMAC_CMD_SPEED_100
+    mov     w0, #UMAC_CMD_SPEED_100
 .Lsp_set:
-    orr     w0, w0, #UMAC_CMD_PROMISC  /* accept all frames for now */
+    str     w0, [x19, #GENET_UMAC_CMD]
+
+    /* Then enable TX + RX (separate write, matching U-Boot sequence) */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
     str     w0, [x19, #GENET_UMAC_CMD]
 
     /* Init state indices */
@@ -241,8 +278,11 @@ genet_init:
     str     w0, [x20, #GENET_STATE_RX_CIDX]
     and     w0, w0, #0xFF
     str     w0, [x20, #GENET_STATE_RX_RIDX]
-    str     wzr, [x20, #GENET_STATE_TX_PIDX]
-    str     wzr, [x20, #GENET_STATE_TX_RIDX]
+    ldr     w0, [x22, #TDMA_CONS_INDEX_OFS]
+    and     w0, w0, #0xFFFF
+    str     w0, [x20, #GENET_STATE_TX_PIDX]
+    and     w0, w0, #0xFF
+    str     w0, [x20, #GENET_STATE_TX_RIDX]
 
     mov     w0, #0
     b       .Linit_done
@@ -278,15 +318,16 @@ genet_send:
     mov     x21, x2                 /* buf */
     mov     w22, w3                 /* len */
 
-    /* Flush TX buffer from D-cache to RAM */
-    mov     x0, x21
-    mov     w1, #0
+    /* Flush TX buffer from D-cache to RAM.
+     * Buffer may not be cache-line aligned — align start down
+     * so we cover every line the buffer touches. */
+    bic     x0, x21, #63            /* align down to cache line */
+    add     x1, x21, x22           /* end = buf + len */
 .Ltx_flush:
     dc      civac, x0
     add     x0, x0, #64
-    add     w1, w1, #64
-    cmp     w1, w22
-    b.lt    .Ltx_flush
+    cmp     x0, x1
+    b.lo    .Ltx_flush
     dsb     sy
 
     /* Get current TX indices from state */
