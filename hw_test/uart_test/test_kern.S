@@ -650,6 +650,115 @@ _start:
     and     w22, w22, #0xFFFF
     str     w22, [x19, #RDMA_CONS_INDEX]
 
+    /* ===== TEST 7: TX — send a broadcast ARP request ===== */
+
+.Ltest_tx:
+    ldr     x19, =GENET_BASE_PI4
+    add     x26, x19, #5, lsl #12  /* x26 = GENET + 0x5000 (TDMA ring 16) */
+
+    /* Build ARP request in tx_frame buffer */
+    ldr     x28, =tx_frame
+
+    /* Ethernet header: dst=broadcast, src=DE:AD:BE:EF:CA:FE, type=0x0806 (ARP) */
+    mov     w0, #-1                 /* 0xFFFFFFFF */
+    str     w0, [x28, #0]          /* dst[0:3] = FF:FF:FF:FF */
+    strh    w0, [x28, #4]          /* dst[4:5] = FF:FF */
+    ldr     w0, =0xDEADBEEF
+    str     w0, [x28, #6]          /* src[0:3] */
+    mov     w0, #0xCAFE
+    strh    w0, [x28, #10]         /* src[4:5] */
+    mov     w0, #0x0608             /* 0x0806 byte-swapped (little-endian store) */
+    strh    w0, [x28, #12]         /* ethertype = ARP */
+
+    /* ARP payload: request for 10.0.0.1 from 10.0.0.2 */
+    mov     w0, #0x0100             /* htype = 1 (Ethernet), byte-swapped */
+    strh    w0, [x28, #14]
+    mov     w0, #0x0008             /* ptype = 0x0800 (IPv4), byte-swapped */
+    strh    w0, [x28, #16]
+    mov     w0, #0x0406             /* hlen=6, plen=4 */
+    strh    w0, [x28, #18]
+    mov     w0, #0x0100             /* oper = 1 (request), byte-swapped */
+    strh    w0, [x28, #20]
+
+    /* Sender hardware addr: DE:AD:BE:EF:CA:FE */
+    ldr     w0, =0xDEADBEEF
+    str     w0, [x28, #22]
+    mov     w0, #0xCAFE
+    strh    w0, [x28, #26]
+
+    /* Sender protocol addr: 10.0.0.2 = 0x0A000002 */
+    mov     w0, #0x000A             /* 10.0 byte-swapped in first halfword */
+    strh    w0, [x28, #28]
+    mov     w0, #0x0200             /* 0.2 byte-swapped */
+    strh    w0, [x28, #30]
+
+    /* Target hardware addr: 00:00:00:00:00:00 */
+    str     wzr, [x28, #32]
+    strh    wzr, [x28, #36]
+
+    /* Target protocol addr: 10.0.0.1 = 0x0A000001 */
+    mov     w0, #0x000A
+    strh    w0, [x28, #38]
+    mov     w0, #0x0100             /* 0.1 byte-swapped */
+    strh    w0, [x28, #40]
+
+    /* Frame total: 14 (eth) + 28 (arp) = 42 bytes */
+    mov     w20, #42                /* frame length */
+
+    /* Flush TX buffer from D-cache to RAM */
+    mov     x0, x28
+    dc      civac, x0
+    dsb     sy
+
+    /* Read current TDMA_PROD_INDEX */
+    ldr     w22, [x26, #0x00C]     /* TDMA_PROD_INDEX */
+    and     w23, w22, #0xFF        /* tx_index = prod & 255 */
+
+    /* Write TX descriptor at GENET_TX_DESC_BASE + tx_index * 12 */
+    add     x24, x19, #4, lsl #12  /* x24 = GENET + 0x4000 (TX descs) */
+    mov     w0, #DMA_DESC_SIZE
+    mul     w1, w23, w0
+    add     x24, x24, x1
+
+    /* DMA bus address of tx_frame */
+    mov     w0, w28
+    mov     w1, #0xC000
+    lsl     w1, w1, #16
+    add     w0, w0, w1              /* DMA bus addr */
+
+    /* Write descriptor: addr first, length_status last */
+    str     w0, [x24, #4]          /* addr_lo */
+    str     wzr, [x24, #8]         /* addr_hi */
+
+    /* length_status: (length << 16) | TX_LEN_STATUS_FLAGS */
+    lsl     w0, w20, #16
+    ldr     w1, =TX_LEN_STATUS_FLAGS
+    orr     w0, w0, w1
+    str     w0, [x24, #0]          /* length_status — triggers HW */
+
+    /* Increment and write PROD_INDEX */
+    add     w22, w22, #1
+    and     w22, w22, #0xFFFF
+    str     w22, [x26, #0x00C]     /* TDMA_PROD_INDEX — kicks DMA */
+
+    /* Poll TDMA_CONS_INDEX until it catches up (TX complete) */
+    ldr     w24, =100000
+.Ltx_poll:
+    ldr     w0, [x26, #0x008]     /* TDMA_CONS_INDEX */
+    and     w0, w0, #0xFFFF
+    cmp     w0, w22
+    b.eq    .Ltx_done
+    subs    w24, w24, #1
+    b.ne    .Ltx_poll
+
+    adr     x10, msg_tx_fail
+    bl      puts
+    b       .Ltests_done
+
+.Ltx_done:
+    adr     x10, msg_tx_ok
+    bl      puts
+
 .Ltests_done:
     adr     x10, msg_done
     bl      puts
@@ -827,6 +936,8 @@ msg_dma_ok:     .asciz "DMA INIT OK\r\n"
 msg_dma_fail:   .asciz "DMA INIT FAIL\r\n"
 msg_rx_wait:    .asciz "RX waiting...\r\n"
 msg_rx_timeout: .asciz "RX TIMEOUT\r\n"
+msg_tx_ok:      .asciz "TX OK\r\n"
+msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
 msg_rx_len:     .asciz "RX len="
 msg_rx_hdr:     .asciz "ETH: "
 msg_done:       .asciz "DONE\r\n"
@@ -835,3 +946,7 @@ msg_done:       .asciz "DONE\r\n"
 .balign 16
 mbox_test_buf:
     .space 32
+
+.balign 64
+tx_frame:
+    .space 64
