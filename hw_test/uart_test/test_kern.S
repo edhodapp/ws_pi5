@@ -311,14 +311,13 @@ _start:
 1:  subs    w0, w0, #1
     b.ne    1b
 
-    /* SW reset */
-    str     wzr, [x19, #GENET_UMAC_CMD]
-    mov     w0, #(UMAC_CMD_LCL_LOOP | UMAC_CMD_SW_RESET)
+    /* SW reset — leave CMD_SW_RESET set until final UMAC_CMD write
+     * (Linux driver keeps UMAC in reset through entire DMA/RGMII init) */
+    mov     w0, #UMAC_CMD_SW_RESET
     str     w0, [x19, #GENET_UMAC_CMD]
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
-    str     wzr, [x19, #GENET_UMAC_CMD]
 
     /* Port mode: EXT_GPHY (3) */
     mov     w0, #3
@@ -343,8 +342,12 @@ _start:
     adr     x10, msg_umac_ok
     bl      puts
 
-    /* --- Configure RGMII interface (match PiOS: 0x00F00050) --- */
-    ldr     w0, =0x00F00050
+    /* --- Configure RGMII interface (read-modify-write like Linux) --- */
+    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
+    bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
+    orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
+    orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
+    /* ID_MODE_DIS stays as-is (cleared = ID mode enabled, matches Linux RGMII_RXID) */
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
@@ -504,26 +507,22 @@ _start:
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
-    /* TDMA arbiter: strict priority mode + ring 16 priority
-     * v3+ offsets from global base (0x5040): ARB=+0x2C, PRIO2=+0x38 */
-    mov     w0, #2                  /* DMA_ARBITER_SP */
-    str     w0, [x26, #0x06C]      /* DMA_ARB_CTRL (0x5040+0x2C) */
-    ldr     w0, =0x00400000        /* ring 16 priority=4, PRIORITY_2 bits [24:20] */
-    str     w0, [x26, #0x078]      /* DMA_PRIORITY_2 (0x5040+0x38) */
-
-    /* TDMA: match PiOS 0x0002001F (rings 0-3 + ring 16 + DMA_EN) */
-    ldr     w0, =0x0002001F
+    /* TDMA: ring 16 + DMA_EN only (matches U-Boot) */
+    ldr     w0, =DMA_CTRL_EN
     str     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
 
-    /* RBUF_CTRL: match PiOS 0xC043 */
-    ldr     w0, =0xC043
+    /* RBUF_CTRL: set RBUF_64B_EN + RBUF_ALIGN_2B (Linux init_umac) */
+    ldr     w0, [x19, #GENET_RBUF_CTRL]
+    orr     w0, w0, #3              /* bit 0 = 64B_EN, bit 1 = ALIGN_2B */
     str     w0, [x19, #GENET_RBUF_CTRL]
 
-    /* TBUF_CTRL: enable 64-byte alignment (required for TX DMA) */
-    mov     w0, #1                  /* TBUF_64B_EN */
+    /* TBUF_CTRL: TBUF_64B_EN (Linux init_umac) */
+    ldr     w0, [x19, #0x600]
+    orr     w0, w0, #1
     str     w0, [x19, #0x600]
 
-    /* --- Set speed (write speed alone, clear everything else) --- */
+    /* --- Bring UMAC out of reset with speed (Linux mac_config sequence) --- */
+    /* Step 1: clear SW_RESET, write speed bits */
     mov     w0, #0
     cmp     w20, #7
     b.eq    .Lspeed_1000
@@ -540,10 +539,12 @@ _start:
 .Lspeed_100:
     mov     w0, #0x04
 .Lspeed_set:
-    str     w0, [x19, #GENET_UMAC_CMD]
+    str     w0, [x19, #GENET_UMAC_CMD]     /* clears SW_RESET, sets speed */
+    mov     w1, #10000
+1:  subs    w1, w1, #1
+    b.ne    1b
 
-    /* Then enable TX + RX separately */
-    ldr     w0, [x19, #GENET_UMAC_CMD]
+    /* Step 2: enable TX + RX */
     orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
     str     w0, [x19, #GENET_UMAC_CMD]
 
