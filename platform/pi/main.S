@@ -24,23 +24,7 @@ main:
     stp     x29, x30, [sp, #-16]!
 
     bl      uart_init
-
-.ifdef PLATFORM_PI4
-    /* Switch to UART3 on GPIO 4/5 for Pi 4 serial debug */
-    ldr     x0, =GPIO_BASE
-    mov     w1, #4
-    mov     w2, #GPIO_FSEL_ALT4
-    bl      gpio_set_function
-
-    ldr     x0, =GPIO_BASE
-    mov     w1, #5
-    mov     w2, #GPIO_FSEL_ALT4
-    bl      gpio_set_function
-
-    ldr     x0, =UART3_BASE
-    bl      uart_set_base
-    bl      uart_init
-.endif
+    /* Pi 4: UART0 on GPIO 14/15 (default pin mux, no switch needed) */
 
 .ifdef PLATFORM_PI4
     ldr     x0, =msg_hello_pi4

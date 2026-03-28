@@ -5,8 +5,7 @@
  * printing PROD_INDEX and CIDX each iteration.
  */
 
-.equ GPIO_BASE_PI4,  0xFE200000
-.equ UART3_BASE_PI4, 0xFE201600
+.equ UART0_BASE_PI4, 0xFE201000
 .equ GENET_BASE_PI4, 0xFD580000
 .equ MBOX_BASE_PI4,  0xFE00B880
 .equ PM_WDOG,        0xFE100024
@@ -95,16 +94,8 @@ _start:
     msr     SCTLR_EL1, x0
     isb
 
-    /* UART3 */
-    ldr     x9, =GPIO_BASE_PI4
-    ldr     w0, [x9]
-    bic     w0, w0, #(7 << 12)
-    orr     w0, w0, #(3 << 12)
-    bic     w0, w0, #(7 << 15)
-    orr     w0, w0, #(3 << 15)
-    str     w0, [x9]
-
-    ldr     x9, =UART3_BASE_PI4
+    /* UART0 (GPIO 14/15 default pin mux) */
+    ldr     x9, =UART0_BASE_PI4
     str     wzr, [x9, #CR]
     mov     w0, #0x7FF
     str     w0, [x9, #ICR]

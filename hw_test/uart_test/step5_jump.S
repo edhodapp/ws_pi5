@@ -12,8 +12,7 @@
  * Prints BOOT before jumping so send_kernel.py is happy.
  */
 
-.equ GPIO_BASE,    0xFE200000
-.equ UART3_BASE,   0xFE201600
+.equ UART0_BASE,   0xFE201000
 .equ RECV_ADDR,    0x100000
 
 .equ DR,           0x000
@@ -58,17 +57,8 @@ _start:
     eret
 
 .Lel1_ready:
-    /* --- GPIO: pins 4/5 → ALT4 (UART3) --- */
-    ldr     x9, =GPIO_BASE
-    ldr     w0, [x9]
-    bic     w0, w0, #(7 << 12)
-    orr     w0, w0, #(3 << 12)
-    bic     w0, w0, #(7 << 15)
-    orr     w0, w0, #(3 << 15)
-    str     w0, [x9]
-
-    /* --- UART3 init at 115200 --- */
-    ldr     x9, =UART3_BASE
+    /* --- UART0 init at 115200 (GPIO 14/15 default pin mux, no config needed) --- */
+    ldr     x9, =UART0_BASE
     str     wzr, [x9, #CR]
     mov     w0, #0x7FF
     str     w0, [x9, #ICR]

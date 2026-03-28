@@ -12,8 +12,7 @@
  *   - Watchdog reset
  */
 
-.equ GPIO_BASE_PI4,  0xFE200000
-.equ UART3_BASE_PI4, 0xFE201600
+.equ UART0_BASE_PI4, 0xFE201000
 .equ DWC2_BASE_PI4,  0xFE980000
 .equ MBOX_BASE_PI4,  0xFE00B880
 .equ GENET_BASE_PI4, 0xFD580000
@@ -191,16 +190,8 @@ _start:
     msr     SCTLR_EL1, x0
     isb
 
-    /* --- GPIO + UART3 --- */
-    ldr     x9, =GPIO_BASE_PI4
-    ldr     w0, [x9]
-    bic     w0, w0, #(7 << 12)
-    orr     w0, w0, #(3 << 12)
-    bic     w0, w0, #(7 << 15)
-    orr     w0, w0, #(3 << 15)
-    str     w0, [x9]
-
-    ldr     x9, =UART3_BASE_PI4
+    /* --- UART0 init (GPIO 14/15 default pin mux) --- */
+    ldr     x9, =UART0_BASE_PI4
     str     wzr, [x9, #CR]
     mov     w0, #0x7FF
     str     w0, [x9, #ICR]
@@ -349,12 +340,8 @@ _start:
     adr     x10, msg_umac_ok
     bl      puts
 
-    /* --- Configure RGMII interface --- */
-    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
-    bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
-    orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
-    orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
-    orr     w0, w0, #(1 << 16)     /* SET ID_MODE_DIS (no GENET internal delay) */
+    /* --- Configure RGMII interface (match PiOS: 0x00F00050) --- */
+    ldr     w0, =0x00F00050
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
@@ -513,11 +500,12 @@ _start:
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
+    /* TDMA: match PiOS 0x0002001F (rings 0-3 + ring 16 + DMA_EN) */
+    ldr     w0, =0x0002001F
     str     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
 
-    /* --- Enable RBUF 2-byte align (IP header alignment) --- */
-    ldr     w0, [x19, #GENET_RBUF_CTRL]
-    orr     w0, w0, #2
+    /* RBUF_CTRL: match PiOS 0xC043 */
+    ldr     w0, =0xC043
     str     w0, [x19, #GENET_RBUF_CTRL]
 
     /* --- Set speed (write speed alone, clear everything else) --- */
@@ -588,7 +576,7 @@ _start:
     subs    w24, w24, #1
     b.ne    .Lrx_poll
 
-    /* Timeout — print count and finish */
+    /* Timeout — print count and continue to TX test */
     adr     x10, msg_rx_count
     bl      puts
     mov     w0, w27
@@ -597,7 +585,7 @@ _start:
     bl      putc
     mov     w0, #'\n'
     bl      putc
-    b       .Ltests_done
+    b       .Ltest_tx
 
 .Lrx_got_frame:
     /* Read descriptor */
@@ -802,7 +790,7 @@ _start:
 
     adr     x10, msg_txpkt
     bl      puts
-    ldr     w0, [x19, #0xA0C]      /* UMAC TX_GD_PKTS (good packets) */
+    ldr     w0, [x19, #0xA2C]
     bl      print_hex32
     mov     w0, #'\r'
     bl      putc
@@ -811,7 +799,35 @@ _start:
 
     adr     x10, msg_rxpkt
     bl      puts
-    ldr     w0, [x19, #0xC0C]      /* UMAC RX_GD_PKTS (good packets) */
+    ldr     w0, [x19, #0xC2C]
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Dump UMAC_CMD to verify TX_EN */
+    adr     x10, msg_umac_cmd
+    bl      puts
+    ldr     w0, [x19, #0x808]
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Dump TX descriptor 0 (what DMA saw) */
+    adr     x10, msg_txdesc
+    bl      puts
+    add     x0, x19, #4, lsl #12   /* GENET + 0x4000 */
+    ldr     w1, [x0, #0]           /* length_status */
+    mov     w0, w1
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    add     x0, x19, #4, lsl #12
+    ldr     w1, [x0, #4]           /* addr_lo */
+    mov     w0, w1
     bl      print_hex32
     mov     w0, #'\r'
     bl      putc
@@ -1000,6 +1016,8 @@ msg_tx_ok:      .asciz "TX OK\r\n"
 msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
 msg_txpkt:      .asciz "TX_GD_PKTS="
 msg_rxpkt:      .asciz "RX_GD_PKTS="
+msg_umac_cmd:   .asciz "UMAC_CMD="
+msg_txdesc:     .asciz "TX_DESC0="
 msg_done:       .asciz "DONE\r\n"
 
 .section .data

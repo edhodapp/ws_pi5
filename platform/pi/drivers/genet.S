@@ -88,11 +88,8 @@ genet_init:
     str     w0, [x19, #GENET_INTRL2_1_CLEAR]
 
     /* --- RGMII interface --- */
-    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
-    bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
-    orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
-    orr     w0, w0, #(1 << 4)      /* RGMII_LINK */
-    orr     w0, w0, #(1 << 16)     /* SET ID_MODE_DIS (no GENET internal delay) */
+    /* Match PiOS: 0x00F00050 */
+    ldr     w0, =0x00F00050
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
@@ -241,11 +238,12 @@ genet_init:
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
+    /* TDMA: match PiOS 0x0002001F (rings 0-3 + ring 16 + DMA_EN) */
+    ldr     w0, =0x0002001F
     str     w0, [x22, #TDMA_DMA_CTRL_OFS]
 
-    /* --- RBUF 2-byte align --- */
-    ldr     w0, [x19, #GENET_RBUF_CTRL]
-    orr     w0, w0, #2
+    /* RBUF_CTRL: match PiOS 0xC043 */
+    ldr     w0, =0xC043
     str     w0, [x19, #GENET_RBUF_CTRL]
 
     /* --- Set speed (U-Boot writes speed alone, clearing all other bits) --- */
