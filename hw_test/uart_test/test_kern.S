@@ -127,6 +127,27 @@ _start:
     and     x0, x0, #3
     cbnz    x0, .Lpark
 
+    /* EL2 → EL1 drop (needed for direct boot — firmware starts at EL2) */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #2
+    b.ne    .Lel1_ready
+
+    mrs     x0, HCR_EL2
+    orr     x0, x0, #(1 << 31)
+    msr     HCR_EL2, x0
+    mov     x0, #3
+    msr     CNTHCTL_EL2, x0
+    msr     CNTVOFF_EL2, xzr
+    mov     x0, #0x33FF
+    msr     CPTR_EL2, x0
+    mov     x0, #0x3C5
+    msr     SPSR_EL2, x0
+    adr     x0, .Lel1_ready
+    msr     ELR_EL2, x0
+    eret
+
+.Lel1_ready:
     /* --- Stack --- */
     ldr     x0, =_stack_top
     mov     sp, x0
@@ -505,30 +526,20 @@ _start:
     str     w0, [x19, #RDMA_XON_XOFF_THRESH]
     str     wzr, [x19, #RDMA_READ_PTR]
 
-    /* --- Init TX ring 16 (match PiOS exactly) --- */
-    /* Ring 16 uses descriptors 128-255 (words 0x180-0x2FF) */
-    ldr     w0, =0x00000180
-    str     w0, [x26, #0x000]     /* READ_PTR = START */
-    /* CONS/PROD: read CONS, align PROD */
+    /* --- Init TX ring 16 (U-Boot simple: all 256 descs, START=0) --- */
+    str     wzr, [x26, #0x000]     /* READ_PTR = 0 */
     ldr     w0, [x26, #0x008]      /* read CONS_INDEX */
     str     w0, [x26, #0x00C]      /* PROD_INDEX = CONS */
-    ldr     w0, =0x00800800        /* 128 descs << 16 | 2048 buf (PiOS) */
+    ldr     w0, =DMA_RING_BUF_SIZE_VAL  /* (256<<16)|2048 = 0x01000800 */
     str     w0, [x26, #0x010]      /* RING_BUF_SIZE */
-    ldr     w0, =0x00000180
-    str     w0, [x26, #0x014]     /* START_ADDR = word 384 = desc 128 */
+    str     wzr, [x26, #0x014]     /* START_ADDR = 0 */
     ldr     w0, =DMA_END_ADDR_VAL
     str     w0, [x26, #0x01C]      /* END_ADDR = 0x2FF */
     mov     w0, #1
     str     w0, [x26, #0x024]      /* MBUF_DONE_THRESH */
     str     wzr, [x26, #0x028]     /* FLOW_PERIOD */
-    ldr     w0, =0x00000180
-    str     w0, [x26, #0x02C]     /* WRITE_PTR = START */
-
-    /* --- DMA arbiter + priority (PiOS) --- */
-    mov     w0, #2
-    str     w0, [x26, #0x06C]      /* DMA_ARB_CTRL = strict priority */
-    ldr     w0, =0x00400000
-    str     w0, [x26, #0x078]      /* DMA_PRIORITY_2 = ring 16 prio 4 */
+    str     wzr, [x26, #0x02C]     /* WRITE_PTR = 0 */
+    /* No arbiter, no priority — U-Boot doesn't set them */
 
     /* --- Enable DMA --- */
     mov     w0, #DMA_BURST_SIZE
@@ -565,15 +576,13 @@ _start:
     /* --- Enable DMA FIRST (PiOS enables DMA while UMAC in SW_RESET) --- */
     mov     w25, w0                 /* save speed bits */
 
-    ldr     w0, =DMA_RING_CFG_EN
+    ldr     w0, =DMA_RING_CFG_EN   /* ring 16 only */
     str     w0, [x19, #RDMA_DMA_RING_CFG]
-    ldr     w0, =0x0001000F        /* TDMA RING_CFG: rings 0-3 + ring 16 */
-    str     w0, [x26, #0x040]
+    str     w0, [x26, #0x040]      /* TDMA RING_CFG: ring 16 only */
 
-    ldr     w0, =DMA_CTRL_EN
+    ldr     w0, =DMA_CTRL_EN      /* ring 16 + DMA_EN = 0x00020001 */
     str     w0, [x19, #RDMA_DMA_CTRL]
-    ldr     w0, =0x0002001F        /* TDMA CTRL: rings 0-3 + ring 16 + DMA_EN */
-    str     w0, [x26, #0x044]
+    str     w0, [x26, #0x044]      /* TDMA CTRL: ring 16 + DMA_EN */
 
     /* --- THEN bring UMAC out of reset (like Linux mac_config after DMA) --- */
     /* RGMII_LINK */
@@ -816,11 +825,8 @@ _start:
     /* Read current TDMA_PROD_INDEX */
     ldr     w22, [x26, #0x00C]     /* TDMA_PROD_INDEX */
 
-    /* Descriptor position: ring 16 starts at desc 128.
-     * desc_index = 128 + (PROD % 128)
-     * byte_offset = desc_index * 12 */
-    and     w23, w22, #0x7F        /* PROD % 128 (ring size) */
-    add     w23, w23, #128         /* + ring 16 start */
+    /* Descriptor at index (PROD & 0xFF) — all 256 descs for ring 16 */
+    and     w23, w22, #0xFF
     add     x24, x19, #4, lsl #12  /* x24 = GENET + 0x4000 (TX descs) */
     mov     w0, #DMA_DESC_SIZE
     mul     w1, w23, w0
