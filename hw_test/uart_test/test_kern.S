@@ -336,16 +336,18 @@ _start:
 1:  subs    w0, w0, #1
     b.ne    1b
 
-    /* SW reset — leave CMD_SW_RESET set until final UMAC_CMD write
-     * (Linux driver keeps UMAC in reset through entire DMA/RGMII init) */
-    mov     w0, #UMAC_CMD_SW_RESET
+    /* SW reset — read-modify-write, preserve other bits */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    orr     w0, w0, #UMAC_CMD_SW_RESET
     str     w0, [x19, #GENET_UMAC_CMD]
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
 
-    /* Port mode: EXT_GPHY (3) */
-    mov     w0, #3
+    /* Port mode: EXT_GPHY (3) — RMW to preserve other bits */
+    ldr     w0, [x19, #GENET_SYS_PORT_CTRL]
+    bic     w0, w0, #7              /* clear mode bits [2:0] */
+    orr     w0, w0, #3              /* set EXT_GPHY */
     str     w0, [x19, #GENET_SYS_PORT_CTRL]
 
     /* Reset MIB counters */
@@ -493,10 +495,16 @@ _start:
     add     x27, x19, #4, lsl #12  /* x27 = GENET + 0x4000 (TX descs) */
 
     /* --- Disable DMA (read-modify-write to preserve firmware bits) --- */
+    /* Disable DMA: clear only DMA_EN + ring enables, preserve other bits */
     ldr     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
-    bic     w0, w0, #1             /* clear DMA_EN only */
+    ldr     w1, =0x0003FFFF        /* DMA_EN + all ring enables */
+    bic     w0, w0, w1
     str     w0, [x26, #0x044]
-    str     wzr, [x19, #RDMA_DMA_CTRL]
+
+    ldr     w0, [x19, #RDMA_DMA_CTRL]
+    ldr     w1, =0x0003FFFF
+    bic     w0, w0, w1
+    str     w0, [x19, #RDMA_DMA_CTRL]
 
     /* Flush TX */
     mov     w0, #1
@@ -581,8 +589,10 @@ _start:
     orr     w0, w0, #1
     str     w0, [x19, #0x600]
 
-    /* --- Bring UMAC out of reset BEFORE enabling DMA --- */
-    mov     w0, #0
+    /* --- Bring UMAC out of reset, set speed, enable TX+RX (RMW) --- */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    bic     w0, w0, #UMAC_CMD_SW_RESET /* clear SW_RESET */
+    bic     w0, w0, #0x0C              /* clear speed bits [3:2] */
     cmp     w20, #7
     b.eq    .Lspeed_1000
     cmp     w20, #6
@@ -593,13 +603,12 @@ _start:
     b.eq    .Lspeed_100
     b       .Lspeed_set
 .Lspeed_1000:
-    mov     w0, #0x08
+    orr     w0, w0, #0x08
     b       .Lspeed_set
 .Lspeed_100:
-    mov     w0, #0x04
+    orr     w0, w0, #0x04
 .Lspeed_set:
     orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
-    /* No loopback — use normal TX path */
     str     w0, [x19, #GENET_UMAC_CMD]
     mov     w1, #10000
 1:  subs    w1, w1, #1
