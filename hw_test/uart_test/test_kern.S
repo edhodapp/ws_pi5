@@ -297,13 +297,16 @@ _start:
 
     /* --- UMAC reset --- */
 
-    /* Flush RBUF */
+    /* Flush RBUF and TBUF */
     mov     w0, #2                  /* bit 1 */
     str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    mov     w0, #1
+    str     w0, [x19, #0x00C]      /* SYS_TBUF_FLUSH_CTRL */
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
     str     wzr, [x19, #GENET_SYS_RBUF_FLUSH]
+    str     wzr, [x19, #0x00C]     /* clear TBUF flush */
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
@@ -477,8 +480,9 @@ _start:
 
     /* --- Init TX ring 16 (offsets from x26 = GENET + 0x5000) --- */
     str     wzr, [x26, #0x000]     /* READ_PTR */
-    str     wzr, [x26, #0x008]     /* CONS_INDEX */
-    str     wzr, [x26, #0x00C]     /* PROD_INDEX */
+    /* CONS_INDEX is write-once — read it and align PROD_INDEX to match */
+    ldr     w0, [x26, #0x008]      /* read CONS_INDEX */
+    str     w0, [x26, #0x00C]      /* set PROD_INDEX = CONS_INDEX */
     ldr     w0, =DMA_RING_BUF_SIZE_VAL
     str     w0, [x26, #0x010]      /* RING_BUF_SIZE */
     str     wzr, [x26, #0x014]     /* START_ADDR */
@@ -500,6 +504,13 @@ _start:
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
+    /* TDMA arbiter: strict priority mode + ring 16 priority
+     * v3+ offsets from global base (0x5040): ARB=+0x2C, PRIO2=+0x38 */
+    mov     w0, #2                  /* DMA_ARBITER_SP */
+    str     w0, [x26, #0x06C]      /* DMA_ARB_CTRL (0x5040+0x2C) */
+    ldr     w0, =0x00400000        /* ring 16 priority=4, PRIORITY_2 bits [24:20] */
+    str     w0, [x26, #0x078]      /* DMA_PRIORITY_2 (0x5040+0x38) */
+
     /* TDMA: match PiOS 0x0002001F (rings 0-3 + ring 16 + DMA_EN) */
     ldr     w0, =0x0002001F
     str     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
@@ -507,6 +518,10 @@ _start:
     /* RBUF_CTRL: match PiOS 0xC043 */
     ldr     w0, =0xC043
     str     w0, [x19, #GENET_RBUF_CTRL]
+
+    /* TBUF_CTRL: enable 64-byte alignment (required for TX DMA) */
+    mov     w0, #1                  /* TBUF_64B_EN */
+    str     w0, [x19, #0x600]
 
     /* --- Set speed (write speed alone, clear everything else) --- */
     mov     w0, #0
@@ -685,8 +700,8 @@ _start:
     ldr     x19, =GENET_BASE_PI4
     add     x26, x19, #5, lsl #12  /* x26 = GENET + 0x5000 (TDMA ring 16) */
 
-    /* Build ARP request in tx_frame buffer */
-    ldr     x28, =tx_frame
+    /* Build ARP request at 0x200000 (RX pool area — known DMA-accessible) */
+    ldr     x28, =0x200000
 
     /* Ethernet header: dst=broadcast, src=DE:AD:BE:EF:CA:FE, type=0x0806 (ARP) */
     mov     w0, #-1                 /* 0xFFFFFFFF */
@@ -806,29 +821,64 @@ _start:
     mov     w0, #'\n'
     bl      putc
 
-    /* Dump UMAC_CMD to verify TX_EN */
+    /* Dump TDMA state */
+    add     x26, x19, #5, lsl #12
+
     adr     x10, msg_umac_cmd
     bl      puts
     ldr     w0, [x19, #0x808]
     bl      print_hex32
-    mov     w0, #'\r'
-    bl      putc
-    mov     w0, #'\n'
-    bl      putc
 
-    /* Dump TX descriptor 0 (what DMA saw) */
+    /* TDMA DMA_STATUS */
+    adr     x10, msg_dma_stat
+    bl      puts
+    ldr     w0, [x26, #0x048]
+    bl      print_hex32
+
+    /* TDMA CONS/PROD after TX */
+    adr     x10, msg_cons
+    bl      puts
+    ldr     w0, [x26, #0x008]
+    bl      print_hex32
+
+    adr     x10, msg_prod
+    bl      puts
+    ldr     w0, [x26, #0x00C]
+    bl      print_hex32
+
+    /* TX descriptor */
     adr     x10, msg_txdesc
     bl      puts
-    add     x0, x19, #4, lsl #12   /* GENET + 0x4000 */
-    ldr     w1, [x0, #0]           /* length_status */
+    add     x0, x19, #4, lsl #12
+    ldr     w1, [x0, #0]
     mov     w0, w1
     bl      print_hex32
     mov     w0, #' '
     bl      putc
     add     x0, x19, #4, lsl #12
-    ldr     w1, [x0, #4]           /* addr_lo */
+    ldr     w1, [x0, #4]
     mov     w0, w1
     bl      print_hex32
+
+    /* Dump first 3 TX MIB counters to find any non-zero */
+    /* Dump TBUF registers (GENET + 0x600) */
+    adr     x10, msg_tbuf
+    bl      puts
+    ldr     w0, [x19, #0x600]     /* TBUF_CTRL / BP_MC */
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x19, #0x604]
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x19, #0x608]
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x19, #0x60C]
+    bl      print_hex32
+
     mov     w0, #'\r'
     bl      putc
     mov     w0, #'\n'
@@ -1016,8 +1066,12 @@ msg_tx_ok:      .asciz "TX OK\r\n"
 msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
 msg_txpkt:      .asciz "TX_GD_PKTS="
 msg_rxpkt:      .asciz "RX_GD_PKTS="
-msg_umac_cmd:   .asciz "UMAC_CMD="
-msg_txdesc:     .asciz "TX_DESC0="
+msg_umac_cmd:   .asciz " CMD="
+msg_dma_stat:   .asciz " STAT="
+msg_cons:       .asciz " C="
+msg_prod:       .asciz " P="
+msg_txdesc:     .asciz "\r\nDESC="
+msg_tbuf:       .asciz "\r\nTBUF="
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
