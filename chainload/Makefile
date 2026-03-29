@@ -2,17 +2,18 @@ AS      = aarch64-linux-gnu-as
 LD      = aarch64-linux-gnu-ld
 OBJCOPY = aarch64-linux-gnu-objcopy
 
-ASFLAGS = -I ../platform/pi/include/
+ASFLAGS = --fatal-warnings -I ../platform/pi/include/
+OBJS    = boot.o hex_parse.o
 
 all: chainload.img
 
 chainload.img: chainload.elf
 	$(OBJCOPY) -O binary $< $@
 
-chainload.elf: boot.o chainload.ld
-	$(LD) -T chainload.ld -nostdlib $< -o $@
+chainload.elf: $(OBJS) chainload.ld
+	$(LD) -T chainload.ld -nostdlib $(OBJS) -o $@
 
-boot.o: boot.S
+%.o: %.S
 	$(AS) $(ASFLAGS) $< -o $@
 
 clean:

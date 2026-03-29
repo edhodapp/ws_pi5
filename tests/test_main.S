@@ -177,6 +177,7 @@ _start:
     bl      test_md5
     bl      test_tcp
     bl      test_http
+    bl      test_hex_parse
 
     /* === Print summary === */
     ldr     x0, =fail_count
