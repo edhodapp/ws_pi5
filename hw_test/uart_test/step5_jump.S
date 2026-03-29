@@ -139,9 +139,12 @@ _start:
     msr     SCTLR_EL1, x0
     isb
 
-    /* === Protocol: READY → receive → BOOT → jump === */
+    /* === Protocol: wait for sync → READY → receive → BOOT → jump === */
 
-    /* Print READY */
+    /* Wait for sync byte from host (any byte) */
+    bl      getc_inline
+
+    /* Respond with READY */
     adr     x10, msg_ready
     bl      puts_inline
 

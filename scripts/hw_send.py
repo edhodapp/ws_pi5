@@ -30,27 +30,18 @@ def main():
 
     port = serial.Serial(port_path, 115200, timeout=3)
 
-    # Quick check: is READY already waiting?
-    print("RX: checking for READY...", flush=True)
+    # Send sync bytes until chainloader responds with READY.
+    # The sync may trigger a watchdog reset in a running test kernel,
+    # so we retry to catch the chainloader after reboot.
+    port.timeout = 2
     found_ready = False
-    for _ in range(2):
-        line = port.readline().decode("ascii", errors="ignore").strip()
-        if line:
-            print(f"RX: '{line}'", flush=True)
-        if line == "READY":
-            found_ready = True
-            break
-
-    # If not, send reset byte to trigger watchdog in a waiting kernel
-    if not found_ready:
-        print("TX: 0xFF (reset)", flush=True)
-        port.write(b'\xff')
+    for attempt in range(10):
+        port.reset_input_buffer()
+        print(f"TX: sync (attempt {attempt + 1})", flush=True)
+        port.write(b'\x55')
         port.flush()
 
-        # Wait for reboot + READY
-        port.timeout = 5
-        print("RX: waiting for reboot + READY...", flush=True)
-        deadline = time.time() + 15
+        deadline = time.time() + 3
         while time.time() < deadline:
             line = port.readline().decode("ascii", errors="ignore").strip()
             if line:
@@ -58,9 +49,11 @@ def main():
             if line == "READY":
                 found_ready = True
                 break
+        if found_ready:
+            break
 
     if not found_ready:
-        print("RX: timeout. Power cycle the Pi.", flush=True)
+        print("RX: no READY after 10 attempts. Power cycle the Pi.", flush=True)
         port.close()
         sys.exit(1)
 
@@ -87,6 +80,7 @@ def main():
         sys.exit(1)
 
     # Collect output until DONE or timeout
+    # If kernel sends WAIT, send 0xFF to start tests
     print("--- Output ---", flush=True)
     port.timeout = timeout
     done = False
@@ -96,6 +90,10 @@ def main():
             break
         text = line.decode("ascii", errors="ignore").rstrip('\r\n')
         print(text, flush=True)
+        if text == "WAIT":
+            print("TX: 0xFF (start)", flush=True)
+            port.write(b'\xff')
+            port.flush()
         if text == "DONE":
             done = True
             break

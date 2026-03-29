@@ -225,6 +225,18 @@ _start:
     mov     w0, #0x301
     str     w0, [x9, #CR]
 
+    /* Wait for start signal (0xFF) from host */
+    adr     x10, msg_wait_start
+    bl      puts
+.Lwait_start:
+    ldr     w0, [x9, #FR]
+    tst     w0, #FR_RXFE
+    b.ne    .Lwait_start
+    ldr     w0, [x9, #DR]
+    and     w0, w0, #0xFF
+    cmp     w0, #0xFF
+    b.ne    .Lwait_start
+
     /* ===== TEST 1: Mailbox — get board revision ===== */
 
     ldr     x19, =mbox_test_buf
@@ -316,29 +328,44 @@ _start:
 .Ltest_link:
     ldr     x19, =GENET_BASE_PI4
 
-    /* --- UMAC reset --- */
-
-    /* Flush RBUF and TBUF */
-    mov     w0, #2                  /* bit 1 */
-    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
-    mov     w0, #1
-    str     w0, [x19, #0x00C]      /* SYS_TBUF_FLUSH_CTRL */
-    mov     w0, #10000
-1:  subs    w0, w0, #1
-    b.ne    1b
+    /* --- Phase 0: Probe (U-Boot does this first in bcmgenet_gmac_probe) --- */
+    mov     w0, #3                              /* PORT_MODE_EXT_GPHY */
+    str     w0, [x19, #GENET_SYS_PORT_CTRL]
     str     wzr, [x19, #GENET_SYS_RBUF_FLUSH]
-    str     wzr, [x19, #0x00C]     /* clear TBUF flush */
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_UMAC_CMD]
+    mov     w0, #(UMAC_CMD_SW_RESET | UMAC_CMD_LCL_LOOP)  /* 0xA000 */
+    str     w0, [x19, #GENET_UMAC_CMD]         /* leave in reset (probe doesn't clear) */
+
+    /* --- Phase 1: UMAC reset (U-Boot bcmgenet_umac_reset) --- */
+    /* RBUF flush: RMW like U-Boot (preserve other bits) */
+    ldr     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    orr     w0, w0, #2                         /* set bit 1 */
+    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    ldr     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    bic     w0, w0, #2                         /* clear bit 1 */
+    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
+    mov     w0, #10000
+1:  subs    w0, w0, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_SYS_RBUF_FLUSH]  /* write 0 */
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
 
-    /* UMAC SW_RESET */
-    ldr     w0, [x19, #GENET_UMAC_CMD]
-    orr     w0, w0, #UMAC_CMD_SW_RESET
+    /* UMAC SW_RESET: clear → reset → clear */
+    str     wzr, [x19, #GENET_UMAC_CMD]
+    mov     w0, #(UMAC_CMD_SW_RESET | UMAC_CMD_LCL_LOOP)  /* 0xA000 */
     str     w0, [x19, #GENET_UMAC_CMD]
     mov     w0, #10000
 1:  subs    w0, w0, #1
     b.ne    1b
+    str     wzr, [x19, #GENET_UMAC_CMD]
 
     /* Port mode: EXT_GPHY (3) — RMW to preserve other bits */
     ldr     w0, [x19, #GENET_SYS_PORT_CTRL]
@@ -355,6 +382,10 @@ _start:
     mov     w0, #1536
     str     w0, [x19, #GENET_UMAC_MAX_FRAME]
 
+    /* RBUF_TBUF_SIZE_CTRL — U-Boot sets this during umac_reset, before DMA */
+    mov     w0, #1
+    str     w0, [x19, #0x3B4]
+
     /* Mask all interrupts */
     mov     w0, #-1                /* 0xFFFFFFFF */
     str     w0, [x19, #GENET_INTRL2_0_MASK_SET]
@@ -369,10 +400,11 @@ _start:
 
     /* EXT_EXT_PWR_MGMT: leave as firmware set (PiOS = 0x051F02C3, works) */
 
-    /* --- Configure RGMII: MODE_EN only, LINK added after speed (like Linux) --- */
+    /* --- Configure RGMII: MODE_EN + ID_MODE_DIS, LINK added after speed --- */
     ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
     bic     w0, w0, #(1 << 5)      /* clear OOB_DISABLE */
     orr     w0, w0, #(1 << 6)      /* RGMII_MODE_EN */
+    orr     w0, w0, #(1 << 16)     /* ID_MODE_DIS (U-Boot sets this for RGMII) */
     /* RGMII_LINK added later, after UMAC_CMD speed is set */
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
@@ -450,16 +482,13 @@ _start:
     add     x26, x19, #5, lsl #12  /* x26 = GENET + 0x5000 (TDMA ring 16) */
     add     x27, x19, #4, lsl #12  /* x27 = GENET + 0x4000 (TX descs) */
 
-    /* --- Disable DMA (read-modify-write to preserve firmware bits) --- */
-    /* Disable DMA: clear only DMA_EN + ring enables, preserve other bits */
+    /* --- Disable DMA (U-Boot: clear only DMA_EN bit 0) --- */
     ldr     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
-    ldr     w1, =0x0003FFFF        /* DMA_EN + all ring enables */
-    bic     w0, w0, w1
+    bic     w0, w0, #1             /* clear DMA_EN only */
     str     w0, [x26, #0x044]
 
     ldr     w0, [x19, #RDMA_DMA_CTRL]
-    ldr     w1, =0x0003FFFF
-    bic     w0, w0, w1
+    bic     w0, w0, #1             /* clear DMA_EN only */
     str     w0, [x19, #RDMA_DMA_CTRL]
 
     /* Flush TX */
@@ -470,20 +499,7 @@ _start:
     b.ne    1b
     str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
 
-    /* RX buffer flush — BIT(0), NOT BIT(1) (Linux dma_disable with flush_rx) */
-    ldr     w0, [x19, #GENET_SYS_RBUF_FLUSH]
-    orr     w0, w0, #1              /* BIT(0) = RBUF flush */
-    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
-    mov     w0, #10000
-1:  subs    w0, w0, #1
-    b.ne    1b
-    ldr     w0, [x19, #GENET_SYS_RBUF_FLUSH]
-    bic     w0, w0, #1
-    str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
-
-    /* RBUF_TBUF_SIZE_CTRL: must be 1 for TX to work */
-    mov     w0, #1
-    str     w0, [x19, #0x3B4]
+    /* U-Boot does NOT do RBUF flush during DMA disable — removed */
 
     /* --- Set MAC address (hardcoded for testing) --- */
     /* Using DE:AD:BE:EF:CA:FE */
@@ -546,15 +562,13 @@ _start:
     str     w0, [x19, #RDMA_DMA_SCB_BURST_SIZE]
     str     w0, [x26, #0x04C]      /* TDMA_DMA_SCB_BURST_SIZE */
 
-    /* RBUF_CTRL: set RBUF_64B_EN + RBUF_ALIGN_2B (Linux init_umac) */
+    /* RBUF_CTRL: set RBUF_ALIGN_2B (bit 1) — RMW to preserve firmware bits */
     ldr     w0, [x19, #GENET_RBUF_CTRL]
-    orr     w0, w0, #3
+    orr     w0, w0, #2
     str     w0, [x19, #GENET_RBUF_CTRL]
 
-    /* TBUF_CTRL: TBUF_64B_EN (Linux init_umac) */
-    ldr     w0, [x19, #0x600]
-    orr     w0, w0, #1
-    str     w0, [x19, #0x600]
+    /* TBUF_CTRL: clear TBUF_64B_EN — no TSB prefix (U-Boot doesn't use TSB) */
+    str     wzr, [x19, #0x600]        /* TBUF_CTRL = 0 */
 
     /* --- Set UMAC_CMD: speed + TX_EN + RX_EN (clean write like PiOS 0x0B) --- */
     mov     w0, #0
@@ -573,9 +587,22 @@ _start:
 .Lspeed_100:
     orr     w0, w0, #0x04
 .Lspeed_set:
-    /* --- Enable DMA FIRST (PiOS enables DMA while UMAC in SW_RESET) --- */
+    /* --- Set UMAC_CMD FIRST: RGMII + speed + TX/RX enable BEFORE DMA --- */
     mov     w25, w0                 /* save speed bits */
 
+    /* RGMII_LINK */
+    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
+    orr     w0, w0, #(1 << 4)
+    str     w0, [x19, #GENET_EXT_RGMII_OOB]
+
+    /* UMAC_CMD: speed + TX_EN + RX_EN (all at once, before DMA) */
+    orr     w0, w25, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
+    str     w0, [x19, #GENET_UMAC_CMD]
+    mov     w1, #10000
+1:  subs    w1, w1, #1
+    b.ne    1b
+
+    /* --- THEN enable DMA --- */
     ldr     w0, =DMA_RING_CFG_EN   /* ring 16 only */
     str     w0, [x19, #RDMA_DMA_RING_CFG]
     str     w0, [x26, #0x040]      /* TDMA RING_CFG: ring 16 only */
@@ -584,30 +611,22 @@ _start:
     str     w0, [x19, #RDMA_DMA_CTRL]
     str     w0, [x26, #0x044]      /* TDMA CTRL: ring 16 + DMA_EN */
 
-    /* --- THEN bring UMAC out of reset (like Linux mac_config after DMA) --- */
-    /* RGMII_LINK */
-    ldr     w0, [x19, #GENET_EXT_RGMII_OOB]
-    orr     w0, w0, #(1 << 4)
-    str     w0, [x19, #GENET_EXT_RGMII_OOB]
-
-    /* UMAC_CMD: speed (clears SW_RESET) */
-    mov     w0, w25
-    str     w0, [x19, #GENET_UMAC_CMD]
-    mov     w1, #10000
-1:  subs    w1, w1, #1
-    b.ne    1b
-
-    /* UMAC_CMD: add TX_EN + RX_EN */
-    orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
-    str     w0, [x19, #GENET_UMAC_CMD]
-
     /* Wait for TDMA DESC_RAM_INIT_BUSY (bit 1) to clear */
-    ldr     w1, =100000
+    ldr     w1, =10000000
 .Ltdma_init_wait:
     ldr     w0, [x26, #0x048]      /* TDMA DMA_STATUS */
     tbz     w0, #1, .Ltdma_init_done
     subs    w1, w1, #1
     b.ne    .Ltdma_init_wait
+    /* Timeout — print warning */
+    adr     x10, msg_init_busy
+    bl      puts
+    ldr     w0, [x26, #0x048]
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
 .Ltdma_init_done:
 
     /* --- Verify DMA enabled --- */
@@ -763,8 +782,8 @@ _start:
     ldr     x19, =GENET_BASE_PI4
     add     x26, x19, #5, lsl #12  /* x26 = GENET + 0x5000 (TDMA ring 16) */
 
-    /* Build ARP request at 0x200000 (RX pool area — known DMA-accessible) */
-    ldr     x28, =0x200000
+    /* Build ARP request at 0x300000 (separate from RX pool at 0x200000) */
+    ldr     x28, =0x300000
 
     /* Ethernet header: dst=broadcast, src=DE:AD:BE:EF:CA:FE, type=0x0806 (ARP) */
     mov     w0, #-1                 /* 0xFFFFFFFF */
@@ -809,8 +828,18 @@ _start:
     mov     w0, #0x0100             /* 0.1 byte-swapped */
     strh    w0, [x28, #40]
 
-    /* Frame total: 14 (eth) + 28 (arp) = 42 bytes */
-    mov     w20, #42                /* frame length */
+    /* Pad to minimum 64 bytes (U-Boot pads all frames < 64) */
+    /* Zero bytes 42-63 */
+    str     xzr, [x28, #40]        /* covers bytes 40-47 (overlaps last 2 ARP bytes but re-written above) */
+    str     xzr, [x28, #48]
+    str     xzr, [x28, #56]
+
+    /* Re-write the last 2 ARP bytes that the padding zeroed */
+    mov     w0, #0x0100             /* target IP last 2 bytes: 0.1 byte-swapped */
+    strh    w0, [x28, #40]
+
+    /* Frame total: padded to 64 bytes (min Ethernet frame without FCS) */
+    mov     w20, #64                /* frame length */
 
     /* Flush TX buffer from D-cache to RAM */
     bic     x0, x28, #63
@@ -821,6 +850,40 @@ _start:
     cmp     x0, x1
     b.lo    .Ltx_flush
     dsb     sy
+
+    /* Verify frame data in DRAM (cache was invalidated by civac) */
+    adr     x10, msg_verify
+    bl      puts
+    ldr     w0, [x28, #0]          /* first 4 bytes: should be FFFFFFFF */
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x28, #6]          /* bytes 6-9: should be DEADBEEF */
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x28, #12]         /* bytes 12-15: should be 0608xxxx */
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Toggle TDMA: disable, flush, re-enable (fresh DMA state) */
+    ldr     w0, [x26, #0x044]      /* TDMA_DMA_CTRL */
+    bic     w0, w0, #1             /* clear DMA_EN */
+    str     w0, [x26, #0x044]
+    mov     w0, #1
+    str     w0, [x19, #GENET_UMAC_TX_FLUSH]
+    mov     w1, #10000
+1:  subs    w1, w1, #1
+    b.ne    1b
+    str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
+    ldr     w0, =DMA_CTRL_EN       /* 0x00020001 */
+    str     w0, [x26, #0x044]      /* re-enable TDMA */
+    mov     w1, #10000
+1:  subs    w1, w1, #1
+    b.ne    1b
 
     /* Read current TDMA_PROD_INDEX */
     ldr     w22, [x26, #0x00C]     /* TDMA_PROD_INDEX */
@@ -843,6 +906,21 @@ _start:
     ldr     w1, =TX_LEN_STATUS_FLAGS
     orr     w0, w0, w1
     str     w0, [x24, #0]          /* length_status — triggers HW */
+
+    /* Verify descriptor readback before kicking DMA */
+    dsb     sy
+    adr     x10, msg_pre_tx
+    bl      puts
+    ldr     w0, [x24, #0]          /* read back length_status */
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+    ldr     w0, [x24, #4]          /* read back addr_lo */
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
 
     /* Increment and write PROD_INDEX */
     add     w22, w22, #1
@@ -884,98 +962,305 @@ _start:
     mov     w0, #' '
     bl      putc
 
-    /* Read UMAC MIB counters to verify actual TX/RX at MAC level */
-
-    adr     x10, msg_txpkt
+    /* MIB counters: UMAC_MIB_START = GENET + 0xC00 */
+    /* TX: 0xC00-0xC5C (24 counters), RX: 0xC60-0xCBC (24 counters) */
+    /* Dump all non-zero from 0xC00 to 0xCBF (both TX and RX) */
+    adr     x10, msg_txmib
     bl      puts
-    ldr     w0, [x19, #0xA2C]
+    mov     w21, #0xC00
+.Lmib_dump:
+    ldr     w0, [x19, x21]
+    cbz     w0, .Lmib_skip
+    mov     w0, w21
     bl      print_hex32
-    mov     w0, #'\r'
+    mov     w0, #'='
     bl      putc
-    mov     w0, #'\n'
-    bl      putc
-
-    adr     x10, msg_rxpkt
-    bl      puts
-    ldr     w0, [x19, #0xC2C]
-    bl      print_hex32
-    mov     w0, #'\r'
-    bl      putc
-    mov     w0, #'\n'
-    bl      putc
-
-    /* Dump TDMA state */
-    add     x26, x19, #5, lsl #12
-
-    adr     x10, msg_umac_cmd
-    bl      puts
-    ldr     w0, [x19, #0x808]
-    bl      print_hex32
-
-    /* TDMA DMA_STATUS */
-    adr     x10, msg_dma_stat
-    bl      puts
-    ldr     w0, [x26, #0x048]
-    bl      print_hex32
-
-    /* TDMA CONS/PROD after TX */
-    adr     x10, msg_cons
-    bl      puts
-    ldr     w0, [x26, #0x008]
-    bl      print_hex32
-
-    adr     x10, msg_prod
-    bl      puts
-    ldr     w0, [x26, #0x00C]
-    bl      print_hex32
-
-    /* TX descriptor at ring 16 position (desc 128 = byte offset 1536) */
-    adr     x10, msg_txdesc
-    bl      puts
-    add     x0, x19, #4, lsl #12
-    add     x0, x0, #(128 * 12)    /* skip to descriptor 128 */
-    ldr     w1, [x0, #0]
-    mov     w0, w1
+    ldr     w0, [x19, x21]
     bl      print_hex32
     mov     w0, #' '
     bl      putc
+.Lmib_skip:
+    add     w21, w21, #4
+    cmp     w21, #0xCC0
+    b.lt    .Lmib_dump
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Full register dump — compare with PiOS dump_genet2.sh values */
+    /* PiOS: CMD=0B TDMA_CTRL=0002001F STAT=0001FFE0 BURST=08
+       RCFG=0001000F CONS/PROD=varies BFSZ=00800800 START=0180
+       END=02FF ARB=02 PRI2=00400000 RDMA_CTRL=00020001
+       STAT=varies MAXFR=varies TBUF=01 RBUF=C043 TBSZ=01
+       OOB=F00050 PWR=051F02C3 */
+    add     x26, x19, #5, lsl #12
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Row 1: UMAC + TDMA core */
+    adr     x10, msg_reg_cmd
+    bl      puts
+    ldr     w0, [x19, #0x808]       /* UMAC_CMD */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x044]       /* TDMA_CTRL */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x048]       /* TDMA_STAT */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x04C]       /* TDMA_BURST */
+    bl      print_hex32
+
+    /* Row 2: Ring 16 config */
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    adr     x10, msg_reg_r16
+    bl      puts
+    ldr     w0, [x26, #0x040]       /* RING_CFG */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x010]       /* BUF_SIZE */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x014]       /* START */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x26, #0x01C]       /* END */
+    bl      print_hex32
+
+    /* Row 3: RBUF + TBUF + OOB + PWR */
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    adr     x10, msg_reg_buf
+    bl      puts
+    ldr     w0, [x19, #0x300]       /* RBUF_CTRL */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x600]       /* TBUF_CTRL */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x3B4]       /* RBUF_TBUF_SIZE */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x08C]       /* EXT_RGMII_OOB */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x080]       /* EXT_PWR */
+    bl      print_hex32
+
+    /* Row 4: RDMA + port + sys */
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    adr     x10, msg_reg_rdma
+    bl      puts
+    ldr     w0, [x19, #RDMA_DMA_CTRL]  /* RDMA_CTRL */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x004]       /* SYS_PORT_CTRL */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x008]       /* SYS_RBUF_FLUSH */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
+    ldr     w0, [x19, #0x814]       /* MAX_FRAME */
+    bl      print_hex32
+
+    /* Row 5: TX desc + CONS/PROD + TXFIFO */
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    adr     x10, msg_reg_tx
+    bl      puts
+    ldr     w0, [x26, #0x008]       /* CONS */
+    bl      print_hex32
+    mov     w0, #'/'
+    bl      putc
+    ldr     w0, [x26, #0x00C]       /* PROD */
+    bl      print_hex32
+    adr     x10, msg_reg_sep
+    bl      puts
     add     x0, x19, #4, lsl #12
-    add     x0, x0, #(128 * 12)
-    ldr     w1, [x0, #4]
-    mov     w0, w1
+    ldr     w0, [x0, #0]            /* desc[0] len_status */
     bl      print_hex32
-
-    /* Critical diagnostics from analysis report */
-
-    /* EXT_EXT_PWR_MGMT (+0x080) — check for PHY TX power-down */
-    /* Pre-init TDMA DMA_CTRL value */
-    /* Current TDMA_CTRL (should match PiOS 0x0002001F) */
-    adr     x10, msg_prectrl
+    adr     x10, msg_reg_sep
     bl      puts
-    ldr     w0, [x26, #0x044]
-    bl      print_hex32
-
-    adr     x10, msg_pwr
-    bl      puts
-    ldr     w0, [x19, #0x080]
-    bl      print_hex32
-
-    /* UMAC_TX_FIFO_STATUS (+0xB3C) — is data entering the FIFO? */
-    adr     x10, msg_txfifo
-    bl      puts
-    ldr     w0, [x19, #0xB3C]
-    bl      print_hex32
-
-    /* RBUF_TBUF_SIZE_CTRL (+0x3B4) — verify TBUF allocation */
-    adr     x10, msg_tbsz
-    bl      puts
-    ldr     w0, [x19, #0x3B4]
+    ldr     w0, [x19, #0xB3C]       /* TX_FIFO_STATUS */
     bl      print_hex32
 
     mov     w0, #'\r'
     bl      putc
     mov     w0, #'\n'
     bl      putc
+
+    b       .Ltests_done
+
+/* ===== No-init TX: use firmware's GENET state, just send ===== */
+.Ltest_noinit_tx:
+    ldr     x19, =GENET_BASE_PI4
+
+    /* Print firmware GENET state */
+    adr     x10, msg_noinit
+    bl      puts
+
+    /* Read firmware's UMAC_CMD */
+    ldr     w0, [x19, #GENET_UMAC_CMD]
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+
+    /* Read firmware's TDMA CTRL */
+    add     x26, x19, #5, lsl #12
+    ldr     w0, [x26, #0x044]
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+
+    /* Read TDMA PROD/CONS */
+    ldr     w22, [x26, #0x00C]     /* PROD_INDEX */
+    mov     w0, w22
+    bl      print_hex32
+    mov     w0, #'/'
+    bl      putc
+    ldr     w0, [x26, #0x008]     /* CONS_INDEX */
+    bl      print_hex32
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+
+    /* Build frame at 0x300000 */
+    ldr     x28, =0x300000
+    mov     w0, #-1
+    str     w0, [x28, #0]
+    strh    w0, [x28, #4]
+    ldr     w0, =0xDEADBEEF
+    str     w0, [x28, #6]
+    mov     w0, #0xCAFE
+    strh    w0, [x28, #10]
+    mov     w0, #0x0608
+    strh    w0, [x28, #12]
+    mov     w0, #0x0100
+    strh    w0, [x28, #14]
+    mov     w0, #0x0008
+    strh    w0, [x28, #16]
+    mov     w0, #0x0406
+    strh    w0, [x28, #18]
+    mov     w0, #0x0100
+    strh    w0, [x28, #20]
+    ldr     w0, =0xDEADBEEF
+    str     w0, [x28, #22]
+    mov     w0, #0xCAFE
+    strh    w0, [x28, #26]
+    mov     w0, #0x000A
+    strh    w0, [x28, #28]
+    mov     w0, #0x0200
+    strh    w0, [x28, #30]
+    str     wzr, [x28, #32]
+    strh    wzr, [x28, #36]
+    mov     w0, #0x000A
+    strh    w0, [x28, #38]
+    mov     w0, #0x0100
+    strh    w0, [x28, #40]
+    /* Pad to 64 */
+    str     xzr, [x28, #48]
+    str     xzr, [x28, #56]
+    mov     w0, #0x0100
+    strh    w0, [x28, #40]
+    mov     w20, #64
+
+    /* D-cache flush */
+    bic     x0, x28, #63
+    add     x1, x28, x20
+.Lni_flush:
+    dc      civac, x0
+    add     x0, x0, #64
+    cmp     x0, x1
+    b.lo    .Lni_flush
+    dsb     sy
+
+    /* Use firmware's PROD_INDEX, write descriptor at that index */
+    and     w23, w22, #0xFF
+    add     x24, x19, #4, lsl #12  /* TX desc base */
+    mov     w0, #DMA_DESC_SIZE
+    mul     w1, w23, w0
+    add     x24, x24, x1
+
+    mov     w0, w28
+    str     w0, [x24, #4]          /* addr_lo */
+    str     wzr, [x24, #8]         /* addr_hi */
+    lsl     w0, w20, #16
+    ldr     w1, =TX_LEN_STATUS_FLAGS
+    orr     w0, w0, w1
+    str     w0, [x24, #0]          /* length_status */
+    dsb     sy
+
+    /* Kick PROD */
+    add     w22, w22, #1
+    and     w22, w22, #0xFFFF
+    str     w22, [x26, #0x00C]
+
+    /* Poll CONS */
+    ldr     w24, =100000
+.Lni_poll:
+    ldr     w0, [x26, #0x008]
+    and     w0, w0, #0xFFFF
+    cmp     w0, w22
+    b.eq    .Lni_done
+    subs    w24, w24, #1
+    b.ne    .Lni_poll
+    adr     x10, msg_ni_timeout
+    bl      puts
+    b       .Ltests_done
+.Lni_done:
+    adr     x10, msg_ni_ok
+    bl      puts
+
+    /* Check MIB */
+    mov     w21, #0xA00
+.Lni_mib:
+    ldr     w0, [x19, x21]
+    cbz     w0, .Lni_mib_skip
+    mov     w0, w21
+    bl      print_hex32
+    mov     w0, #'='
+    bl      putc
+    ldr     w0, [x19, x21]
+    bl      print_hex32
+    mov     w0, #' '
+    bl      putc
+.Lni_mib_skip:
+    add     w21, w21, #4
+    cmp     w21, #0xA60
+    b.lt    .Lni_mib
+    mov     w0, #'\r'
+    bl      putc
+    mov     w0, #'\n'
+    bl      putc
+    b       .Ltests_done
 
 .Ltests_done:
     adr     x10, msg_done
@@ -1028,6 +1313,7 @@ puts:
 
 print_hex32:
     stp     x30, x20, [sp, #-16]!
+    stp     x21, xzr, [sp, #-16]!
     mov     w20, w0
     mov     w21, #28
 .Lph:
@@ -1043,6 +1329,7 @@ print_hex32:
     sub     w21, w21, #4
     b       .Lph
 .Lphd:
+    ldp     x21, xzr, [sp], #16
     ldp     x30, x20, [sp], #16
     ret
 
@@ -1155,20 +1442,29 @@ msg_dma_fail:   .asciz "DMA INIT FAIL\r\n"
 msg_rx_wait:    .asciz "RX waiting...\r\n"
 msg_rx_count:   .asciz "ARP frames="
 msg_arp:        .asciz "ARP len="
+msg_pre_tx:     .asciz "PRE_TX DESC="
 msg_tx_ok:      .asciz "TX OK\r\n"
 msg_tx_fail:    .asciz "TX TIMEOUT\r\n"
-msg_txpkt:      .asciz "TX_GD_PKTS="
-msg_rxpkt:      .asciz "RX_GD_PKTS="
+msg_txmib:      .asciz "TX_MIB: "
+msg_rxmib:      .asciz "\r\nRX_MIB: "
 msg_umac_cmd:   .asciz " CMD="
 msg_dma_stat:   .asciz " STAT="
 msg_cons:       .asciz " C="
 msg_prod:       .asciz " P="
 msg_txdesc:     .asciz "\r\nDESC="
 msg_fake:       .asciz "FAKE_CONS="
-msg_prectrl:    .asciz "\r\nTDMA_CTRL="
-msg_pwr:        .asciz "\r\nPWR="
-msg_txfifo:     .asciz " TXFIFO="
-msg_tbsz:       .asciz " TBSZ="
+msg_reg_cmd:    .asciz "CMD="
+msg_reg_sep:    .asciz " "
+msg_reg_r16:    .asciz "R16: RCFG="
+msg_reg_buf:    .asciz "RBUF="
+msg_reg_rdma:   .asciz "RDMA="
+msg_reg_tx:     .asciz "C/P="
+msg_verify:     .asciz "RAM_VERIFY: "
+msg_init_busy:  .asciz "WARN: DESC_RAM_INIT_BUSY stuck: "
+msg_wait_start: .asciz "WAIT\r\n"
+msg_noinit:     .asciz "NOINIT TX: CMD="
+msg_ni_ok:      .asciz "NOINIT TX OK\r\nTX_MIB: "
+msg_ni_timeout: .asciz "NOINIT TX TIMEOUT\r\n"
 msg_done:       .asciz "DONE\r\n"
 
 .section .data
