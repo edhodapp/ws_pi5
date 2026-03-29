@@ -5,3 +5,7 @@ build/
 *.bin
 fuzz/corpus/
 fuzz/findings/
+.venv/
+__pycache__/
+.coverage
+.pytest_cache/

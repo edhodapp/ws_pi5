@@ -4,19 +4,18 @@
  * Loaded at 0x4000000 (64 MB) by GPU firmware (via config.txt kernel_address).
  * Must be above the kernel's memory footprint (~34 MB for 128 TCP connections).
  *
- * Waits for a 0xFF sync byte over UART0 (GPIO 14/15), receives a kernel image,
- * writes it to 0x80000, optionally arms a watchdog timer, then jumps to it.
- * After timeout, a GIC-routed timer interrupt triggers PM watchdog reset,
- * rebooting the Pi back into this chainloader.
+ * Waits for a 0xFF sync byte over UART0 (GPIO 14/15), receives a kernel image
+ * in Intel HEX format with per-line checksums and ACK/NAK flow control,
+ * then optionally arms a PM watchdog and jumps to 0x80000.
  *
  * Protocol:
  *   1. Chainloader waits for 0xFF byte
  *   2. Chainloader prints "READY\r\n"
  *   3. Host sends 1-byte timeout (seconds, 0 = no watchdog)
- *   4. Host sends 4-byte LE kernel size
- *   5. Host sends kernel bytes
- *   6. Chainloader prints "BOOT\r\n", arms timer, jumps to 0x80000
- *   7. After timeout: timer IRQ → PM watchdog reset → reboot → step 1
+ *   4. Host sends Intel HEX records (ASCII, \r\n terminated)
+ *   5. Chainloader verifies checksum, sends '+' (ACK) or '-' (NAK)
+ *   6. On EOF record: arm PM watchdog, print "BOOT\r\n", jump to 0x80000
+ *   7. After timeout: PM watchdog reset → reboot → step 1
  */
 
 .include "platform.inc"
@@ -39,13 +38,11 @@
 .equ PL011_FR_RXFE,    0x10    /* RX FIFO empty (bit 4) */
 .equ PL011_FR_TXFF,    0x20    /* TX FIFO full (bit 5) */
 
-/* GIC-400 on BCM2711 */
-.equ GICD_BASE,        0xFF841000
-.equ GICC_BASE,        0xFF842000
-.equ TIMER_PPI,        30      /* CNTPNSIRQ — non-secure physical timer */
-
 /* PM watchdog */
 .equ PM_BASE,          0xFE100000
+
+/* Line buffer size (max Intel HEX line ~43 chars + margin) */
+.equ LINE_BUF_SIZE,    80
 
 .section .text._start
 
@@ -176,80 +173,61 @@ _start:
     bl      cl_getc
     mov     w23, w0                         /* w23 = timeout */
 
-    /* --- Receive kernel size (4 bytes LE) --- */
-    bl      cl_getc
-    mov     w20, w0
-    bl      cl_getc
-    orr     w20, w20, w0, lsl #8
-    bl      cl_getc
-    orr     w20, w20, w0, lsl #16
-    bl      cl_getc
-    orr     w20, w20, w0, lsl #24
+    /* --- Receive Intel HEX records --- */
+    ldr     x25, =hex_line_buf             /* line buffer */
+    mov     x24, xzr                        /* extended base address */
+    mov     w20, wzr                        /* total bytes received */
 
-    /* w20 = kernel size in bytes */
+.Lhex_loop:
+    bl      cl_getline                      /* w26 = line length */
+    bl      cl_parse_hex_record             /* w0: 0=data, 1=EOF, -1=error */
 
-    /* --- Receive kernel bytes to 0x80000 --- */
-    ldr     x21, =CL_KERNEL_ADDR
-    mov     w22, w20                        /* remaining bytes */
+    tbnz    w0, #31, .Lhex_nak             /* negative = error → NAK */
+    cbnz    w0, .Lhex_eof                  /* 1 = EOF */
 
-.Lrecv_loop:
-    cbz     w22, .Lrecv_done
-    bl      cl_getc
-    strb    w0, [x21], #1
-    sub     w22, w22, #1
-    b       .Lrecv_loop
+    /* Data record OK → ACK, continue */
+    mov     w0, #'+'
+    bl      cl_putc
+    b       .Lhex_loop
+
+.Lhex_eof:
+    mov     w0, #'+'
+    bl      cl_putc
+    b       .Lrecv_done
+
+.Lhex_nak:
+    mov     w0, #'-'
+    bl      cl_putc
+    b       .Lhex_loop                      /* host retransmits */
 
 .Lrecv_done:
+    /* --- Arm PM watchdog if timeout > 0 --- */
+    cbz     w23, .Lskip_wdog
+
+    /* PM watchdog: 20-bit counter at 65536 Hz, max ~16 seconds.
+     * Timeout clamped to 16s. sub 1 avoids 20-bit overflow (16*65536=0x100000). */
+    cmp     w23, #16
+    mov     w0, #16
+    csel    w0, w23, w0, lo             /* w0 = min(timeout, 16) */
+    lsl     w0, w0, #16                 /* w0 = seconds * 65536 */
+    sub     w0, w0, #1                  /* clamp to 20-bit max (0xFFFFF) */
+    movz    w1, #0x5A00, lsl #16        /* password high half */
+    orr     w0, w0, w1                  /* ticks | password */
+    ldr     x1, =PM_BASE
+    str     w0, [x1, #0x24]            /* PM_WDOG */
+    movz    w0, #0x5A00, lsl #16
+    movk    w0, #0x0020                 /* password + full reset */
+    str     w0, [x1, #0x1C]            /* PM_RSTC */
+
+.Lskip_wdog:
+
     /* --- Print "BOOT\r\n" --- */
     ldr     x0, =msg_boot
     bl      cl_puts
 
-    /* --- Set up watchdog timer if timeout > 0 --- */
-    cbz     w23, .Lskip_timer
-
-    /* Install exception vector table (in chainloader memory, safe from kernel) */
-    ldr     x0, =cl_vectors
-    msr     VBAR_EL1, x0
-    isb
-
-    /* Configure GIC distributor */
-    ldr     x0, =GICD_BASE
-    mov     w1, #1
-    str     w1, [x0]                        /* GICD_CTLR: enable forwarding */
-
-    ldr     w1, [x0, #0x80]                /* GICD_IGROUPR0 */
-    orr     w1, w1, #(1 << TIMER_PPI)
-    str     w1, [x0, #0x80]                /* PPI 30 → Group 1 (non-secure) */
-
-    mov     w1, #(1 << TIMER_PPI)
-    str     w1, [x0, #0x100]               /* GICD_ISENABLER0: enable PPI 30 */
-
-    /* Priority for PPI 30 = 0 (highest) */
-    add     x1, x0, #0x400                 /* GICD_IPRIORITYR base */
-    strb    wzr, [x1, #TIMER_PPI]
-
-    /* Configure GIC CPU interface */
-    ldr     x0, =GICC_BASE
-    mov     w1, #1
-    str     w1, [x0]                        /* GICC_CTLR: enable */
-    mov     w1, #0xFF
-    str     w1, [x0, #0x4]                 /* GICC_PMR: allow all priorities */
-
-    /* Program timer: CVAL = now + (timeout * frequency) */
-    mrs     x0, CNTPCT_EL0                 /* current count */
-    mrs     x1, CNTFRQ_EL0                 /* frequency (54 MHz on Pi 4) */
-    mov     x2, x23                        /* timeout seconds (zero-extended) */
-    mul     x1, x1, x2
-    add     x0, x0, x1
-    msr     CNTP_CVAL_EL0, x0             /* set comparator */
-    mov     x0, #1
-    msr     CNTP_CTL_EL0, x0              /* enable timer, unmask output */
-
-.Lskip_timer:
-
     /* Clean D-cache for kernel region (dirty lines → RAM) */
     ldr     x0, =CL_KERNEL_ADDR
-    add     x1, x0, x20            /* x20 = kernel size (w20 zero-extended) */
+    add     x1, x0, x20            /* x20 = total bytes received */
 .Lclean_dc:
     dc      civac, x0              /* Clean + Invalidate by VA to PoC */
     add     x0, x0, #64            /* cache line = 64 bytes */
@@ -276,20 +254,17 @@ _start:
     msr     SCTLR_EL1, x0
     isb
 
-    /* Unmask IRQ if timer was armed (after MMU disable so we don't take
-     * the interrupt during chainloader cleanup — the kernel re-enables
-     * MMU in boot.S within microseconds) */
-    cbz     w23, .Lskip_unmask
-    msr     DAIFClr, #2
-.Lskip_unmask:
-
     /* Jump to kernel */
     ldr     x0, =CL_KERNEL_ADDR
     br      x0
 
+/* =======================================================================
+ * UART helpers
+ * ======================================================================= */
+
 /* -----------------------------------------------------------------------
- * cl_putc — Send one byte on UART3
- * w0: character
+ * cl_putc — Send one byte on UART0
+ * w0: character. Leaf function.
  * ----------------------------------------------------------------------- */
 cl_putc:
 1:  ldr     w1, [x19, #PL011_FR]
@@ -299,7 +274,7 @@ cl_putc:
     ret
 
 /* -----------------------------------------------------------------------
- * cl_puts — Send null-terminated string on UART3
+ * cl_puts — Send null-terminated string on UART0
  * x0: string pointer
  * ----------------------------------------------------------------------- */
 cl_puts:
@@ -315,8 +290,8 @@ cl_puts:
     ret
 
 /* -----------------------------------------------------------------------
- * cl_getc — Receive one byte from UART3
- * Returns: w0 = byte received
+ * cl_getc — Receive one byte from UART0
+ * Returns: w0 = byte received. Leaf function.
  * ----------------------------------------------------------------------- */
 cl_getc:
 1:  ldr     w0, [x19, #PL011_FR]
@@ -326,108 +301,189 @@ cl_getc:
     and     w0, w0, #0xFF
     ret
 
+/* =======================================================================
+ * Intel HEX parser
+ * ======================================================================= */
+
+/* -----------------------------------------------------------------------
+ * cl_getline — Read one line from UART into hex_line_buf
+ *
+ * Reads until \n. Strips \r and \n. Stops at LINE_BUF_SIZE-2 chars.
+ * Uses x25 (line buffer pointer, set by caller).
+ * Returns: w26 = number of characters stored
+ * Clobbers: w0, w26
+ * ----------------------------------------------------------------------- */
+cl_getline:
+    str     x30, [sp, #-16]!
+    mov     w26, #0
+.Lgl_loop:
+    bl      cl_getc
+    cmp     w0, #0x0A                  /* \n = end of line */
+    b.eq    .Lgl_done
+    cmp     w0, #0x0D                  /* \r = skip */
+    b.eq    .Lgl_loop
+    cmp     w26, #(LINE_BUF_SIZE - 2)
+    b.ge    .Lgl_loop                  /* overflow: discard but keep reading */
+    strb    w0, [x25, w26, uxtw]
+    add     w26, w26, #1
+    b       .Lgl_loop
+.Lgl_done:
+    ldr     x30, [sp], #16
+    ret
+
+/* -----------------------------------------------------------------------
+ * cl_hex_nibble — Convert ASCII hex character to 0-15
+ *
+ * Input:  w0 = ASCII char ('0'-'9', 'A'-'F', 'a'-'f')
+ * Output: w0 = 0-15 value
+ * Leaf function. Clobbers w0 only.
+ * ----------------------------------------------------------------------- */
+cl_hex_nibble:
+    cmp     w0, #'9'
+    b.hi    1f
+    sub     w0, w0, #'0'              /* '0'-'9' → 0-9 */
+    ret
+1:  orr     w0, w0, #0x20             /* tolower: 'A'-'F' → 'a'-'f' */
+    sub     w0, w0, #('a' - 10)       /* 'a'-'f' → 10-15 */
+    ret
+
+/* -----------------------------------------------------------------------
+ * cl_hex_byte — Parse two ASCII hex chars from line buffer into one byte
+ *
+ * Input:  x25 = buffer base, w22 = current index (advanced by 2)
+ * Output: w0 = byte value (0-255)
+ * Clobbers: w0, w1, w22
+ * ----------------------------------------------------------------------- */
+cl_hex_byte:
+    str     x30, [sp, #-16]!
+    ldrb    w0, [x25, w22, uxtw]
+    add     w22, w22, #1
+    bl      cl_hex_nibble
+    mov     w1, w0                     /* w1 = high nibble */
+    ldrb    w0, [x25, w22, uxtw]
+    add     w22, w22, #1
+    bl      cl_hex_nibble
+    orr     w0, w0, w1, lsl #4        /* w0 = (high << 4) | low */
+    ldr     x30, [sp], #16
+    ret
+
+/* -----------------------------------------------------------------------
+ * cl_parse_hex_record — Parse and process one Intel HEX record
+ *
+ * Input:
+ *   x25 = line buffer (contains record without CR/LF)
+ *   w26 = line length
+ *   x24 = current extended base address (upper 16 bits << 16)
+ *
+ * Output:
+ *   w0: 0 = data record OK, 1 = EOF, -1 = error
+ *   x24 updated for Type 04 (extended linear address)
+ *   w20 += data bytes written for Type 00
+ *
+ * Clobbers: w0-w9, w22, w27
+ * Preserves: x19, x23, x25
+ * ----------------------------------------------------------------------- */
+cl_parse_hex_record:
+    stp     x29, x30, [sp, #-48]!     /* frame: 16 saved + 16 staging + 16 pad */
+
+    /* Validate start code */
+    ldrb    w0, [x25]
+    cmp     w0, #':'
+    b.ne    .Lparse_err
+
+    mov     w22, #1                    /* buffer index, skip ':' */
+
+    /* Parse header: LL, AAAA, TT */
+    bl      cl_hex_byte
+    mov     w2, w0                     /* w2 = byte count (LL) */
+
+    bl      cl_hex_byte
+    mov     w3, w0                     /* w3 = address high byte */
+
+    bl      cl_hex_byte
+    orr     w3, w0, w3, lsl #8        /* w3 = 16-bit address */
+
+    bl      cl_hex_byte
+    mov     w5, w0                     /* w5 = record type (TT) */
+
+    /* Initialize checksum: LL + addr_hi + addr_lo + TT */
+    ubfx    w0, w3, #8, #8            /* addr high byte */
+    and     w1, w3, #0xFF             /* addr low byte */
+    add     w27, w2, w0
+    add     w27, w27, w1
+    add     w27, w27, w5
+
+    /* Parse data bytes into staging area on stack */
+    add     x8, sp, #16               /* x8 = staging buffer */
+    mov     w6, #0                     /* staging index */
+    mov     w7, w2                     /* loop counter = byte count */
+.Lparse_data:
+    cbz     w7, .Lparse_data_done
+    bl      cl_hex_byte
+    add     w27, w27, w0              /* accumulate checksum */
+    strb    w0, [x8, w6, uxtw]
+    add     w6, w6, #1
+    sub     w7, w7, #1
+    b       .Lparse_data
+.Lparse_data_done:
+
+    /* Parse and verify checksum */
+    bl      cl_hex_byte               /* w0 = checksum byte */
+    add     w27, w27, w0
+    and     w27, w27, #0xFF
+    cbnz    w27, .Lparse_err          /* sum must be 0 */
+
+    /* Dispatch on record type */
+    cbz     w5, .Ltype_data           /* Type 00: data */
+    cmp     w5, #0x01
+    b.eq    .Ltype_eof                /* Type 01: EOF */
+    cmp     w5, #0x04
+    b.eq    .Ltype_ext_addr           /* Type 04: extended linear address */
+    b       .Lparse_err               /* unknown type */
+
+.Ltype_data:
+    /* Write staged data to RAM at (extended_base + 16-bit offset) */
+    add     x9, x24, w3, uxtw        /* x9 = absolute target address */
+    mov     w7, #0
+.Lcopy_data:
+    cmp     w7, w6
+    b.ge    .Lcopy_done
+    ldrb    w0, [x8, w7, uxtw]
+    strb    w0, [x9, w7, uxtw]
+    add     w7, w7, #1
+    b       .Lcopy_data
+.Lcopy_done:
+    add     w20, w20, w6              /* total bytes received */
+    mov     w0, #0                     /* return 0: data OK */
+    b       .Lparse_ret
+
+.Ltype_eof:
+    mov     w0, #1                     /* return 1: EOF */
+    b       .Lparse_ret
+
+.Ltype_ext_addr:
+    /* Two data bytes form the upper 16 bits of the base address */
+    ldrb    w0, [x8]                  /* high byte */
+    ldrb    w1, [x8, #1]             /* low byte */
+    orr     w0, w1, w0, lsl #8       /* 16-bit value */
+    lsl     x24, x0, #16             /* x24 = upper address << 16 */
+    mov     w0, #0                     /* return 0: OK */
+    b       .Lparse_ret
+
+.Lparse_err:
+    mov     w0, #-1
+    /* fall through */
+
+.Lparse_ret:
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* -----------------------------------------------------------------------
+ * Park loop for non-primary cores
+ * ----------------------------------------------------------------------- */
 .Lpark:
     wfe
     b       .Lpark
-
-/* =======================================================================
- * Exception Vector Table
- *
- * 16 entries × 0x80 bytes = 2 KB, must be 0x800-aligned.
- * Only the IRQ EL1h entry (offset 0x280) is used — timer interrupt.
- * All others hang (should never fire).
- * ======================================================================= */
-.balign 0x800
-cl_vectors:
-    /* 0x000: Synchronous, current EL with SP_EL0 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x080: IRQ, current EL with SP_EL0 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x100: FIQ, current EL with SP_EL0 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x180: SError, current EL with SP_EL0 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x200: Synchronous, current EL with SP_ELx */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x280: IRQ, current EL with SP_ELx — TIMER WATCHDOG
-     *
-     * When the ARM generic timer fires after the configured timeout,
-     * this handler disables the timer, acknowledges the GIC interrupt,
-     * and arms the PM hardware watchdog for immediate reset (~150 µs).
-     * The Pi reboots from SD card, bringing up the chainloader again.
-     *
-     * Uses movz/movk for all addresses — no literal pool references,
-     * so this is position-independent within the 0x80-byte entry.
-     * 14 instructions = 56 bytes (fits in 128-byte slot).
-     */
-    msr     CNTP_CTL_EL0, xzr              /* disable timer */
-    movz    x0, #0xFF84, lsl #16
-    movk    x0, #0x2000                     /* x0 = GICC_BASE */
-    ldr     w1, [x0, #0xC]                 /* read GICC_IAR */
-    str     w1, [x0, #0x10]                /* write GICC_EOIR */
-    movz    x0, #0xFE10, lsl #16           /* x0 = PM_BASE */
-    movz    w1, #0x5A00, lsl #16
-    movk    w1, #0x000A                     /* password + ~150 µs */
-    str     w1, [x0, #0x24]                /* PM_WDOG */
-    movz    w1, #0x5A00, lsl #16
-    movk    w1, #0x0020                     /* password + full reset */
-    str     w1, [x0, #0x1C]                /* PM_RSTC */
-1:  wfe
-    b       1b
-    .balign 0x80
-
-    /* 0x300: FIQ, current EL with SP_ELx */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x380: SError, current EL with SP_ELx */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x400: Synchronous, lower EL using AArch64 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x480: IRQ, lower EL using AArch64 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x500: FIQ, lower EL using AArch64 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x580: SError, lower EL using AArch64 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x600: Synchronous, lower EL using AArch32 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x680: IRQ, lower EL using AArch32 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x700: FIQ, lower EL using AArch32 */
-    b       .Lhang
-    .balign 0x80
-
-    /* 0x780: SError, lower EL using AArch32 */
-    b       .Lhang
-
-.Lhang:
-    wfe
-    b       .Lhang
 
 /* -----------------------------------------------------------------------
  * Strings
@@ -435,3 +491,11 @@ cl_vectors:
 .section .rodata
 msg_ready:  .asciz "READY\r\n"
 msg_boot:   .asciz "BOOT\r\n"
+
+/* -----------------------------------------------------------------------
+ * BSS: line buffer (zeroed by .Lbss_loop at boot)
+ * ----------------------------------------------------------------------- */
+.section .bss
+.balign 8
+hex_line_buf:
+    .skip   LINE_BUF_SIZE

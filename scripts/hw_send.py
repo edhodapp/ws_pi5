@@ -1,141 +1,233 @@
 #!/usr/bin/env python3
-"""
-Send a kernel to the Pi 4 chainloader over UART3, collect output.
+"""Send a kernel to the Pi 4 chainloader using Intel HEX over UART0.
 
 Protocol:
   1. Host sends 0xFF sync bytes until chainloader responds with READY
   2. Host sends 1-byte timeout (seconds, 0 = no watchdog)
-  3. Host sends 4-byte LE kernel size
-  4. Host sends kernel bytes
-  5. Chainloader prints BOOT, arms timer, jumps to kernel
+  3. Host sends Intel HEX records (ASCII lines, \\r\\n terminated)
+  4. Chainloader verifies checksum, sends '+' (ACK) or '-' (NAK)
+  5. On EOF record ACK: chainloader arms PM watchdog, prints BOOT
   6. After timeout: Pi resets via PM watchdog, chainloader restarts
 
 Usage: python3 hw_send.py <kernel.img> [serial_port] [timeout_sec]
   Default port: /dev/ttyUSB0
-  Default timeout: 60 seconds (sent to chainloader as watchdog timer)
+  Default timeout: 15 seconds (PM watchdog max ~16s)
 """
 
+import os
 import sys
-import struct
-import serial
 import time
 
+import serial
 
-def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port] [timeout_sec]")
-        sys.exit(1)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from intel_hex import kernel_to_hex_records  # noqa: E402
 
-    kernel_path = sys.argv[1]
-    port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
-    timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 60
 
-    if timeout < 0 or timeout > 255:
-        print(f"Timeout must be 0-255 seconds (got {timeout})", flush=True)
-        sys.exit(1)
+MAX_RETRIES = 3
+ACK_TIMEOUT = 5
+SYNC_ATTEMPTS = 10
 
-    with open(kernel_path, "rb") as f:
-        kernel = f.read()
 
-    print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
-    print(f"Port:   {port_path}", flush=True)
-    print(f"Timeout: {timeout}s {'(no watchdog)' if timeout == 0 else ''}", flush=True)
-
-    port = serial.Serial(port_path, 115200, timeout=3)
-
-    # Send 0xFF sync bytes until chainloader responds with READY.
-    # The chainloader discards all non-0xFF bytes before entering the
-    # protocol, so stale FIFO data from a previous kernel is harmless.
-    # If a kernel is currently running, the watchdog will eventually
-    # reset the Pi and the chainloader will restart.
+def sync_chainloader(port):
+    """Send 0xFF until chainloader responds with READY."""
     port.timeout = 2
-    found_ready = False
-    for attempt in range(10):
+    for attempt in range(SYNC_ATTEMPTS):
         port.reset_input_buffer()
         print(f"TX: 0xFF sync (attempt {attempt + 1})", flush=True)
         port.write(b'\xff')
         port.flush()
+        if _wait_for_ready(port):
+            return True
+    return False
 
-        deadline = time.time() + 3
-        while time.time() < deadline:
-            line = port.readline().decode("ascii", errors="ignore").strip()
-            if line:
-                print(f"RX: '{line}'", flush=True)
-            if line == "READY":
-                found_ready = True
-                break
-        if found_ready:
-            break
 
-    if not found_ready:
-        print("RX: no READY after 10 attempts. Power cycle the Pi.", flush=True)
-        port.close()
-        sys.exit(1)
+def _wait_for_ready(port):
+    """Read lines for up to 3 seconds looking for READY."""
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        line = port.readline().decode("ascii", errors="ignore")
+        line = line.strip()
+        if line:
+            print(f"RX: '{line}'", flush=True)
+        if line == "READY":
+            return True
+    return False
 
-    # Send timeout byte + size + kernel
-    print(f"TX: timeout = {timeout}s", flush=True)
-    port.write(bytes([timeout]))
 
-    size_bytes = struct.pack("<I", len(kernel))
-    print(f"TX: size = {size_bytes.hex()} ({len(kernel)} bytes)", flush=True)
-    t0 = time.time()
-    port.write(size_bytes)
-    port.write(kernel)
-    port.flush()
-    elapsed = time.time() - t0
-    print(f"TX: {len(kernel)} bytes sent in {elapsed:.1f}s ({len(kernel) / elapsed:.0f} B/s)", flush=True)
+def send_hex_records(port, records, kernel_size):
+    """Send Intel HEX records with ACK/NAK flow control."""
+    port.timeout = ACK_TIMEOUT
+    sent_bytes = 0
 
-    # Wait for BOOT
-    port.timeout = 10
+    for rec_idx, record in enumerate(records):
+        if not _send_one_record(port, record, rec_idx):
+            return False
+        if record[7:9] == '00':
+            sent_bytes += int(record[1:3], 16)
+            if rec_idx % 100 == 0:
+                pct = sent_bytes * 100 // kernel_size
+                print(
+                    f"\r  {sent_bytes}/{kernel_size} ({pct}%)",
+                    end='', flush=True,
+                )
+    return True
+
+
+def _send_one_record(port, record, rec_idx):
+    """Send a single HEX record, retrying on NAK."""
+    for retry in range(MAX_RETRIES):
+        port.write((record + '\r\n').encode('ascii'))
+        port.flush()
+        ack = port.read(1)
+        if ack == b'+':
+            return True
+        if ack == b'-':
+            _log_nak(rec_idx, retry)
+            continue
+        _log_bad_ack(rec_idx, ack)
+        return False
+    print(f"\n  NAK on record {rec_idx}, giving up", flush=True)
+    return False
+
+
+def _log_nak(rec_idx, retry):
+    """Log a NAK retry if not the last attempt."""
+    if retry < MAX_RETRIES - 1:
+        print(
+            f"\n  NAK on record {rec_idx}, retry {retry + 1}",
+            flush=True,
+        )
+
+
+def _log_bad_ack(rec_idx, ack):
+    """Log an unexpected ACK byte."""
+    if ack:
+        print(f"\n  Unexpected byte: {ack.hex()}", flush=True)
+    else:
+        print(f"\n  Timeout on record {rec_idx}", flush=True)
+
+
+def wait_for_boot(port):
+    """Wait for BOOT response from chainloader."""
+    port.timeout = 5
     line = port.readline().decode("ascii", errors="ignore").strip()
     if line:
         print(f"RX: '{line}'", flush=True)
-    if line == "BOOT":
-        print("Kernel loaded. Booting.", flush=True)
-    else:
-        print(f"Unexpected response.", flush=True)
-        port.close()
-        sys.exit(1)
+    return line == "BOOT"
 
-    # Collect output byte-by-byte so non-newline chars (e.g. dots) show
-    # immediately. Also accumulate line buffer for WAIT/DONE detection.
-    collect_time = timeout if timeout > 0 else 3600  # 1 hour if no watchdog
-    print(f"--- Output ({collect_time}s) ---", flush=True)
-    port.timeout = 1  # per-byte read timeout
-    done = False
+
+def collect_output(port, duration):
+    """Collect serial output byte-by-byte for duration seconds."""
+    print(f"--- Output ({duration}s) ---", flush=True)
+    port.timeout = 1
     line_buf = ""
-    deadline = time.time() + collect_time
+    deadline = time.time() + duration
     try:
         while time.time() < deadline:
-            b = port.read(1)
-            if not b:
-                continue
-            ch = b.decode("ascii", errors="ignore")
-            sys.stdout.write(ch)
-            sys.stdout.flush()
-            if ch in ('\r', '\n'):
-                stripped = line_buf.strip()
-                if stripped == "WAIT":
-                    print("TX: 0xFF (start)", flush=True)
-                    port.write(b'\xff')
-                    port.flush()
-                if stripped == "DONE":
-                    done = True
-                    break
-                line_buf = ""
-            else:
-                line_buf += ch
+            result, line_buf = _read_output_byte(port, line_buf)
+            if result is True:
+                print("--- DONE ---", flush=True)
+                return True
     except KeyboardInterrupt:
         print("\n--- Interrupted ---", flush=True)
+    print("--- Timeout ---", flush=True)
+    return False
 
-    if done:
-        print("--- DONE ---", flush=True)
-    else:
-        print("--- Timeout ---", flush=True)
 
+def _read_output_byte(port, line_buf):
+    """Read and process one byte of kernel output.
+
+    Returns:
+        (True, buf) if DONE seen, (None, buf) otherwise.
+    """
+    byte = port.read(1)
+    if not byte:
+        return None, line_buf
+    char = byte.decode("ascii", errors="ignore")
+    sys.stdout.write(char)
+    sys.stdout.flush()
+    if char not in ('\r', '\n'):
+        return None, line_buf + char
+    stripped = line_buf.strip()
+    if stripped == "WAIT":
+        port.write(b'\xff')
+        port.flush()
+    if stripped == "DONE":
+        return True, ""
+    return None, ""
+
+
+def main():
+    """Entry point: parse args, sync, send HEX, collect output."""
+    args = _parse_args()
+    if not args:
+        return 1
+    kernel_path, port_path, timeout = args
+
+    with open(kernel_path, "rb") as fobj:
+        kernel = fobj.read()
+
+    records = kernel_to_hex_records(kernel)
+    _print_banner(kernel_path, port_path, timeout, kernel, records)
+
+    port = serial.Serial(port_path, 115200, timeout=3)
+
+    if not sync_chainloader(port):
+        print("No READY. Power cycle the Pi.", flush=True)
+        port.close()
+        return 1
+
+    print(f"TX: timeout = {timeout}s", flush=True)
+    port.write(bytes([timeout]))
+    port.flush()
+
+    t_start = time.time()
+    if not send_hex_records(port, records, len(kernel)):
+        port.close()
+        return 1
+    elapsed = time.time() - t_start
+    rate = len(kernel) / elapsed if elapsed > 0 else 0
+    print(f"\n  {len(kernel)} bytes in {elapsed:.1f}s "
+          f"({rate:.0f} B/s)", flush=True)
+
+    if not wait_for_boot(port):
+        print("No BOOT received.", flush=True)
+        port.close()
+        return 1
+    print("Kernel loaded. Booting.", flush=True)
+
+    duration = timeout if timeout > 0 else 3600
+    collect_output(port, duration)
     port.close()
-    sys.exit(0 if done else 1)
+    return 0
+
+
+def _parse_args():
+    """Parse command line arguments. Returns tuple or None."""
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <kernel.img> "
+              "[serial_port] [timeout_sec]")
+        return None
+    kernel_path = sys.argv[1]
+    port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
+    timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 15
+    if timeout < 0 or timeout > 255:
+        print(f"Timeout must be 0-255 (got {timeout})", flush=True)
+        return None
+    return kernel_path, port_path, timeout
+
+
+def _print_banner(kernel_path, port_path, timeout, kernel, records):
+    """Print startup info."""
+    data_count = sum(1 for r in records if r[7:9] == '00')
+    wd_note = '(no watchdog)' if timeout == 0 else ''
+    print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
+    print(f"Port:   {port_path}", flush=True)
+    print(f"Timeout: {timeout}s {wd_note}", flush=True)
+    print(f"HEX: {len(records)} records ({data_count} data)",
+          flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
