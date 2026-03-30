@@ -198,27 +198,7 @@ _start:
     b       .Lhex_loop                      /* host retransmits */
 
 .Lrecv_done:
-    /* --- Arm PM watchdog if timeout > 0 --- */
-    cbz     w23, .Lskip_wdog
-
-    /* PM watchdog: 20-bit counter at 65536 Hz, max ~16 seconds.
-     * Timeout clamped to 16s. sub 1 avoids 20-bit overflow (16*65536=0x100000). */
-    cmp     w23, #16
-    mov     w0, #16
-    csel    w0, w23, w0, lo             /* w0 = min(timeout, 16) */
-    lsl     w0, w0, #16                 /* w0 = seconds * 65536 */
-    sub     w0, w0, #1                  /* clamp to 20-bit max (0xFFFFF) */
-    movz    w1, #0x5A00, lsl #16        /* password high half */
-    orr     w0, w0, w1                  /* ticks | password */
-    ldr     x1, =PM_BASE
-    str     w0, [x1, #0x24]            /* PM_WDOG */
-    movz    w0, #0x5A00, lsl #16
-    movk    w0, #0x0020                 /* password + full reset */
-    str     w0, [x1, #0x1C]            /* PM_RSTC */
-
-.Lskip_wdog:
-
-    /* --- Print "BOOT\r\n" via direct cl_putc (bypasses cl_puts) --- */
+    /* --- 1) Print "BOOT\r\n" via direct cl_putc --- */
     mov     w0, #'B'
     bl      cl_putc
     mov     w0, #'O'
@@ -245,6 +225,27 @@ _start:
     cmp     x1, x0
     b.lo    .Lboot_delay
 
+    /* --- 3) Arm PM watchdog if timeout > 0 --- */
+    cbz     w23, .Lskip_wdog
+
+    /* PM watchdog: 20-bit counter at 65536 Hz, max ~16 seconds.
+     * Timeout clamped to 16s. sub 1 avoids 20-bit overflow. */
+    cmp     w23, #16
+    mov     w0, #16
+    csel    w0, w23, w0, lo             /* w0 = min(timeout, 16) */
+    lsl     w0, w0, #16                 /* w0 = seconds * 65536 */
+    sub     w0, w0, #1                  /* clamp to 20-bit max (0xFFFFF) */
+    movz    w1, #0x5A00, lsl #16        /* password high half */
+    orr     w0, w0, w1                  /* ticks | password */
+    movz    x1, #0xFE10, lsl #16        /* PM_BASE — no literal pool */
+    str     w0, [x1, #0x24]            /* PM_WDOG */
+    movz    w0, #0x5A00, lsl #16
+    movk    w0, #0x0020                 /* password + full reset */
+    str     w0, [x1, #0x1C]            /* PM_RSTC */
+
+.Lskip_wdog:
+
+    /* --- 4) Clean D-cache, jump to kernel --- */
     /* Clean D-cache for kernel region (dirty lines → RAM) */
     ldr     x0, =CL_KERNEL_ADDR
     add     x1, x0, x20            /* x20 = total bytes received */
