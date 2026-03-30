@@ -56,22 +56,41 @@ def _wait_for_ready(port):
 
 
 def send_hex_records(port, records, kernel_size):
-    """Send Intel HEX records with ACK/NAK flow control."""
+    """Send Intel HEX records with ACK/NAK flow control.
+
+    The EOF record is sent without reading its ACK — the ACK
+    and BOOT arrive together and are read by wait_for_boot.
+    """
     port.timeout = ACK_TIMEOUT
     sent_bytes = 0
 
-    for rec_idx, record in enumerate(records):
+    for rec_idx, record in enumerate(records[:-1]):
         if not _send_one_record(port, record, rec_idx):
             return False
-        if record[7:9] == '00':
-            sent_bytes += int(record[1:3], 16)
-            if rec_idx % 100 == 0:
-                pct = sent_bytes * 100 // kernel_size
-                print(
-                    f"\r  {sent_bytes}/{kernel_size} ({pct}%)",
-                    end='', flush=True,
-                )
+        sent_bytes = _track_progress(
+            record, rec_idx, sent_bytes, kernel_size,
+        )
+    _send_eof(port, records[-1])
     return True
+
+
+def _track_progress(record, rec_idx, sent_bytes, kernel_size):
+    """Update and print transfer progress for data records."""
+    if record[7:9] == '00':
+        sent_bytes += int(record[1:3], 16)
+        if rec_idx % 100 == 0:
+            pct = sent_bytes * 100 // kernel_size
+            print(
+                f"\r  {sent_bytes}/{kernel_size} ({pct}%)",
+                end='', flush=True,
+            )
+    return sent_bytes
+
+
+def _send_eof(port, record):
+    """Send the EOF record without reading ACK."""
+    port.write((record + '\r\n').encode('ascii'))
+    port.flush()
 
 
 def _send_one_record(port, record, rec_idx):

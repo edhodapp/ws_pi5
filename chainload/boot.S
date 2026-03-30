@@ -218,9 +218,32 @@ _start:
 
 .Lskip_wdog:
 
-    /* --- Print "BOOT\r\n" --- */
-    ldr     x0, =msg_boot
-    bl      cl_puts
+    /* --- Print "BOOT\r\n" via direct cl_putc (bypasses cl_puts) --- */
+    mov     w0, #'B'
+    bl      cl_putc
+    mov     w0, #'O'
+    bl      cl_putc
+    mov     w0, #'O'
+    bl      cl_putc
+    mov     w0, #'T'
+    bl      cl_putc
+    mov     w0, #0x0D
+    bl      cl_putc
+    mov     w0, #0x0A
+    bl      cl_putc
+
+    /* Delay ~100ms for CP2102 to deliver BOOT to host */
+    mrs     x0, CNTFRQ_EL0
+    mov     x1, #100
+    mul     x0, x0, x1
+    mov     x1, #1000
+    udiv    x0, x0, x1             /* ticks = freq * 100 / 1000 */
+    mrs     x1, CNTPCT_EL0
+    add     x0, x0, x1
+.Lboot_delay:
+    mrs     x1, CNTPCT_EL0
+    cmp     x1, x0
+    b.lo    .Lboot_delay
 
     /* Clean D-cache for kernel region (dirty lines → RAM) */
     ldr     x0, =CL_KERNEL_ADDR
