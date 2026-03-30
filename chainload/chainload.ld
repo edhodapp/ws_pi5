@@ -24,13 +24,6 @@ SECTIONS
     .bss (NOLOAD) : ALIGN(8) {
         __bss_start = .;
         *(.bss*)
-
-        . = ALIGN(4096);
-        __mmu_l1_table = .;
-        . += 4096;
-        __mmu_l2_table = .;
-        . += 4096;
-
         __bss_end = .;
     }
 

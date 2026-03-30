@@ -128,17 +128,18 @@ def _log_bad_ack(rec_idx, ack):
 
 
 def wait_for_boot(port):
-    """Wait for BOOT response from chainloader.
-
-    Uses raw read — readline fails when the CP2102 delivers
-    the ACK and BOOT in the same USB packet.
-    """
-    port.timeout = 3
-    raw = port.read(256)
-    text = raw.decode("ascii", errors="ignore").strip()
-    if text:
-        print(f"RX: '{text}'", flush=True)
-    return "BOOT" in text
+    """Wait for BOOT, leaving kernel output in buffer."""
+    port.timeout = 5
+    buf = b''
+    while len(buf) < 64:
+        byte = port.read(1)
+        if not byte:
+            break
+        buf += byte
+        if b'BOOT' in buf:
+            print("RX: BOOT", flush=True)
+            return True
+    return False
 
 
 def collect_output(port, duration):

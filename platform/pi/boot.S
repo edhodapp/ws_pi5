@@ -3,6 +3,15 @@
 .global _start
 
 _start:
+    /* Debug: print '0' as absolute first instruction */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'0'
+7:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    7b
+    str     w10, [x9]
+
     /* Only let core 0 proceed, park other cores */
     mrs     x0, mpidr_el1
     and     x0, x0, #3
@@ -38,9 +47,25 @@ _start:
     eret
 
 .Lel1_ready:
+    /* Debug: print '1' to prove we reached EL1 */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'1'
+8:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    8b
+    str     w10, [x9]
+
     /* Set up stack */
     ldr     x0, =_stack_top
     mov     sp, x0
+
+    /* Debug: print '2' to prove stack setup worked */
+    mov     w10, #'2'
+9:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    9b
+    str     w10, [x9]
 
     /* Zero BSS */
     ldr     x0, =__bss_start
@@ -136,6 +161,25 @@ _start:
     /* Set translation table base */
     ldr     x0, =__mmu_l1_table
     msr     TTBR0_EL1, x0
+
+    /* Invalidate TLB and D-cache before enabling MMU.
+     * Critical when chainloaded — the chainloader's D-cache may
+     * contain stale lines (from prefetching during HEX transfer)
+     * that would shadow the BSS zero we just wrote to RAM. */
+    tlbi    vmalle1
+
+    /* Invalidate entire D-cache by set/way (L1: 32KB, 2-way, 64B) */
+    mov     x0, #0                     /* set/way value */
+    mov     x1, #256                   /* 256 sets (32KB / 2 ways / 64B) */
+.Linv_l1:
+    dc      isw, x0                    /* invalidate set, way 0 */
+    orr     x2, x0, #(1 << 30)        /* way 1 (bit 30 for L1 on A72) */
+    dc      isw, x2
+    add     x0, x0, #(1 << 6)         /* next set (bit 6 = set field) */
+    subs    x1, x1, #1
+    b.ne    .Linv_l1
+
+    dsb     sy
     isb
 
     /* Enable MMU + data cache + instruction cache */

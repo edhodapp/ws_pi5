@@ -238,13 +238,9 @@ genet_init:
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
-    /* TDMA: match PiOS 0x0002001F (rings 0-3 + ring 16 + DMA_EN) */
-    ldr     w0, =0x0002001F
+    /* TDMA: ring 16 + DMA_EN only (U-Boot: 0x00020001) */
+    ldr     w0, =DMA_CTRL_EN
     str     w0, [x22, #TDMA_DMA_CTRL_OFS]
-
-    /* RBUF_CTRL: match PiOS 0xC043 */
-    ldr     w0, =0xC043
-    str     w0, [x19, #GENET_RBUF_CTRL]
 
     /* --- Set speed (U-Boot writes speed alone, clearing all other bits) --- */
     mov     w0, #0
