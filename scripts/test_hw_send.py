@@ -140,17 +140,22 @@ class TestWaitForBoot:
 
     def test_boot_received(self):
         port = make_port()
-        port.readline.return_value = b'BOOT\r\n'
+        port.read.return_value = b'BOOT\r\n'
+        assert hw_send.wait_for_boot(port) is True
+
+    def test_boot_with_prefix(self):
+        port = make_port()
+        port.read.return_value = b'+BOOT\r\n'
         assert hw_send.wait_for_boot(port) is True
 
     def test_no_boot(self):
         port = make_port()
-        port.readline.return_value = b''
+        port.read.return_value = b''
         assert hw_send.wait_for_boot(port) is False
 
     def test_wrong_response(self):
         port = make_port()
-        port.readline.return_value = b'GARBAGE\r\n'
+        port.read.return_value = b'GARBAGE\r\n'
         assert hw_send.wait_for_boot(port) is False
 
 

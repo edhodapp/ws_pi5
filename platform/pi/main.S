@@ -23,8 +23,20 @@
 main:
     stp     x29, x30, [sp, #-16]!
 
+.ifdef PLATFORM_PI4
+    /* When chainloaded, UART0 is already configured. Wait 50ms for
+     * the CP2102 to finish delivering BOOT to the host before we
+     * reinitialize the UART and potentially glitch the TX line. */
+    mrs     x0, CNTFRQ_EL0
+    lsr     x0, x0, #5             /* freq/32 ≈ 50ms worth of ticks */
+    mrs     x1, CNTPCT_EL0
+    add     x0, x0, x1
+1:  mrs     x1, CNTPCT_EL0
+    cmp     x1, x0
+    b.lo    1b
+.endif
+
     bl      uart_init
-    /* Pi 4: UART0 on GPIO 14/15 (default pin mux, no switch needed) */
 
 .ifdef PLATFORM_PI4
     ldr     x0, =msg_hello_pi4
