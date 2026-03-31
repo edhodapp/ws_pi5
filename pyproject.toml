@@ -1,0 +1,4 @@
+[tool.mutmut]
+paths_to_mutate = "scripts/intel_hex.py"
+tests_dir = "scripts/"
+runner = ".venv/bin/python -m pytest -x -q scripts/test_intel_hex.py"

@@ -199,6 +199,97 @@ class TestKernelToHexRecords(unittest.TestCase):
         second = parse_hex_record(ext_recs[1])['data']
         self.assertEqual(second, b'\x00\x09')
 
+    def test_default_base_address(self):
+        """Default base_address=0x80000 produces correct offset."""
+        recs = kernel_to_hex_records(b'\xFF' * 4)
+        data = parse_hex_record(recs[1])
+        self.assertEqual(data['address'], 0x0000)
+        ext = parse_hex_record(recs[0])
+        self.assertEqual(ext['data'], b'\x00\x08')
+
+    def test_ext_addr_address_field_zero(self):
+        """Type 04 records must have address field = 0x0000."""
+        kernel = b'\xAA' * 512
+        recs = kernel_to_hex_records(kernel, base_address=0x8FF00)
+        for rec in recs:
+            p = parse_hex_record(rec)
+            if p['type'] == 0x04:
+                self.assertEqual(p['address'], 0x0000,
+                                 f"Type 04 address must be 0: {rec}")
+
+    def test_eof_address_field_zero(self):
+        """EOF record must have address field = 0x0000."""
+        recs = kernel_to_hex_records(b'\x00' * 16)
+        eof = parse_hex_record(recs[-1])
+        self.assertEqual(eof['type'], 0x01)
+        self.assertEqual(eof['address'], 0x0000)
+
+    def test_large_upper16_ext_addr(self):
+        """Base address with non-zero high byte in upper16."""
+        recs = kernel_to_hex_records(b'\xFF' * 4,
+                                     base_address=0x12340000)
+        ext = parse_hex_record(recs[0])
+        self.assertEqual(ext['type'], 0x04)
+        self.assertEqual(ext['data'], b'\x12\x34')
+
+    def test_data_integrity_across_64k_boundary(self):
+        """Reconstruct data crossing 64K boundary, compare to original."""
+        kernel = bytes(range(256)) * 4  # 1024 bytes
+        base = 0x8FF00  # starts near boundary
+        recs = kernel_to_hex_records(kernel, base_address=base)
+        memory = _reconstruct_memory(recs)
+        for i, byte in enumerate(kernel):
+            addr = base + i
+            self.assertEqual(memory.get(addr), byte,
+                             f"Mismatch at 0x{addr:X}: "
+                             f"expected 0x{byte:02X}, "
+                             f"got {memory.get(addr)}")
+
+    def test_boundary_record_at_exact_offset(self):
+        """64K boundary ext addr fires at offset 0x10000, not before/after."""
+        kernel = b'\xBB' * 512
+        base = 0x8FF00
+        recs = kernel_to_hex_records(kernel, base_address=base)
+        # After boundary, first data record should have offset=0x0000
+        ext_indices = [i for i, r in enumerate(recs)
+                       if parse_hex_record(r)['type'] == 0x04]
+        self.assertEqual(len(ext_indices), 2)
+        # Data record immediately after second ext addr
+        after_boundary = parse_hex_record(recs[ext_indices[1] + 1])
+        self.assertEqual(after_boundary['type'], 0x00)
+        self.assertEqual(after_boundary['address'], 0x0000)
+
+    def test_boundary_at_exact_0xFFFF(self):
+        """Offset exactly 0xFFFF: boundary must NOT fire prematurely."""
+        # base=0x8FFFF puts initial offset at 0xFFFF
+        kernel = b'\xCC' * 32
+        recs = kernel_to_hex_records(kernel, base_address=0x8FFFF)
+        memory = _reconstruct_memory(recs)
+        # First byte should be at 0x8FFFF, not wrapped to next segment
+        self.assertEqual(memory.get(0x8FFFF), 0xCC,
+                         "First byte should be at 0x8FFFF")
+        # Byte 17 (after first chunk) should be at 0x9000F
+        self.assertEqual(memory.get(0x9000F), 0xCC)
+
+    def test_boundary_ext_addr_large_upper16(self):
+        """Second ext addr after boundary must encode upper16 high byte."""
+        # base=0x12FFFF00 → initial upper16=0x12FF
+        # After 256 bytes, crosses to upper16=0x1300
+        kernel = b'\xDD' * 512
+        base = 0x12FFFF00
+        recs = kernel_to_hex_records(kernel, base_address=base)
+        ext_recs = [parse_hex_record(r) for r in recs
+                    if parse_hex_record(r)['type'] == 0x04]
+        self.assertEqual(len(ext_recs), 2)
+        self.assertEqual(ext_recs[0]['data'], b'\x12\xFF')
+        self.assertEqual(ext_recs[1]['data'], b'\x13\x00')
+        # Verify data integrity
+        memory = _reconstruct_memory(recs)
+        for i in range(len(kernel)):
+            addr = base + i
+            self.assertEqual(memory.get(addr), 0xDD,
+                             f"Mismatch at 0x{addr:X}")
+
     def test_record_count_27k(self):
         """27576 bytes = 1724 data records."""
         kernel = b'\x00' * 27576
