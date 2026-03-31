@@ -5,11 +5,11 @@
 
 ---
 
-A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. The goal is a complete, production-quality web server — from boot to TLS to serving pages — with no OS, no C runtime, and no abstraction layers.
+A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. A complete HTTP server — from boot to serving pages — with no OS, no C runtime, and no abstraction layers.
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** The protocol stack is complete and verified. The project is entering hardware integration on Pi 4 — first bare-metal boot on real silicon.
+**Current stage:** Pi 4 hardware bringup — UART chainloader transferring kernels over serial, GENET Gigabit Ethernet driver under development.
 
 ## The Experiment
 
@@ -18,7 +18,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 872 verified tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 394 assembly tests + 71 Python tests + 153 functional tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -37,7 +37,7 @@ Implementation-specific tests serve as a ratchet against AI hallucination. A beh
 
 ## What It Does
 
-Boots on a Raspberry Pi 4, brings up USB Ethernet (CDC-ECM), and serves HTTP on port 80. The full path:
+Boots on a Raspberry Pi 4, brings up Ethernet, and serves HTTP on port 80. The full path:
 
 ```
 boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
@@ -57,7 +57,7 @@ boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
       http_poll          Parse requests, send responses (cooperative, non-blocking)
 ```
 
-Kernel image: 25 KB. Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP send buffers).
+Kernel image: 27 KB. Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP send buffers).
 
 ## Project Structure
 
@@ -109,11 +109,13 @@ platform/pi/        Raspberry Pi 4 (BCM2711)
     usb_bulk.S          Bulk transfer execution with DATA toggle tracking
     cdc_ecm.S           CDC-ECM device init, activate, send/recv
 chainload/          UART chainloader for Pi 4 development
-  boot.S              Receives kernel over UART3, writes to 0x80000, jumps to it
-  chainload.ld        Linked at 0x200000 (doesn't overlap kernel target)
+  boot.S              Intel HEX receiver over UART0, PL011 no-FIFO mode
+  hex_parse.S         Intel HEX record parser (platform-independent, testable)
+  diag.S              Standalone UART diagnostic (error flags, byte counting)
+  chainload.ld        Linked at 0x4000000 (above kernel footprint)
 tests/              Unit and functional tests
   test_main.S         Test runner (boot, MMU, dispatch, pass/fail reporting)
-  test_*.S            Shared protocol stack tests (322 tests)
+  test_*.S            Shared protocol stack tests (353 tests including hex_parse)
   pi/                 Pi-specific driver tests (41 tests)
     test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
     test_gpio.S         GPIO function select tests (5 tests)
@@ -128,8 +130,11 @@ scripts/            Build and test automation
   run_tests.sh        QEMU test runner (configurable QEMU binary)
   run_func_tests.sh   QEMU functional test runner
   tcp_oracle.py       PICT functional test oracle (Python)
-  send_kernel.py      Host-side UART kernel sender for chainloader
+  hw_send.py          Host-side Intel HEX sender for chainloader
+  intel_hex.py        Intel HEX record generation library
+  uart_diag.py        Host driver for UART diagnostic (diag.S)
 hw_test/            Hardware test scripts for Pi 4 test fixture
+  uart_test/          UART test kernels and PL011 register reference
 ```
 
 ## Building
@@ -151,7 +156,7 @@ sudo apt install pict
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
 | **Pi 4** (QEMU testing) | `make` | `make test` | Default. Uses QEMU raspi3b with Pi 3 peripheral addresses |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART3 on GPIO 4/5 |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART0 on GPIO 14/15 |
 
 Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on both QEMU 7.2 and QEMU 11.0-rc0.
 
@@ -187,28 +192,39 @@ make clean
 
 ### Pi 4 Development Workflow
 
-A UART chainloader (671 bytes) sits on the SD card permanently and receives new kernels over serial:
+A UART chainloader (~1.2 KB) sits on the SD card at 0x4000000 and receives new kernels over serial using Intel HEX format with per-line checksums and ACK/NAK flow control:
 
 ```
 make PLATFORM=pi4
-python3 scripts/send_kernel.py kernel8.img
+python3 scripts/hw_send.py kernel8.img /dev/ttyUSB0
 ```
 
-No SD card swaps needed — the development loop is edit → build → send over serial → running.
+The chainloader protocol:
+1. Host asserts DTR to reset the Pi, then deasserts to boot
+2. Host sends 0xFF sync → chainloader responds with `READY`
+3. Host sends Intel HEX records with `\r\n` terminators
+4. Chainloader verifies each record's checksum, sends `+` (ACK) or `-` (NAK with retry)
+5. On EOF record: chainloader prints `BOOT`, jumps to 0x80000
+
+The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The host-side sender (`hw_send.py`) has 38 unit tests and the HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
+
+**Status:** Transfer of 27 KB kernel completes reliably (1724 records, zero NAKs). Currently debugging BOOT detection — awaiting a CP2102N adapter with RTS/CTS hardware flow control to eliminate RX overrun during simultaneous TX/RX on the PL011 UART.
 
 ## Testing
 
 ### Unit Tests
 
-363 tests run on QEMU `raspi3b`. The shared tests (322) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO) and HTTP request/response handling.
+394 assembly tests run on QEMU `raspi3b`. The shared tests (353) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, and Intel HEX parsing. Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
-Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+71 Python unit tests cover the host-side tools (hw_send.py, intel_hex.py) with 100% branch coverage.
 
 The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
 
 The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
 
-Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths.
+Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths. Every test branch has an explicit assertion — executing code without checking the result is not testing.
+
+**Mutation testing** with [mutmut](https://github.com/boxed/mutmut) verifies test assertion quality on Python modules. The Intel HEX library achieves 100% mutation score (108/108 mutants killed). Surviving mutants revealed real test gaps in 64K boundary crossing logic that branch coverage alone missed.
 
 The TDD workflow:
 
@@ -371,8 +387,8 @@ make fuzz-corpus-seq
 - **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
 - **Kernel load:** `0x80000` (standard AArch64 boot)
 - **Boot:** EL2 → EL1 drop, MMU setup (4 GB identity map, Normal + Device), caches enabled
-- **Ethernet:** USB CDC-ECM (via DWC2 host controller). Native GENET Gigabit MAC planned.
-- **UART:** PL011 — UART0 for early boot, UART3 on GPIO 4/5 (ALT4) for serial debug
+- **Ethernet:** GENET v5 Gigabit MAC (native, under development). USB CDC-ECM fallback via DWC2.
+- **UART:** PL011 UART0 on GPIO 14/15 — serial debug and chainloader
 - **GPIO:** Generic function select driver (`gpio_set_function`) using hardware divide for GPFSEL register/bit computation
 - **USB:** DWC2 host at PERIPH_BASE + `0x980000`
 - **Mailbox:** VideoCore IPC at PERIPH_BASE + `0x00B880`
@@ -381,21 +397,40 @@ make fuzz-corpus-seq
 
 | Header Pin | GPIO | Function | Notes |
 |------------|------|----------|-------|
-| Pin 7 | GPIO 4 | **UART3 TX** | Serial debug output |
-| Pin 29 | GPIO 5 | **UART3 RX** | Serial debug input |
-| Pin 8 | GPIO 14 | **Fan control** | Official Pi 4 case fan (on/off, planned) |
+| Pin 8 | GPIO 14 | **UART0 TX** | Serial debug + chainloader (PL011) |
+| Pin 10 | GPIO 15 | **UART0 RX** | Serial debug + chainloader (PL011) |
 
-#### Serial Debug Wiring
+UART0 is configured by the GPU firmware via `enable_uart=1` and `dtoverlay=disable-bt` in config.txt.
 
-Connect a **3.3V** USB-to-serial adapter (CP2102 or FTDI FT232RL):
+#### Serial Adapter
+
+A 6-pin USB-to-serial adapter with RTS/CTS and DTR is required for full chainloader functionality. Example: [DSD TECH SH-U09B3](https://www.amazon.com/dp/B09KXT6W46) (CP2102N, USB-C, 3.3V TTL).
+
+The extra pins provide:
+- **RTS/CTS** — hardware flow control prevents RX overrun during chainloader transfers
+- **DTR** — connected to the Pi 4's GLOBAL_EN pin for software-controlled resets (no power cycling)
+
+#### Serial Wiring
 
 ```
-Pi 4 Pin 7  (GPIO 4 / UART3 TX) → Adapter RX
-Pi 4 Pin 29 (GPIO 5 / UART3 RX) → Adapter TX
-Pi 4 Pin 9  (GND)                → Adapter GND
+Pi 4 Pin 8  (GPIO 14 / UART0 TX)  → Adapter RX
+Pi 4 Pin 10 (GPIO 15 / UART0 RX)  → Adapter TX
+Pi 4 Pin 9  (GND)                  → Adapter GND
+Pi 4 GLOBAL_EN                     → Adapter DTR (active-low reset)
+Pi 4 (RTS pin, if available)       → Adapter CTS
+Adapter RTS                        → Pi 4 (CTS pin, if available)
 ```
 
 **Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO. Do not connect the adapter's VCC pin.
+
+DTR reset from Python:
+```python
+port.dtr = True   # assert DTR → GLOBAL_EN LOW → Pi resets
+time.sleep(0.1)
+port.dtr = False   # deassert DTR → GLOBAL_EN HIGH → Pi boots
+```
+
+Open the serial port with `dsrdtr=False` to prevent the default DTR assertion from resetting the Pi on connect.
 
 ## Current Status
 
@@ -411,15 +446,17 @@ Pi 4 Pin 9  (GND)                → Adapter GND
 | **HTTP** | Implemented | GET parser, 200/404 responses, cooperative poll loop |
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
-| **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART3, MMU — entering hardware validation |
-| **TLS/HTTPS** | Planned | TLS 1.3 with ARMv8 crypto extensions |
+| **Chainloader** | Functional | Intel HEX over UART0, ACK/NAK, DTR reset — awaiting flow control adapter |
+| **GENET Ethernet** | In progress | UMAC reset, RGMII, PHY auto-negotiation, RX proven — TX DMA under investigation |
+| **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART0, mailbox, MMU |
 
-**Kernel image:** 25 KB (text + rodata + data; BSS: 32.6 MB runtime)
+**Kernel image:** 27 KB (text + rodata + data; BSS: 32.6 MB runtime)
 
 **Test coverage:**
-- 363 unit tests + 153 functional tests + 39 fuzz seeds = **555 total**
+- 394 assembly tests + 71 Python tests + 153 functional tests + 39 fuzz seeds = **657 total**
 - All tests pass on both QEMU 7.2 and QEMU 11.0-rc0
-- Complete branch coverage on all production code
+- 100% branch coverage, every test has explicit assertions
+- 100% mutation score on Intel HEX library (mutmut)
 
 ### MMU and Caches
 
@@ -431,31 +468,36 @@ The kernel enables the MMU with identity-mapped page tables immediately after BS
 
 ## Work in Progress
 
-### Pi 4 Hardware Integration
+### UART Chainloader
 
-Entering hardware validation — all software is built, UART chainloader is ready, waiting for serial adapter.
-
-| Item | Status | Notes |
-|------|--------|-------|
-| **EL2→EL1 drop** | Done | Pi 4 boots at EL2; boot.S configures HCR/CNTHCTL/CPTR and erets to EL1 |
-| **MMU + caches** | Done | 4 GB identity map, Normal RAM + Device peripherals |
-| **UART3 on GPIO 4/5** | Done | GPIO driver + UART base switching in main.S |
-| **UART chainloader** | Done | 671 bytes, receives kernels over serial at 115200 |
-| **USB CDC-ECM** | Built, untested on hardware | DWC2 + USB enum + CDC-ECM — needs hardware validation |
-| **GENET Ethernet driver** | Planned | Native Gigabit MAC, replaces USB CDC-ECM path |
-| **Fan control** | Planned | GPIO 14 output + mailbox temperature reading |
-
-### HTTPS / TLS 1.3
+The chainloader receives kernels over UART0 using Intel HEX format with per-line checksums and ACK/NAK flow control. It eliminates the SD card swap cycle during development.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **AES-GCM** | Planned | ARMv8 crypto extensions (AESE/AESD/AESMC hardware instructions) |
-| **SHA-256** | Planned | ARMv8 SHA instructions (SHA256H/SHA256SU0/SHA256SU1) |
-| **X25519** | Planned | Key exchange (Curve25519 ECDH) |
-| **Ed25519/RSA** | Planned | Server certificate authentication |
-| **TLS 1.3 handshake** | Planned | RFC 8446 state machine |
-| **Certificate parsing** | Planned | X.509 / ASN.1 DER |
-| **HTTPS integration** | Planned | TLS record layer between TCP and HTTP |
+| **Intel HEX protocol** | Done | Per-line checksums, ACK/NAK, 3 retries on NAK |
+| **PL011 no-FIFO mode** | Done | 1-byte holding register, cl_putc polls BUSY until transmitted |
+| **Transfer** | Working | 27 KB kernel, 1724 records, zero NAKs, ~12 seconds at 115200 |
+| **BOOT detection** | In progress | Post-transfer handoff unreliable — RX overrun during TX |
+| **Hardware flow control** | Pending | CP2102N adapter with RTS/CTS on order — eliminates RX overrun |
+| **DTR reset** | Pending | DTR → GLOBAL_EN for software-controlled Pi reset from host |
+
+With DTR reset and hardware flow control, the development loop becomes fully automated: build → reset Pi via DTR → send kernel over UART with flow control → boot → observe output. No SD card swaps, no power cycling.
+
+A standalone UART diagnostic (`chainload/diag.S`) proved zero PL011 hardware errors for 2048 bytes of sustained traffic. Full PL011 register reference at `hw_test/uart_test/PL011_REFERENCE.md`.
+
+### GENET Gigabit Ethernet
+
+Native GENET v5 driver for the BCM2711's built-in Gigabit MAC, replacing the USB CDC-ECM path.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **UMAC reset** | Done | Reset sequence, RGMII configuration |
+| **PHY auto-negotiation** | Done | Gigabit link established |
+| **RX path** | Proven | Receives frames from Chromebook (ping, ARP) via direct boot test |
+| **TX path** | Blocked | DMA data engine won't fetch from RAM — all registers match U-Boot |
+| **U-Boot comparison** | Done | Bidirectional ping works under U-Boot, confirming hardware is functional |
+
+The TX DMA issue is the current focus. U-Boot proves the hardware works; the driver's DMA descriptor setup needs investigation. Compiled U-Boot GENET assembly is available for register-level comparison.
 
 ### Design Decisions
 
@@ -477,10 +519,10 @@ The network stack is composed of plain functions that operate on buffers — not
 
 - **Firewall/filter** — inspects packets at the IP level, forwards or drops. No TCP state needed. Defends against DoS by rejecting traffic before it reaches the web server.
 - **Load balancer** — parses through TCP, rewrites headers, distributes connections across multiple web server nodes. Needs connection tracking but not HTTP parsing.
-- **Web server** — the current project. Handles TLS, TCP, serves HTTPS responses. No persistent storage — reads files from the NAS over the local network.
+- **Web server** — the current project. Handles TCP, serves HTTP responses. No persistent storage — reads files from the NAS over the local network.
 - **NAS** — serves a fixed set of files over a minimal read-only protocol. No directory paths, no filesystem traversal — files identified by index. Nothing to steal, nothing to overwrite.
 
-Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt. With TLS termination on the web server node and hardware AES-GCM, encryption adds negligible latency.
+Each device runs bare-metal with fixed allocations — no OS, no heap, no dynamic loading. An attacker who compromises one node finds no writable filesystem to persist on, no shell to escalate through, and no heap to corrupt.
 
 The protocol stack is board-independent — different boards can fill different roles, all running the same tested library code.
 
