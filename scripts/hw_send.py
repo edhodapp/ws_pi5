@@ -96,9 +96,10 @@ def _send_eof(port, record):
 def _send_one_record(port, record, rec_idx):
     """Send a single HEX record, retrying on NAK."""
     for retry in range(MAX_RETRIES):
+        print(f"S{rec_idx:04d} ", end='', flush=True)
         port.write((record + '\r\n').encode('ascii'))
         port.flush()
-        ack = port.read(1)
+        ack = _read_ack(port)
         if ack == b'+':
             return True
         if ack == b'-':
@@ -108,6 +109,45 @@ def _send_one_record(port, record, rec_idx):
         return False
     print(f"\n  NAK on record {rec_idx}, giving up", flush=True)
     return False
+
+
+def _read_ack(port):
+    """Read ACK/NAK, consuming any debug output before it.
+
+    Debug output from the chainloader is framed between '/' chars:
+    /XX/ where XX is hex debug data. These are printed and discarded.
+    """
+    debug_buf = ""
+    while True:
+        byte = port.read(1)
+        if not byte:
+            return byte
+        if byte in (b'+', b'-'):
+            if debug_buf:
+                print(f"\n  PI: {debug_buf.rstrip()}", flush=True)
+            return byte
+        if byte == b'/':
+            quoted = _read_quoted(port)
+            if quoted is not None:
+                print(f"/{quoted}/", end='', flush=True)
+            continue
+        char = byte.decode('ascii', errors='ignore')
+        debug_buf += char
+        if char == '\n':
+            print(f"\n  PI: {debug_buf.rstrip()}", flush=True)
+            debug_buf = ""
+
+
+def _read_quoted(port):
+    """Read bytes until closing '/' delimiter. Returns content string."""
+    buf = ""
+    while True:
+        byte = port.read(1)
+        if not byte:
+            return buf if buf else None
+        if byte == b'/':
+            return buf
+        buf += byte.decode('ascii', errors='ignore')
 
 
 def _log_nak(rec_idx, retry):
@@ -131,14 +171,28 @@ def wait_for_boot(port):
     """Wait for BOOT, leaving kernel output in buffer."""
     port.timeout = 5
     buf = b''
-    while len(buf) < 64:
+    plus_count = 0
+    while len(buf) < 8192:
         byte = port.read(1)
         if not byte:
             break
+        if byte == b'/':
+            quoted = _read_quoted(port)
+            if quoted is not None:
+                print(f"/{quoted}/", end='', flush=True)
+            continue
         buf += byte
+        if byte == b'+':
+            plus_count += 1
         if b'BOOT' in buf:
-            print("RX: BOOT", flush=True)
+            tail = buf[buf.index(b'BOOT'):]
+            print(f"RX: {plus_count} extra '+', then {tail!r}",
+                  flush=True)
             return True
+    if buf:
+        non_plus = bytes(b for b in buf if b != ord('+'))
+        print(f"RX: {plus_count} '+' bytes, non-plus: {non_plus!r}",
+              flush=True)
     return False
 
 

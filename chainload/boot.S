@@ -102,8 +102,8 @@ _start:
     str     w0, [x19, #PL011_IBRD]         /* 48 MHz / (16 × 115200) = 26 */
     mov     w0, #3
     str     w0, [x19, #PL011_FBRD]         /* fractional = 3 */
-    mov     w0, #0x70
-    str     w0, [x19, #PL011_LCRH]         /* 8N1, FIFOs enabled */
+    mov     w0, #0x60
+    str     w0, [x19, #PL011_LCRH]         /* 8N1, FIFOs disabled (1-byte mode) */
     mov     w0, #0x301
     str     w0, [x19, #PL011_CR]           /* enable UART, TX, RX */
 
@@ -125,9 +125,27 @@ _start:
     ldr     x25, =hex_line_buf             /* line buffer */
     mov     x24, xzr                        /* extended base address */
     mov     w20, wzr                        /* total bytes received */
+    mov     w21, wzr                        /* record counter */
 
 .Lhex_loop:
     bl      cl_getline                      /* w26 = line length */
+    add     w21, w21, #1                    /* count every loop iteration */
+    /* Debug: output /XX NNNN/ (XX=w26, NNNN=iteration count) */
+    mov     w0, #'/'
+    bl      cl_putc
+    lsr     w0, w26, #4
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    and     w0, w26, #0xF
+    bl      cl_print_nibble
+    mov     w0, #' '
+    bl      cl_putc
+    mov     w0, w21
+    bl      cl_print_hex16
+    mov     w0, #'/'
+    bl      cl_putc
+    cmp     w26, #11                        /* minimum: :LLAAAATTCC = 11 chars */
+    b.lt    .Lhex_eof                       /* short/empty line → treat as EOF */
     bl      cl_parse_hex_record             /* w0: 0=data, 1=EOF, -1=error */
 
     tbnz    w0, #31, .Lhex_nak             /* negative = error → NAK */
@@ -144,12 +162,44 @@ _start:
     b       .Lrecv_done
 
 .Lhex_nak:
+    /* Debug: print "?XX:LL line_echo\r\n" before NAK */
+    /* XX=checksum, LL=line length (w26) */
+    mov     w0, #'?'
+    bl      cl_putc
+    lsr     w0, w27, #4
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    and     w0, w27, #0xF
+    bl      cl_print_nibble
+    mov     w0, #':'
+    bl      cl_putc
+    lsr     w0, w26, #4
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    and     w0, w26, #0xF
+    bl      cl_print_nibble
+    mov     w0, #' '
+    bl      cl_putc
+    /* Echo received line buffer */
+    mov     w9, #0
+.Lnak_echo:
+    cmp     w9, w26
+    b.ge    .Lnak_echo_done
+    ldrb    w0, [x25, w9, uxtw]
+    bl      cl_putc
+    add     w9, w9, #1
+    b       .Lnak_echo
+.Lnak_echo_done:
+    mov     w0, #0x0D
+    bl      cl_putc
+    mov     w0, #0x0A
+    bl      cl_putc
     mov     w0, #'-'
     bl      cl_putc
     b       .Lhex_loop                      /* host retransmits */
 
 .Lrecv_done:
-    /* --- 1) Print "BOOT\r\n" via direct cl_putc --- */
+    /* --- 1) Print "BOOT:NNNN\r\n" (NNNN = record count hex) --- */
     mov     w0, #'B'
     bl      cl_putc
     mov     w0, #'O'
@@ -158,6 +208,10 @@ _start:
     bl      cl_putc
     mov     w0, #'T'
     bl      cl_putc
+    mov     w0, #':'
+    bl      cl_putc
+    mov     w0, w21
+    bl      cl_print_hex16
     mov     w0, #0x0D
     bl      cl_putc
     mov     w0, #0x0A
@@ -212,12 +266,20 @@ _start:
  * UART helpers
  * ======================================================================= */
 
+.equ PL011_FR_BUSY,    0x08    /* UART busy (bit 3) */
+
 .global cl_putc
 cl_putc:
+    /* Wait for TX holding register empty */
 1:  ldr     w1, [x19, #PL011_FR]
     tst     w1, #PL011_FR_TXFF
     b.ne    1b
+    /* Write byte */
     str     w0, [x19, #PL011_DR]
+    /* Wait for byte fully transmitted */
+2:  ldr     w1, [x19, #PL011_FR]
+    tst     w1, #PL011_FR_BUSY
+    b.ne    2b
     ret
 
 cl_puts:
@@ -231,6 +293,32 @@ cl_puts:
 .Lpsd:
     ldp     x29, x30, [sp], #16
     ret
+
+/* Print w0 low 16 bits as 4 hex chars */
+cl_print_hex16:
+    str     x30, [sp, #-16]!
+    mov     w9, w0
+    lsr     w0, w9, #12
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    lsr     w0, w9, #8
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    lsr     w0, w9, #4
+    and     w0, w0, #0xF
+    bl      cl_print_nibble
+    and     w0, w9, #0xF
+    bl      cl_print_nibble
+    ldr     x30, [sp], #16
+    ret
+
+cl_print_nibble:
+    cmp     w0, #10
+    b.hs    1f
+    add     w0, w0, #'0'
+    b       cl_putc
+1:  add     w0, w0, #('A' - 10)
+    b       cl_putc
 
 .global cl_getc
 cl_getc:
