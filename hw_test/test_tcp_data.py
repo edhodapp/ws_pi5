@@ -58,7 +58,9 @@ class TestTCPData:
                 except socket.timeout:
                     pytest.fail("Server did not close connection")
 
-            assert len(response) > 0, "Got EOF with no data"
+            assert b"HTTP/1." in response, (
+                f"Expected HTTP response, got {response[:40]!r}"
+            )
         finally:
             s.close()
 
@@ -102,17 +104,22 @@ class TestTCPData:
             s.close()
 
     def test_rapid_connect_disconnect(self, pi4_addr):
-        """100 rapid connect/disconnect cycles."""
+        """100 rapid connect/disconnect cycles — most should succeed."""
+        connected = 0
+        refused = 0
         for i in range(100):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(TEST_TIMEOUT)
             try:
                 s.connect(pi4_addr)
+                connected += 1
                 s.close()
             except (ConnectionRefusedError, socket.timeout):
-                # Some connections may be refused under load — that's OK
-                # as long as the server doesn't crash
-                pass
+                refused += 1
+
+        assert connected >= 50, (
+            f"Too many refused: {connected} connected, {refused} refused"
+        )
 
         # Server should still be alive
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

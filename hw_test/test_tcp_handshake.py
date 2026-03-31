@@ -28,18 +28,17 @@ class TestTCPHandshake:
         finally:
             s.close()
 
-    def test_synack_has_mss(self, pi4_addr):
-        """SYN-ACK includes MSS option (Kind=2)."""
+    def test_handshake_then_http_request(self, pi4_addr):
+        """Handshake completes and serves a valid HTTP response."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TEST_TIMEOUT)
         try:
             s.connect(pi4_addr)
-            # We can't easily inspect SYN-ACK options via normal sockets.
-            # This test verifies the connection works, which requires
-            # MSS negotiation. Detailed option inspection needs raw sockets.
             s.sendall(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
             data = s.recv(1024)
-            assert len(data) > 0, "No response after handshake"
+            assert b"HTTP/1." in data, (
+                f"Expected HTTP response, got {data[:40]!r}"
+            )
         finally:
             s.close()
 

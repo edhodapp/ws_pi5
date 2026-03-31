@@ -12,6 +12,7 @@
 - Failure handling code that is never tested is a liability — it can generate new errors when it finally runs.
 - Prefer passing base addresses as parameters over hardcoded constants — enables dependency injection at the ISA level.
 - At the end of EVERY stage: branch coverage (both sides), functional tests (ALL new integration paths — do NOT skip any), PICT review, fuzz review. Implement all tests before committing.
+- **Every test branch MUST have an assertion.** 100% branch coverage without assertions is worthless — it's just running code, not testing it. Never call a function and unconditionally pass. Every `test_pass`/`test_fail` must be gated by an explicit check on the return value or observable side effect. In Python, every `assert` must check a meaningful value, not just "didn't throw." Mutation testing is the proof: if a mutant survives, the test is broken.
 
 ## Git Workflow
 - Trunk-based development: commit directly to `main`, push after each group of changes.

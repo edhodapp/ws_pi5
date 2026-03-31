@@ -10883,9 +10883,14 @@ test_tcp_persist_cb_no_send_fn:
     mov     x3, #0
     bl      tcp_set_send_ctx
 
-    /* Should not crash */
+    /* Should bail early without modifying persist_shift */
     mov     x0, x21
     bl      tcp_persist_cb
+
+    /* Assert: persist_shift still 1 (callback didn't touch it) */
+    ldrb    w0, [x21, #TCONN_PERSIST_SHIFT]
+    cmp     w0, #1
+    b.ne    .Lfail_tcp_pcns
 
     ldr     x0, =name_tcp_pcns
     bl      test_pass

@@ -90,6 +90,13 @@ class TestHTTPConcurrent:
         for t in threads:
             t.join(timeout=TEST_TIMEOUT * 2)
 
+        # Assert on burst results — at least half should succeed
+        burst_ok = sum(1 for r in results
+                       if r and r['error'] is None and r['status'] == 200)
+        assert burst_ok >= n // 2, (
+            f"Burst: only {burst_ok}/{n} succeeded"
+        )
+
         # Sequential follow-up
         time.sleep(0.5)
         conn = http.client.HTTPConnection(PI4_IP, PI4_HTTP_PORT,

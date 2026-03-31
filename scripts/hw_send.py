@@ -112,42 +112,9 @@ def _send_one_record(port, record, rec_idx):
 
 
 def _read_ack(port):
-    """Read ACK/NAK, consuming any debug output before it.
-
-    Debug output from the chainloader is framed between '/' chars:
-    /XX/ where XX is hex debug data. These are printed and discarded.
-    """
-    debug_buf = ""
-    while True:
-        byte = port.read(1)
-        if not byte:
-            return byte
-        if byte in (b'+', b'-'):
-            if debug_buf:
-                print(f"\n  PI: {debug_buf.rstrip()}", flush=True)
-            return byte
-        if byte == b'/':
-            quoted = _read_quoted(port)
-            if quoted is not None:
-                print(f"/{quoted}/", end='', flush=True)
-            continue
-        char = byte.decode('ascii', errors='ignore')
-        debug_buf += char
-        if char == '\n':
-            print(f"\n  PI: {debug_buf.rstrip()}", flush=True)
-            debug_buf = ""
-
-
-def _read_quoted(port):
-    """Read bytes until closing '/' delimiter. Returns content string."""
-    buf = ""
-    while True:
-        byte = port.read(1)
-        if not byte:
-            return buf if buf else None
-        if byte == b'/':
-            return buf
-        buf += byte.decode('ascii', errors='ignore')
+    """Read ACK (+) or NAK (-) byte from chainloader."""
+    ack = port.read(1)
+    return ack
 
 
 def _log_nak(rec_idx, retry):
@@ -171,27 +138,16 @@ def wait_for_boot(port):
     """Wait for BOOT, leaving kernel output in buffer."""
     port.timeout = 5
     buf = b''
-    plus_count = 0
-    while len(buf) < 8192:
+    while len(buf) < 64:
         byte = port.read(1)
         if not byte:
             break
-        if byte == b'/':
-            quoted = _read_quoted(port)
-            if quoted is not None:
-                print(f"/{quoted}/", end='', flush=True)
-            continue
         buf += byte
-        if byte == b'+':
-            plus_count += 1
         if b'BOOT' in buf:
-            tail = buf[buf.index(b'BOOT'):]
-            print(f"RX: {plus_count} extra '+', then {tail!r}",
-                  flush=True)
+            print("RX: BOOT", flush=True)
             return True
     if buf:
-        non_plus = bytes(b for b in buf if b != ord('+'))
-        print(f"RX: {plus_count} '+' bytes, non-plus: {non_plus!r}",
+        print(f"RX raw ({len(buf)} bytes): {buf!r}",
               flush=True)
     return False
 

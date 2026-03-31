@@ -128,7 +128,8 @@ class TestSendHexRecords:
         port.read.return_value = b'+'
         # Need 100+ data records for rec_idx % 100 == 0 branch
         records = kernel_to_hex_records(b'\x00' * 1616)
-        hw_send.send_hex_records(port, records, 1616)
+        result = hw_send.send_hex_records(port, records, 1616)
+        assert result is True
         out = capsys.readouterr().out
         assert '/' in out
 
@@ -202,8 +203,10 @@ class TestReadOutputByte:
     def test_wait_sends_ff(self):
         port = make_port()
         port.read.return_value = b'\n'
-        hw_send._read_output_byte(port, "WAIT")
+        result, buf = hw_send._read_output_byte(port, "WAIT")
         port.write.assert_called_with(b'\xff')
+        assert result is None
+        assert buf == ""
 
     def test_cr_resets(self):
         port = make_port()
