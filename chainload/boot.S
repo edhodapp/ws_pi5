@@ -93,8 +93,15 @@ _start:
     str     w0, [x19, #PL011_FBRD]         /* fractional = 3 */
     mov     w0, #0x70
     str     w0, [x19, #PL011_LCRH]         /* 8N1, FIFOs enabled */
-    mov     w0, #0x301
-    str     w0, [x19, #PL011_CR]           /* enable UART, TX, RX */
+
+    /* Configure GPIO 16 (CTS0) and GPIO 17 (RTS0) to ALT3 */
+    ldr     x0, =0xFE200000               /* GPIO_BASE */
+    ldr     w1, [x0, #0x04]               /* GPFSEL1 (GPIO 10-19) */
+    orr     w1, w1, #0xFC0000             /* bits [23:18] = ALT3 for GPIO 16,17 */
+    str     w1, [x0, #0x04]
+
+    mov     w0, #0xC301
+    str     w0, [x19, #PL011_CR]           /* enable UART, TX, RX, CTSEN, RTSEN */
 
     /* Drain any garbage from RX FIFO after UART init */
 .Lrx_drain:
@@ -123,27 +130,27 @@ _start:
     tbnz    w0, #31, .Lhex_nak             /* negative = checksum error */
     cbnz    w0, .Lhex_eof                  /* 1 = EOF record */
 
-    /* ACK: send 2-byte record index (big-endian) */
-    lsr     w0, w21, #8
+    /* ACK: send line length + checksum byte */
+    mov     w0, w26
     bl      cl_putc
-    and     w0, w21, #0xFF
+    mov     w0, w27
     bl      cl_putc
     add     w21, w21, #1
     b       .Lhex_loop
 
 .Lhex_eof:
-    lsr     w0, w21, #8
+    mov     w0, w26
     bl      cl_putc
-    and     w0, w21, #0xFF
+    mov     w0, w27
     bl      cl_putc
     add     w21, w21, #1
     b       .Lrecv_done
 
 .Lhex_nak:
-    /* NAK: send 0xFF 0xFF */
-    mov     w0, #0xFF
+    /* NAK: send line length + checksum XOR 0xFF */
+    mov     w0, w26
     bl      cl_putc
-    mov     w0, #0xFF
+    eor     w0, w27, #0xFF
     bl      cl_putc
     b       .Lhex_loop
 

@@ -121,7 +121,7 @@ def main():
             os.close(fd)
             return 1
 
-    # Send records — set VMIN=2 for blocking 2-byte ACK reads
+    # Send records — 2-byte ACK: line length + checksum byte
     attrs = termios.tcgetattr(fd)
     attrs[6][termios.VMIN] = 2
     attrs[6][termios.VTIME] = 50    # 5 second timeout
@@ -129,23 +129,32 @@ def main():
 
     t_start = time.time()
     for i, record in enumerate(records):
+        expected = int(record[-2:], 16)
         os.write(fd, (record + '\r\n').encode('ascii'))
+        termios.tcdrain(fd)
         ack = os.read(fd, 2)
         if len(ack) != 2:
             print(f"\n  Timeout on record {i}", flush=True)
             os.close(fd)
             return 1
-        idx = (ack[0] << 8) | ack[1]
-        if idx == 0xFFFF:
-            print(f"\n  NAK on record {i}", flush=True)
+        line_len, cksum = ack[0], ack[1]
+        if cksum == expected:
+            pass  # ACK
+        elif cksum == (expected ^ 0xFF):
+            print(f"\n  NAK on record {i} (len={line_len})",
+                  flush=True)
             os.close(fd)
             return 1
-        if idx != i:
-            print(f"\n  DESYNC at record {i}: Pi says {idx}", flush=True)
+        else:
+            print(f"\n  MISMATCH at record {i}: "
+                  f"exp_cksum=0x{expected:02X} "
+                  f"got_cksum=0x{cksum:02X} "
+                  f"line_len={line_len}", flush=True)
             os.close(fd)
             return 1
-        if i % 200 == 0:
-            print(f"\r  {i}/{len(records)}", end='', flush=True)
+        if i < 20 or i % 200 == 0:
+            print(f"  {i}: len={line_len} cksum=0x{cksum:02X}",
+                  flush=True)
 
     elapsed = time.time() - t_start
     print(f"\r  {len(records)}/{len(records)} in {elapsed:.1f}s", flush=True)

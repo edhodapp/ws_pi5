@@ -116,6 +116,7 @@ cl_parse_hex_record:
     add     w27, w27, w0
     and     w27, w27, #0xFF
     cbnz    w27, .Lparse_err          /* sum must be 0 */
+    mov     w27, w0                   /* save checksum byte for ACK */
 
     /* Dispatch on record type */
     cbz     w5, .Ltype_data           /* Type 00: data */
