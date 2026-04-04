@@ -8,15 +8,15 @@
  * eliminating cache coherency issues. At 115200 baud the CPU is idle >99%
  * of the time, so caching adds complexity for no benefit.
  *
- * Waits for a 0xFF sync byte over UART0 (GPIO 14/15), receives a kernel image
- * in Intel HEX format with per-line checksums and ACK/NAK flow control,
- * then optionally arms a PM watchdog and jumps to 0x80000.
+ * Receives a kernel image in Intel HEX format over UART0 (GPIO 14/15)
+ * with per-line checksums and ACK/NAK flow control, then jumps to 0x80000.
+ * Uses CTS/RTS hardware flow control (GPIO 16/17).
  *
  * Protocol:
  *   1. Chainloader prints "READY\r\n" when initialized
  *   2. Host sends Intel HEX records (ASCII, \r\n terminated)
- *   3. Chainloader verifies checksum, sends '+' (ACK) or '-' (NAK)
- *   4. On EOF record: send '+', print "BOOT:NNNN\r\n", jump to 0x80000
+ *   3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK (len + cksum^0xFF)
+ *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x80000
  *   5. Host resets Pi via DTR (GLOBAL_EN) when needed
  */
 
