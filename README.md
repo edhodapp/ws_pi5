@@ -18,7 +18,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 394 assembly tests + 71 Python tests + 153 functional tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 379 assembly tests + 34 Python tests + 153 functional tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -41,7 +41,8 @@ Boots on a Raspberry Pi 4, brings up Ethernet, and serves HTTP on port 80. The f
 
 ```
 boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
-  main.S        uart_init → GPIO mux (UART3) → dwc2_init → cdc_ecm_init
+  main.S        uart_init → dwc2_init → cdc_ecm_init (QEMU/Pi 3)
+                uart_init → genet_init (Pi 4)
                   → timer_pool_init → ip_reasm_init → icmp_init
                   → tcp_init → tcp_listen(80) → tcp_set_timer_pool
                   → tcp_start_reaper → tcp_set_send_ctx
@@ -89,7 +90,7 @@ include/            Shared constants and macros (.inc files)
   vmio.inc            VMIO engine constants
 platform/pi/        Raspberry Pi 4 (BCM2711)
   boot.S              Entry point — EL2→EL1 drop, MMU setup, park cores 1-3, stack, BSS
-  main.S              GPIO mux, UART3 init, DWC2 USB → CDC-ECM, net_loop, http_poll
+  main.S              uart_init, GENET (Pi 4) or DWC2 USB → CDC-ECM (Pi 3), net_loop, http_poll
   include/            Pi-specific constants
     platform.inc        PERIPH_BASE (0xFE for Pi 4, 0x3F for QEMU testing)
     dwc2.inc            DWC2 USB host register map
@@ -115,8 +116,8 @@ chainload/          UART chainloader for Pi 4 development
   chainload.ld        Linked at 0x4000000 (above kernel footprint)
 tests/              Unit and functional tests
   test_main.S         Test runner (boot, MMU, dispatch, pass/fail reporting)
-  test_*.S            Shared protocol stack tests (353 tests including hex_parse)
-  pi/                 Pi-specific driver tests (41 tests)
+  test_*.S            Shared protocol stack tests (341 tests including hex_parse)
+  pi/                 Pi-specific driver tests (38 tests)
     test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
     test_gpio.S         GPIO function select tests (5 tests)
     test_dwc2.S         DWC2 USB host tests
@@ -142,13 +143,16 @@ hw_test/            Hardware test scripts for Pi 4 test fixture
 Requires the AArch64 cross-toolchain and QEMU:
 
 ```
-sudo apt install gcc-aarch64-linux-gnu qemu-system-arm ninja-build
+sudo apt install gcc-aarch64-linux-gnu qemu-system-arm qemu-user-static
 ```
 
-For functional tests, install [PICT](https://github.com/microsoft/pict) (Microsoft's pairwise/combinatorial testing tool):
+For functional tests, build [PICT](https://github.com/microsoft/pict) (Microsoft's pairwise/combinatorial testing tool) from source:
 
 ```
-sudo apt install pict
+sudo apt install cmake
+git clone --depth 1 https://github.com/microsoft/pict.git /tmp/pict-build
+cd /tmp/pict-build && cmake -DCMAKE_INSTALL_PREFIX=$HOME/.local -B build && cmake --build build -j$(nproc)
+cp /tmp/pict-build/build/cli/pict $HOME/.local/bin/
 ```
 
 ### Build Targets
@@ -158,7 +162,7 @@ sudo apt install pict
 | **Pi 4** (QEMU testing) | `make` | `make test` | Default. Uses QEMU raspi3b with Pi 3 peripheral addresses |
 | **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART0 on GPIO 14/15 |
 
-Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on both QEMU 7.2 and QEMU 11.0-rc0.
+Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on QEMU 7.2, 8.2, and 11.0-rc0.
 
 Build the kernel image:
 
@@ -206,17 +210,17 @@ The chainloader protocol:
 4. Chainloader verifies each record's checksum, sends `+` (ACK) or `-` (NAK with retry)
 5. On EOF record: chainloader prints `BOOT`, jumps to 0x80000
 
-The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The host-side sender (`hw_send.py`) has 38 unit tests and the HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
+The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
 
-**Status:** Transfer of 27 KB kernel completes reliably (1724 records, zero NAKs). Currently debugging BOOT detection — awaiting a CP2102N adapter with RTS/CTS hardware flow control to eliminate RX overrun during simultaneous TX/RX on the PL011 UART.
+**Status:** Transfer of 27 KB kernel completes reliably (1724 records, zero NAKs). DTR reset (CP2102N → GLOBAL_EN) is working for automated Pi reboot from the host.
 
 ## Testing
 
 ### Unit Tests
 
-394 assembly tests run on QEMU `raspi3b`. The shared tests (353) cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, and Intel HEX parsing. Pi-specific tests (41) cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+379 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, and Intel HEX parsing. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
-71 Python unit tests cover the host-side tools (hw_send.py, intel_hex.py) with 100% branch coverage.
+34 Python unit tests cover the Intel HEX library (intel_hex.py) with 100% branch coverage and 100% mutation score.
 
 The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
 
@@ -446,15 +450,15 @@ Open the serial port with `dsrdtr=False` to prevent the default DTR assertion fr
 | **HTTP** | Implemented | GET parser, 200/404 responses, cooperative poll loop |
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
-| **Chainloader** | Functional | Intel HEX over UART0, ACK/NAK, DTR reset — awaiting flow control adapter |
+| **Chainloader** | Functional | Intel HEX over UART0, ACK/NAK, DTR reset (CP2102N → GLOBAL_EN) |
 | **GENET Ethernet** | In progress | UMAC reset, RGMII, PHY auto-negotiation, RX proven — TX DMA under investigation |
 | **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART0, mailbox, MMU |
 
 **Kernel image:** 27 KB (text + rodata + data; BSS: 32.6 MB runtime)
 
 **Test coverage:**
-- 394 assembly tests + 71 Python tests + 153 functional tests + 39 fuzz seeds = **657 total**
-- All tests pass on both QEMU 7.2 and QEMU 11.0-rc0
+- 379 assembly tests + 34 Python tests + 153 functional tests + 39 fuzz seeds = **605 total**
+- All tests pass on QEMU 7.2, 8.2, and 11.0-rc0
 - 100% branch coverage, every test has explicit assertions
 - 100% mutation score on Intel HEX library (mutmut)
 
@@ -477,11 +481,11 @@ The chainloader receives kernels over UART0 using Intel HEX format with per-line
 | **Intel HEX protocol** | Done | Per-line checksums, ACK/NAK, 3 retries on NAK |
 | **PL011 no-FIFO mode** | Done | 1-byte holding register, cl_putc polls BUSY until transmitted |
 | **Transfer** | Working | 27 KB kernel, 1724 records, zero NAKs, ~12 seconds at 115200 |
-| **BOOT detection** | In progress | Post-transfer handoff unreliable — RX overrun during TX |
-| **Hardware flow control** | Pending | CP2102N adapter with RTS/CTS on order — eliminates RX overrun |
-| **DTR reset** | Pending | DTR → GLOBAL_EN for software-controlled Pi reset from host |
+| **BOOT detection** | In progress | Post-transfer handoff — investigating FIFO duplicate at record 14 |
+| **Hardware flow control** | Pending | CP2102N adapter has RTS/CTS — wiring to PL011 CTS/RTS pending |
+| **DTR reset** | Done | CP2102N DTR → GLOBAL_EN for software-controlled Pi reset from host |
 
-With DTR reset and hardware flow control, the development loop becomes fully automated: build → reset Pi via DTR → send kernel over UART with flow control → boot → observe output. No SD card swaps, no power cycling.
+With DTR reset working, the development loop is: build → reset Pi via DTR → send kernel over UART → boot → observe output. No SD card swaps, no power cycling. Hardware flow control (RTS/CTS) will eliminate the remaining RX overrun during simultaneous TX/RX.
 
 A standalone UART diagnostic (`chainload/diag.S`) proved zero PL011 hardware errors for 2048 bytes of sustained traffic. Full PL011 register reference at `hw_test/uart_test/PL011_REFERENCE.md`.
 
