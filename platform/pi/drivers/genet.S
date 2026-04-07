@@ -42,6 +42,10 @@ genet_init:
     mov     x20, x1                 /* x20 = genet_state */
     mov     x21, x2                 /* x21 = RX pool addr */
 
+    /* x27 = UART DR for progress markers */
+    movz    x27, #0xFE20, lsl #16
+    movk    x27, #0x1000
+
     /* Save RX pool address in state */
     str     x21, [x20, #GENET_STATE_RX_POOL]
 
@@ -49,6 +53,8 @@ genet_init:
     add     x22, x19, #5, lsl #12  /* x22 = GENET + 0x5000 */
 
     /* --- UMAC reset --- */
+    mov     w0, #'A'
+    str     w0, [x27]
     mov     w0, #2
     str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
     mov     w0, #10000
@@ -88,11 +94,15 @@ genet_init:
     str     w0, [x19, #GENET_INTRL2_1_CLEAR]
 
     /* --- RGMII interface --- */
+    mov     w0, #'B'
+    str     w0, [x27]
     /* Match PiOS: 0x00F00050 */
     ldr     w0, =0x00F00050
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
+    mov     w0, #'C'
+    str     w0, [x27]
     mov     w0, #PHY_BMCR
     mov     w1, #0x8000
     bl      genet_mdio_write
@@ -107,6 +117,8 @@ genet_init:
     b       .Linit_fail
 
 .Lphy_rst_ok:
+    mov     w0, #'D'
+    str     w0, [x27]
     /* --- Configure BCM54213PE RGMII timing via shadow registers --- */
 
     /* AUXCTL shadow 7: enable RGMII RXC-RXD skew
@@ -138,6 +150,8 @@ genet_init:
     bl      genet_mdio_write
 
     /* Auto-negotiate */
+    mov     w0, #'E'
+    str     w0, [x27]
     mov     w0, #PHY_BMCR
     ldr     w1, =0x1340
     bl      genet_mdio_write
@@ -153,6 +167,8 @@ genet_init:
     b       .Linit_fail
 
 .Lan_ok:
+    mov     w0, #'F'
+    str     w0, [x27]
     /* Check link */
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
@@ -165,6 +181,8 @@ genet_init:
     and     w23, w0, #7             /* w23 = speed code */
 
     /* --- Disable DMA --- */
+    mov     w0, #'G'
+    str     w0, [x27]
     str     wzr, [x22, #TDMA_DMA_CTRL_OFS]
     str     wzr, [x19, #RDMA_DMA_CTRL]
 
