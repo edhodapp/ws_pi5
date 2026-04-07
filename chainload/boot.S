@@ -23,6 +23,7 @@
 /* Pi 4 UART0 (PL011) — firmware configures GPIO 14/15 via enable_uart=1 */
 .equ CL_UART_BASE,    0xFE201000
 .equ CL_KERNEL_ADDR,  0x80000
+.equ CL_STAGING_ADDR, 0x200000    /* safe zone: firmware DMA doesn't touch here */
 
 /* PL011 register offsets */
 .equ PL011_DR,         0x000
@@ -82,9 +83,23 @@ _start:
     b       .Lbss_loop
 .Lbss_done:
 
+    /* --- Reset DMA left active by GPU firmware --- */
+    /* The firmware leaves DMA channels pointing at 0x80000 for UART I/O.
+     * Writing kernel data there triggers phantom DMA-to-UART transfers. */
+    mov     w1, #(1 << 31)                /* RESET bit */
+    ldr     x0, =0xFE007000               /* DMA channel 0 CS */
+    mov     w2, #0
+.Ldma_reset:
+    str     w1, [x0]
+    add     x0, x0, #0x100
+    add     w2, w2, #1
+    cmp     w2, #11                        /* channels 0-10 */
+    b.lt    .Ldma_reset
+
     /* --- UART0 init: 115200 8N1, FIFOs enabled --- */
     ldr     x19, =CL_UART_BASE
     str     wzr, [x19, #PL011_CR]          /* disable UART */
+    str     wzr, [x19, #0x48]              /* DMACR = 0: disable PL011 DMA */
     mov     w0, #0x7FF
     str     w0, [x19, #PL011_ICR]          /* clear all interrupts */
     mov     w0, #26
@@ -94,14 +109,8 @@ _start:
     mov     w0, #0x70
     str     w0, [x19, #PL011_LCRH]         /* 8N1, FIFOs enabled */
 
-    /* Configure GPIO 16 (CTS0) and GPIO 17 (RTS0) to ALT3 */
-    ldr     x0, =0xFE200000               /* GPIO_BASE */
-    ldr     w1, [x0, #0x04]               /* GPFSEL1 (GPIO 10-19) */
-    orr     w1, w1, #0xFC0000             /* bits [23:18] = ALT3 for GPIO 16,17 */
-    str     w1, [x0, #0x04]
-
-    mov     w0, #0xC301
-    str     w0, [x19, #PL011_CR]           /* enable UART, TX, RX, CTSEN, RTSEN */
+    mov     w0, #0x301
+    str     w0, [x19, #PL011_CR]           /* enable UART, TX, RX (no flow control) */
 
     /* Drain any garbage from RX FIFO after UART init */
 .Lrx_drain:
@@ -119,6 +128,7 @@ _start:
     /* --- Receive Intel HEX records --- */
     ldr     x25, =hex_line_buf
     mov     x24, xzr                        /* extended base address */
+    mov     w20, wzr                        /* total data bytes received */
     mov     w21, wzr                        /* record counter */
 
 .Lhex_loop:
@@ -171,7 +181,86 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
-    /* Jump to kernel */
+    /* --- Checksum staging area (0x200000) --- */
+    ldr     x0, =CL_STAGING_ADDR
+    mov     w2, w20                        /* byte count */
+    mov     w22, #0                        /* checksum accumulator */
+    mov     w3, w2
+.Lcksum_staging:
+    cbz     w3, .Lcksum_staging_done
+    ldrb    w4, [x0], #1
+    add     w22, w22, w4
+    sub     w3, w3, #1
+    b       .Lcksum_staging
+.Lcksum_staging_done:
+
+    /* Print "S:XXXX\r\n" — staging checksum */
+    ldr     x0, =msg_s1
+    bl      cl_puts
+    mov     w0, w22
+    bl      cl_print_hex16
+    mov     w0, #0x0D
+    bl      cl_putc
+    mov     w0, #0x0A
+    bl      cl_putc
+.Lwait_s1:
+    ldr     w0, [x19, #PL011_FR]
+    tst     w0, #PL011_FR_BUSY
+    b.ne    .Lwait_s1
+
+    /* --- Memcpy staging → kernel --- */
+    /* DMA may inject phantom UART TX during this copy, but RAM writes
+     * are not corrupted — the DMA reads from 0x80000, it doesn't write. */
+    ldr     x0, =CL_STAGING_ADDR
+    ldr     x1, =CL_KERNEL_ADDR
+    mov     w2, w20
+    cbz     w2, .Lcopy_done
+    lsr     w3, w2, #3
+    cbz     w3, .Lcopy_tail
+.Lcopy8:
+    ldr     x4, [x0], #8
+    str     x4, [x1], #8
+    subs    w3, w3, #1
+    b.ne    .Lcopy8
+.Lcopy_tail:
+    and     w3, w2, #7
+    cbz     w3, .Lcopy_done
+.Lcopy1:
+    ldrb    w4, [x0], #1
+    strb    w4, [x1], #1
+    subs    w3, w3, #1
+    b.ne    .Lcopy1
+.Lcopy_done:
+
+    /* --- Checksum kernel area (0x80000) --- */
+    ldr     x0, =CL_KERNEL_ADDR
+    mov     w3, w20
+    mov     w24, #0                        /* checksum accumulator */
+.Lcksum_kernel:
+    cbz     w3, .Lcksum_kernel_done
+    ldrb    w4, [x0], #1
+    add     w24, w24, w4
+    sub     w3, w3, #1
+    b       .Lcksum_kernel
+.Lcksum_kernel_done:
+
+    /* Compare checksums */
+    cmp     w22, w24
+    b.eq    .Lcksum_ok
+
+    /* --- MISMATCH: print error, halt --- */
+    ldr     x0, =msg_s2_fail
+    bl      cl_puts
+    mov     w0, w24
+    bl      cl_print_hex16
+    mov     w0, #0x0D
+    bl      cl_putc
+    mov     w0, #0x0A
+    bl      cl_putc
+    b       .Lpark
+
+.Lcksum_ok:
+    /* Jump to kernel (DMA still off — kernel will reinit) */
     mov     x0, #CL_KERNEL_ADDR
     br      x0
 
@@ -261,3 +350,5 @@ cl_getline:
 .section .rodata
 msg_ready:  .asciz "READY\r\n"
 msg_boot:   .asciz "BOOT:"
+msg_s1:     .asciz "S:"
+msg_s2_fail:.asciz "FAIL:"

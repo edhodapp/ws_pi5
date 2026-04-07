@@ -152,7 +152,13 @@ cl_parse_hex_record:
     ldrb    w1, [x8, #1]             /* low byte */
     orr     w0, w1, w0, lsl #8       /* 16-bit value */
     lsl     x24, x0, #16             /* x24 = upper address << 16 */
-    mov     w0, #0                     /* return 0: OK */
+    /* Redirect 0x80000 → staging area to avoid firmware DMA conflict.
+     * The caller copies staging → 0x80000 after the transfer completes. */
+    ldr     x1, =0x80000
+    cmp     x24, x1
+    b.ne    1f
+    ldr     x24, =0x200000             /* staging base */
+1:  mov     w0, #0                     /* return 0: OK */
     b       .Lparse_ret
 
 .Lparse_err:

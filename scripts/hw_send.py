@@ -39,7 +39,7 @@ def open_serial(path):
     attrs[0] = 0                    # iflag: raw
     attrs[1] = 0                    # oflag: raw
     attrs[2] = (termios.CS8 | termios.CLOCAL | termios.CREAD
-                | termios.CRTSCTS | termios.B115200)
+                | termios.B115200)
     attrs[3] = 0                    # lflag: raw
     attrs[6][termios.VMIN] = 1      # blocking read, 1 byte min
     attrs[6][termios.VTIME] = 0
@@ -105,8 +105,8 @@ def main():
 
     # Send records — 2-byte ACK: line length + checksum byte
     attrs = termios.tcgetattr(fd)
-    attrs[6][termios.VMIN] = 2
-    attrs[6][termios.VTIME] = 50    # 5 second timeout
+    attrs[6][termios.VMIN] = 0
+    attrs[6][termios.VTIME] = 50    # 5 second pure timeout
     termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
 
     t_start = time.time()
@@ -114,7 +114,12 @@ def main():
         expected = int(record[-2:], 16)
         os.write(fd, (record + '\r\n').encode('ascii'))
         termios.tcdrain(fd)
-        ack = os.read(fd, 2)
+        ack = b''
+        deadline = time.time() + 5
+        while len(ack) < 2 and time.time() < deadline:
+            chunk = os.read(fd, 2 - len(ack))
+            if chunk:
+                ack += chunk
         if len(ack) != 2:
             print(f"\n  Timeout on record {i}", flush=True)
             os.close(fd)
