@@ -4,6 +4,10 @@ Automated hardware tests for the bare-metal Pi 3 kernel, run from a Pi 4 test ho
 
 See [test_plan.md](../test_plan.md) for the full physical setup.
 
+**One-time tool setup:** see [TOOLS_SETUP.md](TOOLS_SETUP.md) for granting
+`tcpdump`, `tshark`, `ethtool`, `arping`, and the venv's Python the minimum
+capabilities needed to run without `sudo`.
+
 ## Prerequisites
 
 - **Chromebook** with TFTP server (`dnsmasq`) serving `/srv/tftp`
