@@ -70,16 +70,17 @@ def read_line(fd, timeout=10):
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port]")
+        print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port] [base_addr]")
         return 1
 
     kernel_path = sys.argv[1]
     port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
+    base_addr = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x200000
 
     with open(kernel_path, "rb") as fobj:
         kernel = fobj.read()
 
-    records = kernel_to_hex_records(kernel)
+    records = kernel_to_hex_records(kernel, base_address=base_addr)
     print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
     print(f"HEX: {len(records)} records", flush=True)
 
