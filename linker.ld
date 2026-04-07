@@ -2,7 +2,9 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x80000;
+    /* 0x200000 (2MB): firmware VC agent owns 0x80000, writing there kills UART clock.
+     * Must also update: chainload/boot.S CL_KERNEL_ADDR, platform/pi/boot.S MMU map. */
+    . = 0x200000;
 
     .text : {
         *(.text._start)

@@ -9,21 +9,20 @@
  * of the time, so caching adds complexity for no benefit.
  *
  * Receives a kernel image in Intel HEX format over UART0 (GPIO 14/15)
- * with per-line checksums and ACK/NAK flow control, then jumps to 0x80000.
+ * with per-line checksums and ACK/NAK flow control, then jumps to 0x200000.
  * Uses CTS/RTS hardware flow control (GPIO 16/17).
  *
  * Protocol:
  *   1. Chainloader prints "READY\r\n" when initialized
  *   2. Host sends Intel HEX records (ASCII, \r\n terminated)
  *   3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK (len + cksum^0xFF)
- *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x80000
+ *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x200000
  *   5. Host resets Pi via DTR (GLOBAL_EN) when needed
  */
 
 /* Pi 4 UART0 (PL011) — firmware configures GPIO 14/15 via enable_uart=1 */
 .equ CL_UART_BASE,    0xFE201000
-.equ CL_KERNEL_ADDR,  0x80000
-.equ CL_STAGING_ADDR, 0x200000    /* safe zone: firmware DMA doesn't touch here */
+.equ CL_KERNEL_ADDR,  0x200000    /* firmware VC agent owns 0x80000 */
 
 /* PL011 register offsets */
 .equ PL011_DR,         0x000
@@ -181,32 +180,7 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
-    /* Copy staged data from 0x200000 → 0x80000.
-     * Firmware DMA agent conflicts with writes to 0x80000 during UART I/O,
-     * so data is staged at 0x200000 and copied here after transfer completes.
-     * w20 = total data bytes received. */
-    ldr     x0, =CL_STAGING_ADDR
-    ldr     x1, =CL_KERNEL_ADDR
-    mov     w2, w20
-    cbz     w2, .Lcopy_done
-    lsr     w3, w2, #3
-    cbz     w3, .Lcopy_tail
-.Lcopy8:
-    ldr     x4, [x0], #8
-    str     x4, [x1], #8
-    subs    w3, w3, #1
-    b.ne    .Lcopy8
-.Lcopy_tail:
-    and     w3, w2, #7
-    cbz     w3, .Lcopy_done
-.Lcopy1:
-    ldrb    w4, [x0], #1
-    strb    w4, [x1], #1
-    subs    w3, w3, #1
-    b.ne    .Lcopy1
-.Lcopy_done:
-
-    /* Jump to kernel */
+    /* Jump to kernel (loaded directly at 0x200000, no staging needed) */
     mov     x0, #CL_KERNEL_ADDR
     br      x0
 

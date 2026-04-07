@@ -196,7 +196,7 @@ make clean
 
 ### Pi 4 Development Workflow
 
-A UART chainloader (~1.2 KB) sits on the SD card at 0x4000000 and receives new kernels over serial using Intel HEX format with per-line checksums and ACK/NAK flow control:
+A UART chainloader (~1 KB) sits on the SD card at 0x4000000 and receives new kernels over serial using Intel HEX format with per-line checksums and 2-byte ACK/NAK flow control:
 
 ```
 make PLATFORM=pi4
@@ -204,15 +204,15 @@ python3 scripts/hw_send.py kernel8.img /dev/ttyUSB0
 ```
 
 The chainloader protocol:
-1. Host asserts DTR to reset the Pi, then deasserts to boot
-2. Host sends 0xFF sync → chainloader responds with `READY`
+1. Host asserts DTR to reset the Pi via CP2102N → GLOBAL_EN
+2. Chainloader prints `READY\r\n` when initialized
 3. Host sends Intel HEX records with `\r\n` terminators
-4. Chainloader verifies each record's checksum, sends `+` (ACK) or `-` (NAK with retry)
-5. On EOF record: chainloader prints `BOOT`, jumps to 0x80000
+4. Chainloader verifies each record's checksum, sends 2-byte ACK (line length + checksum) or NAK (line length + checksum XOR 0xFF)
+5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), jump to kernel at 0x200000
 
 The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
 
-**Status:** Transfer of 27 KB kernel completes reliably (1724 records, zero NAKs). DTR reset (CP2102N → GLOBAL_EN) is working for automated Pi reboot from the host.
+**Status:** Transfer of 27 KB kernel completes reliably (1735 records, zero errors, ~12 seconds at 115200 baud). DTR reset (CP2102N → GLOBAL_EN) provides deterministic Pi reboot from the host.
 
 ## Testing
 
@@ -389,7 +389,7 @@ make fuzz-corpus-seq
 ### Raspberry Pi 4 (BCM2711)
 
 - **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
-- **Kernel load:** `0x80000` (standard AArch64 boot)
+- **Kernel load:** `0x200000` (2 MB) — see [firmware 0x80000 conflict](#firmware-0x80000-conflict) below
 - **Boot:** EL2 → EL1 drop, MMU setup (4 GB identity map, Normal + Device), caches enabled
 - **Ethernet:** GENET v5 Gigabit MAC (native, under development). USB CDC-ECM fallback via DWC2.
 - **UART:** PL011 UART0 on GPIO 14/15 — serial debug and chainloader
@@ -421,20 +421,19 @@ Pi 4 Pin 8  (GPIO 14 / UART0 TX)  → Adapter RX
 Pi 4 Pin 10 (GPIO 15 / UART0 RX)  → Adapter TX
 Pi 4 Pin 9  (GND)                  → Adapter GND
 Pi 4 GLOBAL_EN                     → Adapter DTR (active-low reset)
-Pi 4 (RTS pin, if available)       → Adapter CTS
-Adapter RTS                        → Pi 4 (CTS pin, if available)
 ```
 
-**Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO. Do not connect the adapter's VCC pin.
+**Must be 3.3V logic** — a 5V adapter will damage the Pi GPIO. Do not connect the adapter's VCC pin. Hardware flow control (RTS/CTS) is not used — the lock-step ACK protocol provides flow control.
 
-DTR reset from Python:
+DTR reset from Python (raw ioctl, no pyserial dependency):
 ```python
-port.dtr = True   # assert DTR → GLOBAL_EN LOW → Pi resets
+import fcntl, struct
+TIOCM_DTR, TIOCMBIS, TIOCMBIC = 0x002, 0x5416, 0x5417
+bits = struct.pack('I', TIOCM_DTR)
+fcntl.ioctl(fd, TIOCMBIS, bits)   # DTR high → GLOBAL_EN LOW → Pi resets
 time.sleep(0.1)
-port.dtr = False   # deassert DTR → GLOBAL_EN HIGH → Pi boots
+fcntl.ioctl(fd, TIOCMBIC, bits)   # DTR low → GLOBAL_EN HIGH → Pi boots
 ```
-
-Open the serial port with `dsrdtr=False` to prevent the default DTR assertion from resetting the Pi on connect.
 
 ## Current Status
 
@@ -450,7 +449,7 @@ Open the serial port with `dsrdtr=False` to prevent the default DTR assertion fr
 | **HTTP** | Implemented | GET parser, 200/404 responses, cooperative poll loop |
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
-| **Chainloader** | Functional | Intel HEX over UART0, ACK/NAK, DTR reset (CP2102N → GLOBAL_EN) |
+| **Chainloader** | Production ready | Intel HEX over UART0, 2-byte ACK/NAK, DTR reset, 27 KB in 12s |
 | **GENET Ethernet** | In progress | UMAC reset, RGMII, PHY auto-negotiation, RX proven — TX DMA under investigation |
 | **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART0, mailbox, MMU |
 
@@ -474,20 +473,28 @@ The kernel enables the MMU with identity-mapped page tables immediately after BS
 
 ### UART Chainloader
 
-The chainloader receives kernels over UART0 using Intel HEX format with per-line checksums and ACK/NAK flow control. It eliminates the SD card swap cycle during development.
+The chainloader is complete and reliable. Development loop: build → DTR reset → send kernel over UART → boot → observe output. No SD card swaps, no power cycling.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Intel HEX protocol** | Done | Per-line checksums, ACK/NAK, 3 retries on NAK |
-| **PL011 no-FIFO mode** | Done | 1-byte holding register, cl_putc polls BUSY until transmitted |
-| **Transfer** | Working | 27 KB kernel, 1724 records, zero NAKs, ~12 seconds at 115200 |
-| **BOOT detection** | In progress | Post-transfer handoff — investigating FIFO duplicate at record 14 |
-| **Hardware flow control** | Pending | CP2102N adapter has RTS/CTS — wiring to PL011 CTS/RTS pending |
-| **DTR reset** | Done | CP2102N DTR → GLOBAL_EN for software-controlled Pi reset from host |
+| **Intel HEX protocol** | Done | Per-line checksums, 2-byte ACK/NAK flow control |
+| **Transfer** | Done | 27 KB kernel, 1735 records, zero errors, ~12 seconds at 115200 |
+| **DTR reset** | Done | CP2102N DTR → GLOBAL_EN for deterministic Pi reset from host |
+| **Host tool** | Done | `hw_send.py` — raw termios, no pyserial dependency |
 
-With DTR reset working, the development loop is: build → reset Pi via DTR → send kernel over UART → boot → observe output. No SD card swaps, no power cycling. Hardware flow control (RTS/CTS) will eliminate the remaining RX overrun during simultaneous TX/RX.
+### Firmware 0x80000 Conflict
 
-A standalone UART diagnostic (`chainload/diag.S`) proved zero PL011 hardware errors for 2048 bytes of sustained traffic. Full PL011 register reference at `hw_test/uart_test/PL011_REFERENCE.md`.
+The Pi 4 GPU firmware (start4.elf) retains an active agent that references memory at 0x80000 — the default AArch64 kernel load address — after handing control to the ARM cores. Writing to this region during UART operation causes phantom data in the PL011 RX FIFO; writing 27+ KB kills the UART entirely (the VC-managed UART clock stops).
+
+**Findings from hardware debugging:**
+- SCTLR_EL1 = 0x00C50838 and SCTLR_EL2 = 0x30C50830 at boot — MMU and caches are OFF at both exception levels. This is not a cache coherency issue.
+- Resetting ARM-side DMA channels 0-10 partially mitigates the problem (shifts the failure point) but does not eliminate it. The agent appears to be on the VideoCore side, inaccessible from ARM.
+- Writing identical data to 0x200000 instead of 0x80000 works perfectly. The trigger is the address, not the data or the write pattern.
+- A 27 KB write to 0x80000 makes the PL011 completely unresponsive — even brute-force writes to DR produce no output. The UART clock (managed by the VC) appears to stop.
+
+**Solution:** Link the kernel at 0x200000 instead of 0x80000. The chainloader writes directly to 0x200000 (no staging or memcpy needed). The firmware's 0x80000 region is never touched.
+
+This is not documented in the BCM2711 datasheet or Raspberry Pi firmware documentation. It was found empirically through binary search of the failure mode.
 
 ### GENET Gigabit Ethernet
 
