@@ -42,10 +42,6 @@ genet_init:
     mov     x20, x1                 /* x20 = genet_state */
     mov     x21, x2                 /* x21 = RX pool addr */
 
-    /* x27 = UART DR for progress markers */
-    movz    x27, #0xFE20, lsl #16
-    movk    x27, #0x1000
-
     /* Save RX pool address in state */
     str     x21, [x20, #GENET_STATE_RX_POOL]
 
@@ -53,8 +49,6 @@ genet_init:
     add     x22, x19, #5, lsl #12  /* x22 = GENET + 0x5000 */
 
     /* --- UMAC reset --- */
-    mov     w0, #'A'
-    str     w0, [x27]
     mov     w0, #2
     str     w0, [x19, #GENET_SYS_RBUF_FLUSH]
     mov     w0, #10000
@@ -93,16 +87,14 @@ genet_init:
     str     w0, [x19, #GENET_INTRL2_1_MASK_SET]
     str     w0, [x19, #GENET_INTRL2_1_CLEAR]
 
-    /* --- RGMII interface --- */
-    mov     w0, #'B'
-    str     w0, [x27]
-    /* Match PiOS: 0x00F00050 */
-    ldr     w0, =0x00F00050
+    /* --- RGMII interface ---
+     * 0x00F10050 = RGMII_LINK | RGMII_MODE_EN | ID_MODE_DIS | (bits 20-23)
+     * ID_MODE_DIS (bit 16) disables MAC-side RGMII delay; PHY applies
+     * delays via shadow regs instead. */
+    ldr     w0, =0x00F10050
     str     w0, [x19, #GENET_EXT_RGMII_OOB]
 
     /* --- PHY reset --- */
-    mov     w0, #'C'
-    str     w0, [x27]
     mov     w0, #PHY_BMCR
     mov     w1, #0x8000
     bl      genet_mdio_write
@@ -117,8 +109,6 @@ genet_init:
     b       .Linit_fail
 
 .Lphy_rst_ok:
-    mov     w0, #'D'
-    str     w0, [x27]
     /* --- Configure BCM54213PE RGMII timing via shadow registers --- */
 
     /* AUXCTL shadow 7: enable RGMII RXC-RXD skew
@@ -149,81 +139,25 @@ genet_init:
     mov     w0, #0x1C
     bl      genet_mdio_write
 
-    /* Auto-negotiate */
-    mov     w0, #'E'
-    str     w0, [x27]
+    /* Start auto-negotiate */
     mov     w0, #PHY_BMCR
     ldr     w1, =0x1340
     bl      genet_mdio_write
-    /* Read back BMCR to verify */
-    mov     w0, #PHY_BMCR
-    bl      genet_mdio_read
-    mov     w24, w0
-    mov     w0, #'='
-    str     w0, [x27]
-    mov     w25, #12
-.Lbmcr_nib:
-    lsr     w0, w24, w25
-    and     w0, w0, #0xF
-    add     w0, w0, #'0'
-    cmp     w0, #'9'
-    b.ls    7f
-    add     w0, w0, #7
-7:  mov     w26, w0
-8:  ldr     w0, [x27, #0x18]
-    tst     w0, #0x20
-    b.ne    8b
-    str     w26, [x27]
-    subs    w25, w25, #4
-    b.ge    .Lbmcr_nib
-    mov     w0, #' '
-    str     w0, [x27]
 
-    /* Wait for link + AN complete — retry forever, print '.' periodically.
+    /* Wait for link + AN complete — retry forever.
      * Real-world appliance: user may connect cable after boot.
      * Exit condition: BMSR bit 2 (link up) AND bit 5 (AN complete).
+     * Read BMSR twice: bit 2 (link up) is latched-low.
      * Do NOT kick AN again — restart interrupts the negotiation state. */
 .Lan_wait:
-    mov     w23, #50000             /* inner iterations ≈ 650ms */
-.Lan_inner:
-    /* Read BMSR twice: bit 2 (link up) is latched-low */
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
-    tbz     w0, #2, .Lan_not_yet    /* link down → keep waiting */
-    tbnz    w0, #5, .Lan_ok         /* link up + AN complete → done */
-.Lan_not_yet:
-    subs    w23, w23, #1
-    b.ne    .Lan_inner
-    /* Inner exhausted: print BMSR as 4 hex nibbles + space */
-    mov     w24, w0                 /* save BMSR */
-    mov     w25, #12
-.Lan_nib:
-    lsr     w0, w24, w25
-    and     w0, w0, #0xF
-    add     w0, w0, #'0'
-    cmp     w0, #'9'
-    b.ls    2f
-    add     w0, w0, #7
-2:  mov     w26, w0
-3:  ldr     w0, [x27, #0x18]
-    tst     w0, #0x20
-    b.ne    3b
-    str     w26, [x27]
-    subs    w25, w25, #4
-    b.ge    .Lan_nib
-    /* Space separator */
-4:  ldr     w0, [x27, #0x18]
-    tst     w0, #0x20
-    b.ne    4b
-    mov     w0, #' '
-    str     w0, [x27]
-    b       .Lan_wait
+    tbz     w0, #2, .Lan_wait
+    tbz     w0, #5, .Lan_wait
 
 .Lan_ok:
-    mov     w0, #'F'
-    str     w0, [x27]
     /* Check link */
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
@@ -236,8 +170,6 @@ genet_init:
     and     w23, w0, #7             /* w23 = speed code */
 
     /* --- Disable DMA --- */
-    mov     w0, #'G'
-    str     w0, [x27]
     str     wzr, [x22, #TDMA_DMA_CTRL_OFS]
     str     wzr, [x19, #RDMA_DMA_CTRL]
 
@@ -391,12 +323,6 @@ genet_send:
     mov     x21, x2                 /* buf */
     mov     w22, w3                 /* len */
 
-    /* Debug: print 'T' on each send attempt */
-    movz    x0, #0xFE20, lsl #16
-    movk    x0, #0x1000
-    mov     w1, #'T'
-    str     w1, [x0]
-
     /* Flush TX buffer from D-cache to RAM.
      * Buffer may not be cache-line aligned — align start down
      * so we cover every line the buffer touches. */
@@ -451,36 +377,9 @@ genet_send:
     b.eq    .Ltx_ok
     subs    w4, w4, #1
     b.ne    .Ltx_wait
-    /* Debug: print 'X' on TX timeout */
-    movz    x0, #0xFE20, lsl #16
-    movk    x0, #0x1000
-    mov     w1, #'X'
-    str     w1, [x0]
     mov     w0, #1
     b       .Ltx_ret
 .Ltx_ok:
-    /* Debug: print 'K' + TX_GD_PKTS hex */
-    movz    x4, #0xFE20, lsl #16
-    movk    x4, #0x1000
-    mov     w0, #'K'
-    str     w0, [x4]
-    /* Read UMAC_MIB_TX_GD_PKTS at 0xA2C and print low 16 bits */
-    ldr     w5, [x19, #0xA2C]
-    mov     w3, #12
-.Ltx_mib_nib:
-    lsr     w0, w5, w3
-    and     w0, w0, #0xF
-    add     w0, w0, #'0'
-    cmp     w0, #'9'
-    b.ls    9f
-    add     w0, w0, #7
-9:  mov     w6, w0
-10: ldr     w0, [x4, #0x18]
-    tst     w0, #0x20
-    b.ne    10b
-    str     w6, [x4]
-    subs    w3, w3, #4
-    b.ge    .Ltx_mib_nib
     mov     w0, #0
 .Ltx_ret:
     ldp     x29, x30, [sp, #32]

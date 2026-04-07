@@ -54,45 +54,6 @@ net_recv_one:
     b.eq    .Lnr_ipv4
 
 .Lnr_drop_mac:
-.ifdef PLATFORM_PI4
-    /* Debug: print 'm' then first 16 frame bytes as hex */
-    movz    x4, #0xFE20, lsl #16
-    movk    x4, #0x1000
-    mov     w5, #'m'
-    str     w5, [x4]
-    mov     w7, #0
-.Lnr_dump_loop:
-    /* TXFF poll */
-20: ldr     w6, [x4, #0x18]
-    tst     w6, #0x20
-    b.ne    20b
-    ldrb    w5, [x19, w7, uxtw]
-    lsr     w6, w5, #4
-    and     w6, w6, #0xF
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    10f
-    add     w6, w6, #7
-10: str     w6, [x4]
-21: ldr     w6, [x4, #0x18]
-    tst     w6, #0x20
-    b.ne    21b
-    and     w6, w5, #0xF
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    11f
-    add     w6, w6, #7
-11: str     w6, [x4]
-    add     w7, w7, #1
-    cmp     w7, #16
-    b.lt    .Lnr_dump_loop
-22: ldr     w6, [x4, #0x18]
-    tst     w6, #0x20
-    b.ne    22b
-    mov     w5, #' '
-    str     w5, [x4]
-.endif
-
 .Lnr_drop:
     mov     w0, #0
     b       .Lnr_done

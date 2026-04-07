@@ -193,25 +193,10 @@ net_loop:
 .endif
     cbnz    w0, .Lnet_timers        /* recv failed / no frame → check timers */
 
-.ifdef PLATFORM_PI4
-    /* Debug: print '.' for each received frame */
-    stp     x0, x1, [sp, #-16]!
-    mov     w0, #'.'
-    bl      uart_putc
-    ldp     x0, x1, [sp], #16
-.endif
-
     /* w1 = actual frame length */
     ldr     x0, =rx_buf
     bl      net_recv_one
     cbz     w0, .Lnet_timers
-
-.ifdef PLATFORM_PI4
-    stp     x0, x1, [sp, #-16]!
-    mov     w0, #'S'
-    bl      uart_putc
-    ldp     x0, x1, [sp], #16
-.endif
 
     mov     w3, w0                  /* w3 = reply_len */
     ldr     x0, =NET_BASE_SYM
@@ -219,18 +204,6 @@ net_loop:
     ldr     x2, =rx_buf
 .ifdef PLATFORM_PI4
     bl      genet_send
-    /* Debug: print T(ok) or X(fail) after send */
-    cbnz    w0, 1f
-    stp     x0, x1, [sp, #-16]!
-    mov     w0, #'T'
-    bl      uart_putc
-    ldp     x0, x1, [sp], #16
-    b       2f
-1:  stp     x0, x1, [sp, #-16]!
-    mov     w0, #'X'
-    bl      uart_putc
-    ldp     x0, x1, [sp], #16
-2:
 .else
     bl      cdc_ecm_send
 .endif
