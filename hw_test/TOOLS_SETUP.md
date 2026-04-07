@@ -14,6 +14,7 @@ getcap /usr/bin/tcpdump
 getcap /usr/bin/dumpcap
 getcap /usr/sbin/ethtool
 getcap /usr/bin/arping
+getcap /bin/ip
 ```
 
 Empty output means no caps set yet. If a tool is at a different path, find
@@ -59,6 +60,29 @@ sudo setcap cap_net_raw=eip /usr/bin/arping
 ```
 
 Verify: `arping -c 1 10.0.0.2` (if Pi is up) completes without complaint.
+
+## 5b. ip (for `ip link set down/up`)
+
+`hw_test/link.py` brings the Pi-facing NIC down and back up during the
+L2 link-flap tests. `ip link set <iface> down/up` returns
+`Operation not permitted` without `cap_net_admin`.
+
+```bash
+sudo setcap cap_net_admin=eip /bin/ip
+```
+
+`/bin/ip` is the real binary; `/usr/sbin/ip` is a symlink to it on
+Ubuntu, so the cap must be applied to the resolved path. The
+`setup-caps.sh` script does this automatically via `readlink -f`.
+
+**Scope concern:** `/bin/ip` is a multi-purpose tool (`route`, `addr`,
+`neigh`, etc). Granting `cap_net_admin` lets any caller of `ip` perform
+privileged network changes. On a single-user dev machine this is fine;
+on a shared host, restrict execute permission with a group as described
+in §8 ("Notes").
+
+Verify: `ip link set <iface> down && ip link set <iface> up` works
+without sudo and without permission errors.
 
 ## 6. scapy (Python)
 
@@ -117,11 +141,12 @@ Should print the L2 socket class name without a permission error.
 ## 7. Final verification
 
 ```bash
-getcap /usr/bin/tcpdump /usr/bin/dumpcap /usr/sbin/ethtool /usr/bin/arping /home/ed/ws_pi5/.venv/bin/python3
+getcap /usr/bin/tcpdump /usr/bin/dumpcap /usr/sbin/ethtool /usr/bin/arping /bin/ip /home/ed/ws_pi5/.venv/bin/python3
 tcpdump -D
 tshark -D
 ethtool <iface>
 arping -c 1 10.0.0.2
+ip link set <iface> down && ip link set <iface> up
 ./.venv/bin/python3 -c 'from scapy.all import *; print(conf.L2socket)'
 ```
 
@@ -164,12 +189,13 @@ again.
 
 - **Package upgrades.** `sudo apt upgrade tcpdump` replaces the binary
   with a fresh copy from the `.deb` and your `setcap` is gone. Same for
-  `wireshark-common` (which owns `dumpcap`), `ethtool`, and `iputils-arping`.
-  Re-run `setcap` after any upgrade that touches these packages. To check
-  what was recently touched:
+  `wireshark-common` (which owns `dumpcap`), `ethtool`, `iputils-arping`,
+  and `iproute2` (which owns `/bin/ip`). Re-run `setcap` after any
+  upgrade that touches these packages. To check what was recently
+  touched:
 
   ```bash
-  grep -E 'tcpdump|wireshark|ethtool|iputils' /var/log/apt/history.log
+  grep -E 'tcpdump|wireshark|ethtool|iputils|iproute2' /var/log/apt/history.log
   ```
 
 - **Copying the binary.** Plain `cp` does NOT preserve xattrs. Use
@@ -206,9 +232,10 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/dumpcap
 sudo setcap cap_net_admin=eip                /usr/sbin/ethtool
 sudo setcap cap_net_raw=eip                  /usr/bin/arping
+sudo setcap cap_net_admin=eip                "$(readlink -f "$(command -v ip)")"
 sudo setcap cap_net_raw=eip                  /home/ed/ws_pi5/.venv/bin/python3
 getcap /usr/bin/tcpdump /usr/bin/dumpcap /usr/sbin/ethtool \
-       /usr/bin/arping /home/ed/ws_pi5/.venv/bin/python3
+       /usr/bin/arping /bin/ip /home/ed/ws_pi5/.venv/bin/python3
 ```
 
 `chmod +x hw_test/bin/setup-caps.sh` and run it after any system update,
@@ -218,7 +245,7 @@ venv rebuild, or unexplained `Operation not permitted` from these tools.
 
 ```bash
 getcap /usr/bin/tcpdump /usr/bin/dumpcap /usr/sbin/ethtool \
-       /usr/bin/arping /home/ed/ws_pi5/.venv/bin/python3
+       /usr/bin/arping /bin/ip /home/ed/ws_pi5/.venv/bin/python3
 ```
 
 Each line should show the expected caps. Any blank line means that
