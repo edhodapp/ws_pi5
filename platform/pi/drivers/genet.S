@@ -155,34 +155,71 @@ genet_init:
     mov     w0, #PHY_BMCR
     ldr     w1, =0x1340
     bl      genet_mdio_write
+    /* Read back BMCR to verify */
+    mov     w0, #PHY_BMCR
+    bl      genet_mdio_read
+    mov     w24, w0
+    mov     w0, #'='
+    str     w0, [x27]
+    mov     w25, #12
+.Lbmcr_nib:
+    lsr     w0, w24, w25
+    and     w0, w0, #0xF
+    add     w0, w0, #'0'
+    cmp     w0, #'9'
+    b.ls    7f
+    add     w0, w0, #7
+7:  mov     w26, w0
+8:  ldr     w0, [x27, #0x18]
+    tst     w0, #0x20
+    b.ne    8b
+    str     w26, [x27]
+    subs    w25, w25, #4
+    b.ge    .Lbmcr_nib
+    mov     w0, #' '
+    str     w0, [x27]
 
-    /* Poll BMSR bit 5 for AN complete — 10 second timeout */
-    ldr     w23, =10000000
-.Lan_poll:
+    /* Wait for link + AN complete — retry forever, print '.' periodically.
+     * Real-world appliance: user may connect cable after boot.
+     * Exit condition: BMSR bit 2 (link up) AND bit 5 (AN complete).
+     * Do NOT kick AN again — restart interrupts the negotiation state. */
+.Lan_wait:
+    mov     w23, #50000             /* inner iterations ≈ 650ms */
+.Lan_inner:
+    /* Read BMSR twice: bit 2 (link up) is latched-low */
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
-    tbnz    w0, #5, .Lan_ok
+    mov     w0, #PHY_BMSR
+    bl      genet_mdio_read
+    tbz     w0, #2, .Lan_not_yet    /* link down → keep waiting */
+    tbnz    w0, #5, .Lan_ok         /* link up + AN complete → done */
+.Lan_not_yet:
     subs    w23, w23, #1
-    b.ne    .Lan_poll
-    /* Timeout: print '!XX' with BMSR low byte for diagnosis */
-    mov     w24, w0
-    mov     w0, #'!'
-    str     w0, [x27]
-    /* Print BMSR as two hex nibbles */
-    lsr     w0, w24, #4
+    b.ne    .Lan_inner
+    /* Inner exhausted: print BMSR as 4 hex nibbles + space */
+    mov     w24, w0                 /* save BMSR */
+    mov     w25, #12
+.Lan_nib:
+    lsr     w0, w24, w25
     and     w0, w0, #0xF
     add     w0, w0, #'0'
     cmp     w0, #'9'
     b.ls    2f
     add     w0, w0, #7
-2:  str     w0, [x27]
-    and     w0, w24, #0xF
-    add     w0, w0, #'0'
-    cmp     w0, #'9'
-    b.ls    3f
-    add     w0, w0, #7
-3:  str     w0, [x27]
-    b       .Linit_fail
+2:  mov     w26, w0
+3:  ldr     w0, [x27, #0x18]
+    tst     w0, #0x20
+    b.ne    3b
+    str     w26, [x27]
+    subs    w25, w25, #4
+    b.ge    .Lan_nib
+    /* Space separator */
+4:  ldr     w0, [x27, #0x18]
+    tst     w0, #0x20
+    b.ne    4b
+    mov     w0, #' '
+    str     w0, [x27]
+    b       .Lan_wait
 
 .Lan_ok:
     mov     w0, #'F'
@@ -210,6 +247,12 @@ genet_init:
 1:  subs    w0, w0, #1
     b.ne    1b
     str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
+
+    /* RBUF_CTRL: enable 2-byte alignment pad (RX frames prepended with 2 bytes
+     * so IP header lands on 4-byte boundary). genet_recv skips these 2 bytes. */
+    ldr     w0, [x19, #0x300]      /* RBUF_CTRL */
+    orr     w0, w0, #2              /* RBUF_ALIGN_2B */
+    str     w0, [x19, #0x300]
 
     /* RBUF_TBUF_SIZE_CTRL: must be set to 1 for TX to work (allocates TBUF space) */
     mov     w0, #1
@@ -416,11 +459,28 @@ genet_send:
     mov     w0, #1
     b       .Ltx_ret
 .Ltx_ok:
-    /* Debug: print 'K' on TX success */
-    movz    x0, #0xFE20, lsl #16
-    movk    x0, #0x1000
-    mov     w1, #'K'
-    str     w1, [x0]
+    /* Debug: print 'K' + TX_GD_PKTS hex */
+    movz    x4, #0xFE20, lsl #16
+    movk    x4, #0x1000
+    mov     w0, #'K'
+    str     w0, [x4]
+    /* Read UMAC_MIB_TX_GD_PKTS at 0xA2C and print low 16 bits */
+    ldr     w5, [x19, #0xA2C]
+    mov     w3, #12
+.Ltx_mib_nib:
+    lsr     w0, w5, w3
+    and     w0, w0, #0xF
+    add     w0, w0, #'0'
+    cmp     w0, #'9'
+    b.ls    9f
+    add     w0, w0, #7
+9:  mov     w6, w0
+10: ldr     w0, [x4, #0x18]
+    tst     w0, #0x20
+    b.ne    10b
+    str     w6, [x4]
+    subs    w3, w3, #4
+    b.ge    .Ltx_mib_nib
     mov     w0, #0
 .Ltx_ret:
     ldp     x29, x30, [sp, #32]

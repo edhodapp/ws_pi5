@@ -55,53 +55,42 @@ net_recv_one:
 
 .Lnr_drop_mac:
 .ifdef PLATFORM_PI4
-    /* Debug: print 'm' then first 3 bytes of dst MAC as hex */
+    /* Debug: print 'm' then first 16 frame bytes as hex */
     movz    x4, #0xFE20, lsl #16
     movk    x4, #0x1000
     mov     w5, #'m'
     str     w5, [x4]
-    /* Byte 0 */
-    ldrb    w5, [x19]
+    mov     w7, #0
+.Lnr_dump_loop:
+    /* TXFF poll */
+20: ldr     w6, [x4, #0x18]
+    tst     w6, #0x20
+    b.ne    20b
+    ldrb    w5, [x19, w7, uxtw]
     lsr     w6, w5, #4
+    and     w6, w6, #0xF
     add     w6, w6, #'0'
     cmp     w6, #'9'
     b.ls    10f
     add     w6, w6, #7
 10: str     w6, [x4]
+21: ldr     w6, [x4, #0x18]
+    tst     w6, #0x20
+    b.ne    21b
     and     w6, w5, #0xF
     add     w6, w6, #'0'
     cmp     w6, #'9'
     b.ls    11f
     add     w6, w6, #7
 11: str     w6, [x4]
-    /* Byte 1 */
-    ldrb    w5, [x19, #1]
-    lsr     w6, w5, #4
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    12f
-    add     w6, w6, #7
-12: str     w6, [x4]
-    and     w6, w5, #0xF
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    13f
-    add     w6, w6, #7
-13: str     w6, [x4]
-    /* Byte 2 */
-    ldrb    w5, [x19, #2]
-    lsr     w6, w5, #4
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    14f
-    add     w6, w6, #7
-14: str     w6, [x4]
-    and     w6, w5, #0xF
-    add     w6, w6, #'0'
-    cmp     w6, #'9'
-    b.ls    15f
-    add     w6, w6, #7
-15: str     w6, [x4]
+    add     w7, w7, #1
+    cmp     w7, #16
+    b.lt    .Lnr_dump_loop
+22: ldr     w6, [x4, #0x18]
+    tst     w6, #0x20
+    b.ne    22b
+    mov     w5, #' '
+    str     w5, [x4]
 .endif
 
 .Lnr_drop:
