@@ -15,11 +15,11 @@ import pytest
 
 # --- Configuration (override via environment) ---
 
-PI4_IP = os.environ.get("PI4_IP", "10.0.2.15")
+PI4_IP = os.environ.get("PI4_IP", "10.0.0.2")
 PI4_HTTP_PORT = int(os.environ.get("PI4_HTTP_PORT", "80"))
 PI4_SERIAL = os.environ.get("PI4_SERIAL", "/dev/ttyUSB0")
 PI4_SERIAL_BAUD = int(os.environ.get("PI4_SERIAL_BAUD", "115200"))
-GATEWAY_IP = os.environ.get("GATEWAY_IP", "10.0.2.2")
+GATEWAY_IP = os.environ.get("GATEWAY_IP", "10.0.0.1")
 TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "5"))
 
 
