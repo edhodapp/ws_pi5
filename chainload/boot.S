@@ -181,36 +181,10 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
-    /* --- Checksum staging area (0x200000) --- */
-    ldr     x0, =CL_STAGING_ADDR
-    mov     w2, w20                        /* byte count */
-    mov     w22, #0                        /* checksum accumulator */
-    mov     w3, w2
-.Lcksum_staging:
-    cbz     w3, .Lcksum_staging_done
-    ldrb    w4, [x0], #1
-    add     w22, w22, w4
-    sub     w3, w3, #1
-    b       .Lcksum_staging
-.Lcksum_staging_done:
-
-    /* Print "S:XXXX\r\n" — staging checksum */
-    ldr     x0, =msg_s1
-    bl      cl_puts
-    mov     w0, w22
-    bl      cl_print_hex16
-    mov     w0, #0x0D
-    bl      cl_putc
-    mov     w0, #0x0A
-    bl      cl_putc
-.Lwait_s1:
-    ldr     w0, [x19, #PL011_FR]
-    tst     w0, #PL011_FR_BUSY
-    b.ne    .Lwait_s1
-
-    /* --- Memcpy staging → kernel --- */
-    /* DMA may inject phantom UART TX during this copy, but RAM writes
-     * are not corrupted — the DMA reads from 0x80000, it doesn't write. */
+    /* Copy staged data from 0x200000 → 0x80000.
+     * Firmware DMA agent conflicts with writes to 0x80000 during UART I/O,
+     * so data is staged at 0x200000 and copied here after transfer completes.
+     * w20 = total data bytes received. */
     ldr     x0, =CL_STAGING_ADDR
     ldr     x1, =CL_KERNEL_ADDR
     mov     w2, w20
@@ -232,35 +206,7 @@ _start:
     b.ne    .Lcopy1
 .Lcopy_done:
 
-    /* --- Checksum kernel area (0x80000) --- */
-    ldr     x0, =CL_KERNEL_ADDR
-    mov     w3, w20
-    mov     w24, #0                        /* checksum accumulator */
-.Lcksum_kernel:
-    cbz     w3, .Lcksum_kernel_done
-    ldrb    w4, [x0], #1
-    add     w24, w24, w4
-    sub     w3, w3, #1
-    b       .Lcksum_kernel
-.Lcksum_kernel_done:
-
-    /* Compare checksums */
-    cmp     w22, w24
-    b.eq    .Lcksum_ok
-
-    /* --- MISMATCH: print error, halt --- */
-    ldr     x0, =msg_s2_fail
-    bl      cl_puts
-    mov     w0, w24
-    bl      cl_print_hex16
-    mov     w0, #0x0D
-    bl      cl_putc
-    mov     w0, #0x0A
-    bl      cl_putc
-    b       .Lpark
-
-.Lcksum_ok:
-    /* Jump to kernel (DMA still off — kernel will reinit) */
+    /* Jump to kernel */
     mov     x0, #CL_KERNEL_ADDR
     br      x0
 
@@ -350,5 +296,3 @@ cl_getline:
 .section .rodata
 msg_ready:  .asciz "READY\r\n"
 msg_boot:   .asciz "BOOT:"
-msg_s1:     .asciz "S:"
-msg_s2_fail:.asciz "FAIL:"
