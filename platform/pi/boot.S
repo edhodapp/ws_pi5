@@ -3,7 +3,8 @@
 .global _start
 
 _start:
-    /* Debug: print '0' as absolute first instruction */
+.ifdef PLATFORM_PI4
+    /* Debug: print '0' — UART already configured by firmware/chainloader */
     movz    x9, #0xFE20, lsl #16
     movk    x9, #0x1000
     mov     w10, #'0'
@@ -11,6 +12,7 @@ _start:
     tst     w11, #0x20
     b.ne    7b
     str     w10, [x9]
+.endif
 
     /* Only let core 0 proceed, park other cores */
     mrs     x0, mpidr_el1
@@ -47,7 +49,12 @@ _start:
     eret
 
 .Lel1_ready:
-    /* Debug: print '1' to prove we reached EL1 */
+    /* Set up stack */
+    ldr     x0, =_stack_top
+    mov     sp, x0
+
+.ifdef PLATFORM_PI4
+    /* Debug: print '1' (EL1 reached) and '2' (stack ready) */
     movz    x9, #0xFE20, lsl #16
     movk    x9, #0x1000
     mov     w10, #'1'
@@ -55,17 +62,12 @@ _start:
     tst     w11, #0x20
     b.ne    8b
     str     w10, [x9]
-
-    /* Set up stack */
-    ldr     x0, =_stack_top
-    mov     sp, x0
-
-    /* Debug: print '2' to prove stack setup worked */
     mov     w10, #'2'
 9:  ldr     w11, [x9, #0x18]
     tst     w11, #0x20
     b.ne    9b
     str     w10, [x9]
+.endif
 
     /* Zero BSS */
     ldr     x0, =__bss_start

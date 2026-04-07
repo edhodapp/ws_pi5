@@ -2,7 +2,9 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x100000;
+    /* 0x200000 (2MB): firmware VC agent owns 0x80000, writing there kills UART.
+     * Used by: make PLATFORM=pi4 (chainloader loads kernel here). */
+    . = 0x200000;
 
     .text : {
         *(.text._start)

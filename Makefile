@@ -15,10 +15,13 @@ PLATFORM_ASFLAGS =
 
 ifeq ($(PLATFORM),pi4)
   PLATFORM_ASFLAGS = --defsym PLATFORM_PI4=1
+  LINKER_SCRIPT = linker_hw.ld
+else
+  LINKER_SCRIPT = linker.ld
 endif
 
 ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS)
-LDFLAGS = -T linker.ld -nostdlib
+LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories
 PI_INC = platform/pi/include
@@ -100,7 +103,7 @@ all: kernel8.img
 kernel8.img: $(BUILD)/kernel8.elf
 	$(OBJCOPY) -O binary $< $@
 
-$(BUILD)/kernel8.elf: $(KERNEL_OBJS) linker.ld
+$(BUILD)/kernel8.elf: $(KERNEL_OBJS) $(LINKER_SCRIPT)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
 
 # Test kernel
