@@ -160,7 +160,7 @@ def main():
         while True:
             b = os.read(fd, 1)
             if b:
-                sys.stdout.write(b.decode('ascii', errors='?'))
+                sys.stdout.write(b.decode('ascii', errors='replace'))
                 sys.stdout.flush()
     except KeyboardInterrupt:
         print("\n--- Done ---", flush=True)

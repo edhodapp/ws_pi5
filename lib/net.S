@@ -38,7 +38,7 @@ net_recv_one:
     mov     x0, x19
     ldr     x1, =net_broadcast_mac
     bl      eth_mac_eq
-    cbz     w0, .Lnr_drop
+    cbz     w0, .Lnr_drop_mac
 
 .Lnr_mac_ok:
     /* Get EtherType (returns -1 if invalid) */
@@ -52,6 +52,57 @@ net_recv_one:
 
     cmp     w0, #ETHERTYPE_IPV4
     b.eq    .Lnr_ipv4
+
+.Lnr_drop_mac:
+.ifdef PLATFORM_PI4
+    /* Debug: print 'm' then first 3 bytes of dst MAC as hex */
+    movz    x4, #0xFE20, lsl #16
+    movk    x4, #0x1000
+    mov     w5, #'m'
+    str     w5, [x4]
+    /* Byte 0 */
+    ldrb    w5, [x19]
+    lsr     w6, w5, #4
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    10f
+    add     w6, w6, #7
+10: str     w6, [x4]
+    and     w6, w5, #0xF
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    11f
+    add     w6, w6, #7
+11: str     w6, [x4]
+    /* Byte 1 */
+    ldrb    w5, [x19, #1]
+    lsr     w6, w5, #4
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    12f
+    add     w6, w6, #7
+12: str     w6, [x4]
+    and     w6, w5, #0xF
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    13f
+    add     w6, w6, #7
+13: str     w6, [x4]
+    /* Byte 2 */
+    ldrb    w5, [x19, #2]
+    lsr     w6, w5, #4
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    14f
+    add     w6, w6, #7
+14: str     w6, [x4]
+    and     w6, w5, #0xF
+    add     w6, w6, #'0'
+    cmp     w6, #'9'
+    b.ls    15f
+    add     w6, w6, #7
+15: str     w6, [x4]
+.endif
 
 .Lnr_drop:
     mov     w0, #0

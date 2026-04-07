@@ -156,14 +156,32 @@ genet_init:
     ldr     w1, =0x1340
     bl      genet_mdio_write
 
-    /* Poll BMSR bit 5 for AN complete */
-    ldr     w23, =5000000
+    /* Poll BMSR bit 5 for AN complete — 10 second timeout */
+    ldr     w23, =10000000
 .Lan_poll:
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
     tbnz    w0, #5, .Lan_ok
     subs    w23, w23, #1
     b.ne    .Lan_poll
+    /* Timeout: print '!XX' with BMSR low byte for diagnosis */
+    mov     w24, w0
+    mov     w0, #'!'
+    str     w0, [x27]
+    /* Print BMSR as two hex nibbles */
+    lsr     w0, w24, #4
+    and     w0, w0, #0xF
+    add     w0, w0, #'0'
+    cmp     w0, #'9'
+    b.ls    2f
+    add     w0, w0, #7
+2:  str     w0, [x27]
+    and     w0, w24, #0xF
+    add     w0, w0, #'0'
+    cmp     w0, #'9'
+    b.ls    3f
+    add     w0, w0, #7
+3:  str     w0, [x27]
     b       .Linit_fail
 
 .Lan_ok:
@@ -330,6 +348,12 @@ genet_send:
     mov     x21, x2                 /* buf */
     mov     w22, w3                 /* len */
 
+    /* Debug: print 'T' on each send attempt */
+    movz    x0, #0xFE20, lsl #16
+    movk    x0, #0x1000
+    mov     w1, #'T'
+    str     w1, [x0]
+
     /* Flush TX buffer from D-cache to RAM.
      * Buffer may not be cache-line aligned — align start down
      * so we cover every line the buffer touches. */
@@ -384,9 +408,19 @@ genet_send:
     b.eq    .Ltx_ok
     subs    w4, w4, #1
     b.ne    .Ltx_wait
+    /* Debug: print 'X' on TX timeout */
+    movz    x0, #0xFE20, lsl #16
+    movk    x0, #0x1000
+    mov     w1, #'X'
+    str     w1, [x0]
     mov     w0, #1
     b       .Ltx_ret
 .Ltx_ok:
+    /* Debug: print 'K' on TX success */
+    movz    x0, #0xFE20, lsl #16
+    movk    x0, #0x1000
+    mov     w1, #'K'
+    str     w1, [x0]
     mov     w0, #0
 .Ltx_ret:
     ldp     x29, x30, [sp, #32]
