@@ -25,6 +25,92 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `dbe6792` + uncommitted Python perf_query — FIRST PER-STAGE BREAKDOWN
+
+Wires the Python side: `wire.perf_query()` (sends a 0x88B6 request,
+parses the 64-byte counter struct from the reply), `test_l2_ring`
+emits a `PERF_STATS:` line alongside `BURST_STATS:` whenever the Pi
+is a PERF build, and `burst_stats.py` parses both lines and reports
+per-stage cycle stats across the trial set.
+
+This is the **first time** we have real per-stage cycle numbers
+from the Pi. PERF=all kernel, 10 cold-start trials at N=1024:
+
+| stage     | mean (ns/frame) | stdev | CV   |
+|-----------|-----------------|-------|------|
+| recv      | 2364.60         | 20.81 | 0.9% |
+| dispatch  | 105.00          | 0.67  | 0.6% |
+| send      | 75.80           | 3.16  | 4.2% |
+| **total** | **2545**        |       |      |
+
+**Per-stage share of total:**
+
+    recv      93%
+    dispatch   4%
+    send       3%
+
+**Headline finding:** `genet_recv` is 93% of the per-frame cost.
+The rest of the hot path is rounding error. The grind has exactly
+one target, and any optimization that doesn't measurably reduce
+`recv_ns` is wasted effort.
+
+**Why send_ns is only 76 ns (initially looked impossibly fast):**
+the GENET hardware advances `TDMA_CONS_INDEX` when it dequeues the
+descriptor (DMA-claimed), NOT when wire transmission completes.
+genet_send's wait-loop terminates on the FIRST CONS read because
+HW already acknowledged. The actual ~500 ns wire-time happens
+asynchronously after genet_send returns, overlapped with the next
+genet_recv. From a CPU-cycle accounting perspective, send is
+essentially free. This is excellent news — one less stage to
+worry about.
+
+**Why dispatch_ns is only 105 ns:** that covers MAC filter +
+ethertype switch + arp_handle (build reply in place) + bl/ret +
+probe overhead. The actual ARP responder is ~60-70 ns of work.
+Can't meaningfully optimize this further.
+
+**Other diagnostics from the dump:**
+
+| field         | mean    | min   | max   | notes                            |
+|---------------|---------|-------|-------|----------------------------------|
+| recv_count    | 1005.70 | 970   | 1025  | tracks reply count + 1 (snapshot)|
+| recv_none     | 44598.50| 10886 | 67753 | idle-path polls; varies w/ time  |
+| dispatch_count| 1005.70 | 970   | 1025  | matches recv_count               |
+| send_count    | 1005.70 | 970   | 1025  | matches recv_count               |
+| send_fail     | 0.00    | 0     | 0     | TX wait-loop never times out     |
+| rx_discards   | 0.00    | 0     | 0     | **NOT POPULATED YET** — see below|
+
+**Lossless mismatch — where do the missing ~19 frames go?**
+Reply count was mean 1004.70 (so ~19 frames lost out of 1024). But
+recv_count was also ~1005, meaning the Pi only ever SAW ~1005
+frames, not 1024. The missing ~19 frames either (a) never reached
+the Pi over the wire (USB NIC bulk-OUT batching truncating the
+burst), or (b) were dropped at the GENET hardware ring before
+software could process them. Until we actually read and accumulate
+RDMA_PROD_INDEX[31:16] (the hardware discard counter) into
+perf_counters.rx_discards, we can't tell which. **Follow-up:**
+populate rx_discards in genet_recv.
+
+**Reply count stats (PERF=all):**
+
+| metric    | value  |
+|-----------|--------|
+| samples   | [1024, 969, 1024, 976, 1020, 1024, 1012, 977, 1024, 997] |
+| mean      | 1004.70 |
+| stdev     | 22.86  |
+| lossless  | 4/10   |
+
+Same general shape as prior PERF=all measurements. The added
+`perf_query` overhead in the test path doesn't visibly affect
+reply counts.
+
+**Decision:** keep. Phase 0 instrumentation is COMPLETE end-to-end:
+struct + macros + per-stage probes + wire protocol + Python query
++ stats integration. The grind can now begin in Phase 1 with
+measurable per-stage feedback.
+
+---
+
 ## 2026-04-08 — `65a6210` + uncommitted perf_handle + 0x88B6 dispatch
 
 Adds the readout-protocol wire handler — ethertype 0x88B6 queries

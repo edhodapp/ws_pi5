@@ -119,6 +119,22 @@ class TestRingWraparound:
                 and arp["spa"] == expected_pi_ip
             )
 
+        # Reset per-stage perf counters BEFORE the burst so the
+        # snapshot we take after captures only the work from this
+        # burst (plus the snapshot query's own single iteration,
+        # which is a ~0.1% accounting error at N=1024). Silently
+        # skip if the Pi is running a default (non-PERF) build —
+        # perf_query raises WireError on timeout, which means the
+        # readout handler was never compiled in.
+        perf_reset_ok = False
+        try:
+            wire.perf_query(
+                eth_iface, expected_pi_mac, laptop_mac, reset=True
+            )
+            perf_reset_ok = True
+        except wire.WireError:
+            pass
+
         with wire.RawL2Socket(eth_iface) as sock:
             sock.drain()  # discard any pre-test stragglers
 
@@ -160,6 +176,45 @@ class TestRingWraparound:
             f"send_ms={send_ms:.1f} wire_pps={wire_pps:.0f} "
             f"total_ms={total_ms:.1f}"
         )
+
+        # Snapshot perf counters AFTER the burst. Only attempted if
+        # the pre-burst reset succeeded (indicating the Pi is a
+        # PERF build). Emit a second parseable line with raw ticks
+        # AND per-stage ns-per-frame derived from Pi 4's 54 MHz
+        # CNTVCT_EL0. Either line (BURST_STATS or PERF_STATS) can
+        # be absent; burst_stats.py handles both cases.
+        if perf_reset_ok:
+            try:
+                perf = wire.perf_query(
+                    eth_iface, expected_pi_mac, laptop_mac
+                )
+                recv_ns = (
+                    wire.perf_ticks_to_ns(perf["recv_ticks"])
+                    / max(perf["recv_count"], 1)
+                )
+                disp_ns = (
+                    wire.perf_ticks_to_ns(perf["dispatch_ticks"])
+                    / max(perf["dispatch_count"], 1)
+                )
+                send_ns = (
+                    wire.perf_ticks_to_ns(perf["send_ticks"])
+                    / max(perf["send_count"], 1)
+                )
+                print(
+                    f"PERF_STATS: n={n} "
+                    f"recv_count={perf['recv_count']} "
+                    f"recv_none={perf['recv_none']} "
+                    f"dispatch_count={perf['dispatch_count']} "
+                    f"send_count={perf['send_count']} "
+                    f"send_fail={perf['send_fail']} "
+                    f"max_burst={perf['max_burst']} "
+                    f"rx_discards={perf['rx_discards']} "
+                    f"recv_ns={recv_ns:.0f} "
+                    f"dispatch_ns={disp_ns:.0f} "
+                    f"send_ns={send_ns:.0f}"
+                )
+            except wire.WireError:
+                pass
 
         # Lossless assertion. When the GENET burst-loss bug is fixed,
         # this stays green; until then it surfaces the count clearly.

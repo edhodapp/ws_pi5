@@ -399,6 +399,167 @@ def tcpreplay_send(
     }
 
 
+# --- Perf counter readout via custom ethertype 0x88B6 ---
+#
+# The Pi kernel's lib/perf.S::perf_handle responds to an L2 frame
+# with ethertype 0x88B6, payload[0]=cmd, by copying the 64-byte
+# perf_counters struct into the reply's payload. This gives us a
+# per-burst snapshot of per-stage cycle totals without dragging a
+# UART parser or an HTTP endpoint into the test harness.
+#
+# Wire format:
+#   Request:  [pi_mac, laptop_mac, 0x88B6, cmd, pad...]  (60 B min)
+#   Reply:    [laptop_mac, pi_mac, 0x88B6, <64 B perf_counters>]
+#
+# See include/perf.inc for the canonical struct offsets; the format
+# string below must stay in sync with that file.
+
+PERF_ETHERTYPE = 0x88B6
+PERF_CMD_DUMP = 0
+PERF_CMD_DUMP_RESET = 1
+
+# Minimum Ethernet frame (including FCS added by hardware) is 64
+# bytes, payload minimum 46 bytes. We send a 60-byte frame (14 B
+# eth + 46 B payload); hardware/driver handles the FCS.
+_PERF_REQUEST_LEN = 60
+
+# Pi 4's Cortex-A72 generic timer (CNTFRQ_EL0) runs at 54 MHz.
+# Ticks → nanoseconds: ns = ticks * (1_000_000_000 / 54_000_000)
+PI4_CNTVCT_FREQ_HZ = 54_000_000
+
+
+def perf_query(
+    iface: str,
+    pi_mac: bytes,
+    laptop_mac: bytes,
+    *,
+    reset: bool = False,
+    timeout_ms: int = 100,
+) -> dict:
+    """Query the Pi's perf_counters via ethertype 0x88B6.
+
+    Sends a single request frame to the Pi and waits for the reply.
+    Requires the Pi to be running a PERF build (the readout handler
+    lives in lib/perf.S and is only active when PERF_COUNTERS is
+    defined; default builds silently drop the request).
+
+    Arguments:
+      iface:      interface name (e.g. "enx00e04c0a2bed")
+      pi_mac:     6-byte Pi MAC (request destination)
+      laptop_mac: 6-byte laptop MAC (request source / reply dst)
+      reset:      if True, Pi zeros counters AFTER snapshot. The
+                  returned dict still shows the pre-reset values.
+      timeout_ms: max wait for the reply
+
+    Returns:
+      A dict with all the u64/u32 counter fields. See the
+      _parse_perf_counters helper below for the full list.
+
+    Raises:
+      WireError on timeout (Pi unreachable or not a PERF build),
+      short reply, or socket errors.
+    """
+    if len(pi_mac) != 6 or len(laptop_mac) != 6:
+        raise WireError(
+            f"perf_query: MAC addresses must be 6 bytes each "
+            f"(got pi={len(pi_mac)}, laptop={len(laptop_mac)})"
+        )
+
+    cmd = PERF_CMD_DUMP_RESET if reset else PERF_CMD_DUMP
+
+    # 14 B eth header (dst=pi, src=laptop, etype=0x88B6) +
+    # 1 B cmd + 45 B zero pad = 60 B.
+    frame = (
+        pi_mac
+        + laptop_mac
+        + struct.pack("!H", PERF_ETHERTYPE)
+        + bytes([cmd])
+        + bytes(_PERF_REQUEST_LEN - 15)
+    )
+    assert len(frame) == _PERF_REQUEST_LEN
+
+    with RawL2Socket(iface) as sock:
+        sock.drain()
+        sock.send(frame)
+        reply = sock.recv(
+            timeout_ms=timeout_ms,
+            predicate=_is_perf_reply,
+        )
+
+    if reply is None:
+        raise WireError(
+            f"perf_query timeout — no 0x{PERF_ETHERTYPE:04x} reply within "
+            f"{timeout_ms} ms. Is the Pi running a PERF build?"
+        )
+
+    # Reply frame = 14 B eth + 64 B perf_counters payload = 78 B min
+    expected_min = 14 + 64
+    if len(reply) < expected_min:
+        raise WireError(
+            f"perf_query reply too short: {len(reply)} bytes "
+            f"(expected at least {expected_min})"
+        )
+    return _parse_perf_counters(reply[14:14 + 64])
+
+
+def _is_perf_reply(frame: bytes) -> bool:
+    if len(frame) < 14:
+        return False
+    etype = (frame[12] << 8) | frame[13]
+    return etype == PERF_ETHERTYPE
+
+
+# Layout MUST track include/perf.inc. Any change to the struct
+# ordering or field widths there MUST be mirrored here. The format
+# string is little-endian to match AArch64 Normal memory layout.
+#
+#   off  size  name               type
+#   0    8     recv_ticks         u64
+#   8    4     recv_count         u32
+#   12   4     recv_none          u32
+#   16   8     dispatch_ticks     u64
+#   24   4     dispatch_count     u32
+#   28   4     drop_count         u32
+#   32   8     send_ticks         u64
+#   40   4     send_count         u32
+#   44   4     send_fail          u32
+#   48   4     max_burst          u32
+#   52   4     cur_burst          u32
+#   56   4     rx_discards        u32
+#   60   4     magic              u32
+_PERF_COUNTERS_STRUCT = struct.Struct("<QIIQIIQIIIIII")
+assert _PERF_COUNTERS_STRUCT.size == 64
+
+
+def _parse_perf_counters(payload: bytes) -> dict:
+    """Parse the 64-byte perf_counters struct into a named dict."""
+    if len(payload) != 64:
+        raise WireError(
+            f"_parse_perf_counters: expected 64 bytes, got {len(payload)}"
+        )
+    fields = _PERF_COUNTERS_STRUCT.unpack(payload)
+    return {
+        "recv_ticks":     fields[0],
+        "recv_count":     fields[1],
+        "recv_none":      fields[2],
+        "dispatch_ticks": fields[3],
+        "dispatch_count": fields[4],
+        "drop_count":     fields[5],
+        "send_ticks":     fields[6],
+        "send_count":     fields[7],
+        "send_fail":      fields[8],
+        "max_burst":      fields[9],
+        "cur_burst":      fields[10],
+        "rx_discards":    fields[11],
+        "magic":          fields[12],
+    }
+
+
+def perf_ticks_to_ns(ticks: int) -> float:
+    """Convert Pi 4 CNTVCT_EL0 ticks to nanoseconds."""
+    return ticks * 1e9 / PI4_CNTVCT_FREQ_HZ
+
+
 # --- Capture ---
 
 class WireCapture:
