@@ -20,7 +20,21 @@ else
   LINKER_SCRIPT = linker.ld
 endif
 
-ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS)
+# ---------------------------------------------------------------------------
+# Profile build flag
+#   make PERF=1               — enable cycle-counter instrumentation
+#
+# PERF=1 defines PERF_COUNTERS at assembly time. The hot-path probe
+# macros in include/perf.inc then expand into CNTVCT_EL0 reads and
+# accumulator updates. Without PERF=1 the macros are no-ops and the
+# perf_counters struct is not linked into the kernel.
+# ---------------------------------------------------------------------------
+PERF_ASFLAGS =
+ifeq ($(PERF),1)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1
+endif
+
+ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories
@@ -35,7 +49,7 @@ SHARED_OBJS = \
     $(BUILD)/ip.o $(BUILD)/ip_reasm.o $(BUILD)/icmp.o \
     $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
-    $(BUILD)/ntp.o $(BUILD)/md5.o
+    $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -223,6 +237,9 @@ $(BUILD)/ntp.o: lib/ntp.S include/ntp.inc include/net.inc include/timer.inc | $(
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/md5.o: lib/md5.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/perf.o: lib/perf.S include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
