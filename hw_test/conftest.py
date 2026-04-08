@@ -188,13 +188,78 @@ def _is_arp_reply_for(frame: bytes, target_ip: str) -> bool:
 
 @pytest.fixture(scope="session")
 def eth_iface() -> str:
-    """The interface that connects the laptop to the Pi 4 DUT."""
+    """The interface that connects the laptop to the Pi 4 DUT.
+
+    Side effect at session start: bumps the NIC's hardware RX ring to
+    its declared maximum if it's currently below 4096. The laptop's
+    USB gigabit adapter (Realtek r8152) ships with RX=100 by default,
+    which causes >30% loss in burst tests because the NIC drops
+    incoming frames before the kernel can drain them. Without this
+    bump every L2 burst test would be measuring the laptop NIC's
+    queue depth, not the Pi's behaviour.
+
+    Idempotent — re-runs are no-ops, and the change is local to this
+    process's view (cleared on driver reload).
+    """
     if not Path(f"/sys/class/net/{HW_TEST_IFACE}").exists():
         pytest.skip(
             f"interface {HW_TEST_IFACE} not present "
             f"(set HW_TEST_IFACE env var to override)"
         )
+    _ensure_rx_ring_max(HW_TEST_IFACE)
     return HW_TEST_IFACE
+
+
+def _ensure_rx_ring_max(iface: str) -> None:
+    """Read the NIC's max RX ring and bump current to it if below.
+
+    Best-effort: prints a warning if ethtool is missing or the bump
+    fails, but does not skip the session — small bursts still work
+    and the user may want to see how the framework behaves with the
+    default queue depth.
+    """
+    try:
+        out = subprocess.run(
+            ["ethtool", "-g", iface],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f"\n[L2] WARNING: cannot read RX ring on {iface} via ethtool")
+        return
+
+    max_rx = current_rx = None
+    section = None
+    for line in out.splitlines():
+        if "Pre-set maximums" in line:
+            section = "max"
+        elif "Current hardware settings" in line:
+            section = "cur"
+        elif section and line.lstrip().startswith("RX:"):
+            try:
+                v = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                continue
+            if section == "max" and max_rx is None:
+                max_rx = v
+            elif section == "cur" and current_rx is None:
+                current_rx = v
+
+    if max_rx is None or current_rx is None:
+        return
+    if current_rx >= max_rx:
+        return
+
+    try:
+        subprocess.run(
+            ["ethtool", "-G", iface, "rx", str(max_rx)],
+            check=True, capture_output=True, text=True, timeout=5,
+        )
+        print(f"\n[L2] {iface} RX ring bumped {current_rx} → {max_rx}")
+    except subprocess.CalledProcessError as e:
+        print(
+            f"\n[L2] WARNING: could not bump {iface} RX ring to {max_rx}: "
+            f"{e.stderr.strip()}"
+        )
 
 
 @pytest.fixture(scope="session")

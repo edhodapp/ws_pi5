@@ -4,22 +4,34 @@ test_l2_ring.py — GENET descriptor ring wraparound exercises.
 Bursts ARP requests at the Pi at boundary multiples of the 256-entry
 RX descriptor ring and asserts:
 
-  1. The Pi replies to all (or nearly all) of the burst.
+  1. The Pi replies to all of the burst (lossless).
   2. The Pi remains responsive after the burst (post-burst probe gets
      a reply within normal RTT).
 
-The 256-frame boundary is the most interesting one — wraparound bugs
-typically show up at index 256 → 0 first. Parametrizing across
-[1, 50, 255, 256, 257, 512, 1024] hits below, exactly at, just over,
-and a few wrap-cycles past the boundary.
+Uses RawL2Socket for both send and recv. WireCapture's per-poll pcap
+re-open is too slow at high frame rates and was over-reporting loss
+in the first iteration of this file (the framework was lying about
+the Pi). RawL2Socket reads directly from a single AF_PACKET socket
+with no parser in the hot path.
 
-NOTE: this exercises the Pi's RX descriptor ring (the laptop is the
-sender). The Pi's TX ring is exercised by the reply traffic, so this
-test indirectly covers both rings on the Pi side.
+Parametrizes across [1, 50, 255, 256, 257, 512, 1024]:
+  * 1, 50: sanity baselines
+  * 255: one below the RX ring wrap
+  * 256: exactly at the wrap
+  * 257: one wrap
+  * 512: two full cycles
+  * 1024: four full cycles
+
+Reproduces the GENET ARP burst loss anomaly tracked in
+project_genet_arp_burst_loss.md (memory) when present. When the
+GENET fix lands, this test should go all-green without any threshold
+relaxation.
 
 Run:
     HW_TEST=1 .venv/bin/pytest hw_test/test_l2_ring.py -v
 """
+
+import time
 
 import pytest
 
@@ -29,14 +41,17 @@ from conftest import requires_hardware, PI4_IP
 
 
 # Boundaries around the 256-entry GENET RX ring.
-# 1   — sanity baseline
-# 50  — small burst
-# 255 — one below wrap
-# 256 — exactly at wrap
-# 257 — one wrap
-# 512 — two full cycles
-# 1024 — four full cycles
 RING_BURST_SIZES = [1, 50, 255, 256, 257, 512, 1024]
+
+# How long to wait after the last send before declaring "no more
+# replies are coming." Tuned generously: at the highest burst the Pi
+# may need 100s of ms to drain its TX queue.
+REPLY_QUIESCE_MS = 500
+
+# Settle delay between tests so each parametrized run gets a clean
+# Pi state. Without this, leftover state from a previous large-burst
+# test contaminates the next test's measurement.
+PRE_TEST_QUIESCE_MS = 100
 
 
 @requires_hardware
@@ -49,105 +64,122 @@ class TestRingWraparound:
     ):
         """Send `n` ARP requests as a tight burst, count replies.
 
-        For small n the Pi MUST reply to every request. For large n
-        we tolerate up to ~5% reply loss because:
-          - The Linux kernel may drop a few outgoing frames under
-            burst conditions on the laptop side
-          - The Pi's RX ring may genuinely overrun before software
-            can drain it; the assertion is "the Pi recovers", not
-            "zero loss in a flooded ring"
-        After the burst we send ONE more probe and require a reply
-        within normal RTT — that's the real recovery test.
+        ASSERTION: every request gets a reply. Zero loss.
+
+        Currently FAILS at n >= ~444 due to the GENET ARP burst loss
+        anomaly tracked in project_genet_arp_burst_loss.md. When the
+        kernel-side fix lands, the assertion stays the same and the
+        test should turn green.
         """
-        # Build all the request frames up front so the send loop is
-        # tight (no per-frame allocation in the hot path).
+        time.sleep(PRE_TEST_QUIESCE_MS / 1000.0)
+
         request = eth_frames.build_arp_request(laptop_mac, laptop_ip, PI4_IP)
         burst = [request] * n
+        expected_pi_mac = pi_mac
+        expected_pi_ip = PI4_IP
 
-        # Tight BPF: only ARP replies from the Pi to us
-        bpf = (
-            f"arp and ether src {eth_frames.mac_bytes_to_str(pi_mac)} "
-            f"and ether dst {eth_frames.mac_bytes_to_str(laptop_mac)}"
+        def is_target_reply(frame: bytes) -> bool:
+            try:
+                arp = eth_frames.parse_arp(frame)
+            except (ValueError, OSError):
+                return False
+            return (
+                arp["opcode"] == eth_frames.ARP_OP_REPLY
+                and arp["sha"] == expected_pi_mac
+                and arp["spa"] == expected_pi_ip
+            )
+
+        with wire.RawL2Socket(eth_iface) as sock:
+            sock.drain()  # discard any pre-test stragglers
+
+            # Tight send loop. RawL2Socket.send is one syscall per
+            # frame; AF_PACKET batches under the hood.
+            t0 = time.monotonic()
+            for frame in burst:
+                sock.send(frame)
+            send_done = time.monotonic()
+
+            # Drain replies until we see no more for REPLY_QUIESCE_MS.
+            replies: list[bytes] = []
+            while True:
+                reply = sock.recv(
+                    timeout_ms=REPLY_QUIESCE_MS,
+                    predicate=is_target_reply,
+                )
+                if reply is None:
+                    break
+                replies.append(reply)
+                if len(replies) >= n:
+                    # Got everything; no need to wait further
+                    break
+            recv_done = time.monotonic()
+
+        send_ms = (send_done - t0) * 1000.0
+        total_ms = (recv_done - t0) * 1000.0
+
+        # Lossless assertion. When the GENET burst-loss bug is fixed,
+        # this stays green; until then it surfaces the count clearly.
+        assert len(replies) == n, (
+            f"GENET ARP burst loss: got {len(replies)}/{n} replies "
+            f"(send_time={send_ms:.1f}ms total={total_ms:.1f}ms). "
+            f"See project_genet_arp_burst_loss.md."
         )
 
-        # Deadline scales with burst size: assume each round-trip can
-        # cost up to rtt_p99_ms; add a 500 ms floor for setup overhead.
-        burst_deadline_ms = int(max(n * rtt_p99_ms + 500, 1000))
-
-        with wire.WireCapture(eth_iface, bpf=bpf) as cap:
-            sent = wire.send_frames(eth_iface, burst)
-            assert sent == n, f"laptop only sent {sent}/{n} frames"
-
-            replies = wire.wait_for_frames(
-                cap,
-                _is_arp_reply,
-                count=n,
-                deadline_ms=burst_deadline_ms,
-            )
-
-        # Reply count assertion (tolerance ramps with burst size)
-        if n <= 50:
-            tolerance = 0  # small bursts must be lossless
-        else:
-            tolerance = max(1, n // 20)  # ~5% loss budget for large bursts
-        min_expected = n - tolerance
-        assert len(replies) >= min_expected, (
-            f"got {len(replies)}/{n} ARP replies (tolerance {tolerance}, "
-            f"min expected {min_expected}); deadline {burst_deadline_ms} ms"
-        )
-
-        # Reply payloads must all be well-formed
-        for i, reply in enumerate(replies):
-            arp = eth_frames.parse_arp(reply)
-            assert arp["opcode"] == eth_frames.ARP_OP_REPLY, (
-                f"reply {i} is not an ARP reply: opcode={arp['opcode']}"
-            )
-            assert arp["sha"] == pi_mac, (
-                f"reply {i} sender MAC mismatch: "
-                f"expected {pi_mac.hex()}, got {arp['sha'].hex()}"
-            )
-            assert arp["spa"] == PI4_IP, (
-                f"reply {i} sender IP mismatch: expected {PI4_IP}, "
-                f"got {arp['spa']}"
-            )
+        # Spot-check the first and last replies for well-formedness.
+        # All-frames validation in a 1024-entry list is wasteful and
+        # repeats what eth_frames.parse_arp already did inside the
+        # predicate. Two boundary checks are enough to catch any
+        # lurking field-ordering bug.
+        for i in (0, len(replies) - 1):
+            arp = eth_frames.parse_arp(replies[i])
+            assert arp["opcode"] == eth_frames.ARP_OP_REPLY
+            assert arp["sha"] == pi_mac
+            assert arp["spa"] == PI4_IP
+            assert arp["tha"] == laptop_mac
+            assert arp["tpa"] == laptop_ip
 
     @pytest.mark.parametrize("n", RING_BURST_SIZES)
     def test_pi_responsive_after_burst(
         self, n, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
     ):
         """After an n-frame burst, the Pi answers a fresh probe within
-        normal RTT — proving the descriptor ring (and the GENET driver
-        state) recovered cleanly.
+        normal RTT — proving the GENET driver state (and the
+        descriptor rings) recovered cleanly.
 
         Run as a separate test from the burst-counting one so the
         report distinguishes "burst lost some frames" from "Pi was
-        permanently bricked by the burst".
+        permanently bricked by the burst." This is the more important
+        of the two: lossless replies under blast load is a stretch
+        goal; surviving the blast and resuming service is mandatory.
         """
+        time.sleep(PRE_TEST_QUIESCE_MS / 1000.0)
+
         request = eth_frames.build_arp_request(laptop_mac, laptop_ip, PI4_IP)
         burst = [request] * n
 
-        # Send the burst (don't even capture replies — we just want
-        # to stress the ring)
-        sent = wire.send_frames(eth_iface, burst)
-        assert sent == n
+        with wire.RawL2Socket(eth_iface) as sock:
+            sock.drain()
+            for frame in burst:
+                sock.send(frame)
+            # Don't bother counting burst replies — that's the other
+            # test's job. Just drain whatever's queued so we don't
+            # confuse the post-burst probe with leftover replies.
+            time.sleep(REPLY_QUIESCE_MS / 1000.0)
+            sock.drain()
 
-        # Now send a SINGLE fresh probe and assert reply within
-        # generous-but-not-unbounded deadline. We give 50x the
-        # baseline to absorb any post-burst settle time.
-        bpf = (
-            f"arp and ether src {eth_frames.mac_bytes_to_str(pi_mac)} "
-            f"and ether dst {eth_frames.mac_bytes_to_str(laptop_mac)}"
-        )
-        deadline_ms = int(max(50.0 * rtt_p99_ms, 1000.0))
-        with wire.WireCapture(eth_iface, bpf=bpf) as cap:
-            wire.send_frame(eth_iface, request)
-            reply = wire.wait_for_frame(
-                cap, _is_arp_reply,
-                deadline_ms=deadline_ms,
+            # Now send ONE fresh probe and assert reply within a
+            # generous-but-not-unbounded deadline. 50x baseline RTT
+            # absorbs any post-burst settle time on the Pi.
+            recovery_deadline_ms = int(max(50.0 * rtt_p99_ms, 1000.0))
+            sock.send(request)
+            reply = sock.recv(
+                timeout_ms=recovery_deadline_ms,
+                predicate=lambda f: _is_arp_reply_from(f, pi_mac, PI4_IP),
             )
+
         assert reply is not None, (
             f"Pi unresponsive after {n}-frame burst — no ARP reply within "
-            f"{deadline_ms} ms"
+            f"{recovery_deadline_ms} ms"
         )
         arp = eth_frames.parse_arp(reply)
         assert arp["sha"] == pi_mac
@@ -156,9 +188,13 @@ class TestRingWraparound:
 
 # --- Module-private predicate ---
 
-def _is_arp_reply(frame: bytes) -> bool:
+def _is_arp_reply_from(frame: bytes, expected_mac: bytes, expected_ip: str) -> bool:
     try:
         arp = eth_frames.parse_arp(frame)
     except (ValueError, OSError):
         return False
-    return arp["opcode"] == eth_frames.ARP_OP_REPLY
+    return (
+        arp["opcode"] == eth_frames.ARP_OP_REPLY
+        and arp["sha"] == expected_mac
+        and arp["spa"] == expected_ip
+    )
