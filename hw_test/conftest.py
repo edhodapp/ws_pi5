@@ -43,6 +43,14 @@ PI4_MAC_HINT  = os.environ.get("PI4_MAC", "")  # optional override
 # kernel init through GENET-up. Bound for boot-then-ARP-reachable.
 BOOT_DEADLINE_MS = 7000
 
+# Laptop NIC MTU during the L2 session — must be larger than the
+# biggest frame any L2 test wants to send, including the
+# test_l2_malformed.py oversize cases (1600). The Pi keeps its own
+# MTU at 1500, so frames between 1515 and 1600 hit the Pi as
+# oversize and the test verifies the Pi drops them. Restored to the
+# saved value at session end.
+LAPTOP_TEST_MTU = 2000
+
 # RTT sample size at session start. 100 round-trips of < 5ms each is
 # < 0.5s of session startup overhead.
 RTT_SAMPLE_COUNT = 100
@@ -446,7 +454,12 @@ def link_guard(request, eth_iface):
 
 @pytest.fixture(scope="session", autouse=True)
 def link_session_finalizer(request):
-    """Save link state at session start, restore at end.
+    """Save link state and MTU at session start, restore at end.
+
+    Bumps the laptop NIC MTU to LAPTOP_TEST_MTU so the malformed-frame
+    tests can transmit oversize frames (>1514) — AF_PACKET sends
+    enforce the device MTU, so without this the kernel rejects the
+    test frames at send time and we can't verify the Pi's behaviour.
 
     Restore is best-effort — if it fails, raise loudly so the next
     session doesn't inherit a wedged link.
@@ -459,8 +472,25 @@ def link_session_finalizer(request):
         return
 
     saved = link.link_state(HW_TEST_IFACE)
+    saved_mtu = link.link_get_mtu(HW_TEST_IFACE)
+    if saved_mtu < LAPTOP_TEST_MTU:
+        try:
+            link.link_set_mtu(HW_TEST_IFACE, LAPTOP_TEST_MTU)
+            print(
+                f"\n[L2] {HW_TEST_IFACE} MTU bumped {saved_mtu} → "
+                f"{LAPTOP_TEST_MTU} for the session"
+            )
+        except link.LinkError as e:
+            print(
+                f"\n[L2] WARNING: could not bump {HW_TEST_IFACE} MTU "
+                f"to {LAPTOP_TEST_MTU}: {e}"
+            )
+
     yield
+
     try:
+        if saved_mtu != link.link_get_mtu(HW_TEST_IFACE):
+            link.link_set_mtu(HW_TEST_IFACE, saved_mtu)
         link.restore_link(HW_TEST_IFACE, saved)
         # Confirm the link is up; if not, fail loudly.
         if saved["admin_up"]:

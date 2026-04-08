@@ -1,17 +1,25 @@
 """
 test_l2_speed.py — speed renegotiation recovery on the laptop side.
 
-Forces the laptop NIC to a non-default speed (100M), waits for
-carrier to re-establish, asserts the Pi is still ARP-reachable, then
-restores the original speed and verifies again. This catches GENET
-driver bugs around link-speed transitions: PHY register state stale,
-RGMII delay reconfiguration, MIB counter freeze logic broken on
-speed change.
+Restricts the laptop NIC's advertised speed to a non-default value
+(100M), waits for the Pi to renegotiate down via auto-negotiation,
+asserts ARP still works at the new speed, then restores the full
+advertisement and verifies again. This catches GENET driver bugs
+around link-speed transitions: PHY register state stale, RGMII
+delay reconfiguration, MIB counter freeze logic broken on speed
+change.
+
+NOTE: link.link_set_speed deliberately keeps autoneg ON and only
+restricts the advertise mask. The "autoneg off + force speed"
+approach fails to bring up carrier when the remote side has autoneg
+enabled (Pi 4 BCM54213PE always autonegs — we have no kernel-side
+mechanism to force speed on the Pi). Restricting the advertise mask
+is the IEEE-correct way to "force" a speed between two
+autoneg-capable endpoints.
 
 Uses link.temporary_link_speed which always restores even on test
-body raise — the link can never be left at a wrong speed by a failed
-test. The session-scope finalizer in conftest.py is the second safety
-net.
+body raise. The session-scope finalizer in conftest.py is the
+second safety net.
 
 Run:
     HW_TEST=1 .venv/bin/pytest hw_test/test_l2_speed.py -v
@@ -41,10 +49,11 @@ class TestSpeedRenegotiation:
         with link.temporary_link_speed(eth_iface, 100, settle_ms=10000):
             inside = link.link_state(eth_iface)
             assert inside["speed_mbps"] == 100, (
-                f"forced speed didn't take: got {inside['speed_mbps']}"
+                f"renegotiated speed didn't reach 100: "
+                f"got {inside['speed_mbps']}"
             )
-            assert inside["autoneg"] is False, (
-                "autoneg should be off when forcing speed"
+            assert inside["autoneg"] is True, (
+                "autoneg should remain on (we restrict advertise, not force)"
             )
             assert inside["carrier"], "no carrier at 100M"
 
@@ -77,20 +86,21 @@ class TestSpeedRenegotiation:
             f"{before['speed_mbps']} M"
         )
 
-    def test_force_1000m_explicitly_then_arp(
+    def test_advertise_only_1000m_then_arp(
         self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
     ):
-        """Force the laptop NIC to 1000M (explicit, autoneg off);
-        verify Pi follows and ARP works at the forced speed.
+        """Restrict advertised speed to 1000M only; verify ARP works
+        at the negotiated speed.
 
-        Different code path from autoneg-1G: forces the speed even if
-        autoneg would have negotiated 1G, so any GENET bug that only
-        triggers on autoneg-vs-forced is exercised.
+        Different code path from the default 1G autoneg: the laptop
+        only OFFERS 1000M, not the full set, so the Pi PHY's autoneg
+        state machine takes a slightly different path. Catches GENET
+        bugs that only manifest when only one mode is in the advert.
         """
         with link.temporary_link_speed(eth_iface, 1000, settle_ms=10000):
             inside = link.link_state(eth_iface)
             assert inside["speed_mbps"] == 1000
-            assert inside["autoneg"] is False
+            assert inside["autoneg"] is True
             assert inside["carrier"]
 
             reply = _arp_probe(
@@ -98,10 +108,10 @@ class TestSpeedRenegotiation:
                 deadline_ms=int(max(20.0 * rtt_p99_ms, 500.0)),
             )
             assert reply is not None, (
-                "Pi did not answer ARP at forced 1000M"
+                "Pi did not answer ARP at advertised-only 1000M"
             )
 
-        # Confirm autoneg is back on after exit
+        # Confirm we're back to advertising the full default set
         after = link.link_state(eth_iface)
         assert after["autoneg"] is True, (
             f"autoneg not restored: {after['autoneg']}"

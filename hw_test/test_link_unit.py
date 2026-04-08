@@ -232,16 +232,38 @@ class TestTemporaryLinkDownGuard:
 
 class TestWaitForCarrier:
 
-    def test_returns_immediately_if_already_up(self):
+    def test_returns_quickly_if_already_up(self):
+        # With stable_samples=5 and poll_ms=1, requires ~5ms minimum
         with patch("link.link_carrier", return_value=True):
-            elapsed = link.wait_for_carrier("eth0", deadline_ms=1000)
+            elapsed = link.wait_for_carrier(
+                "eth0", deadline_ms=1000, poll_ms=1, stable_samples=5,
+            )
         assert elapsed >= 0  # monotonic, never negative
-        assert elapsed < 0.5  # should be ~instant
+        assert elapsed < 0.5  # should be near-instant
 
     def test_raises_on_timeout(self):
         with patch("link.link_carrier", return_value=False):
-            with pytest.raises(link.LinkError, match="did not come up"):
-                link.wait_for_carrier("eth0", deadline_ms=50, poll_ms=10)
+            with pytest.raises(link.LinkError, match="did not stably come up"):
+                link.wait_for_carrier(
+                    "eth0", deadline_ms=50, poll_ms=10, stable_samples=5,
+                )
+
+    def test_resets_count_on_flap(self):
+        # Carrier flips: True, True, False, True (only 1 consecutive),
+        # then True, True, True, True, True (5 consecutive — should win)
+        seq = [True, True, False] + [True] * 10
+        idx = [0]
+        def fake_carrier(iface):
+            v = seq[idx[0]]
+            idx[0] = min(idx[0] + 1, len(seq) - 1)
+            return v
+        with patch("link.link_carrier", side_effect=fake_carrier):
+            elapsed = link.wait_for_carrier(
+                "eth0", deadline_ms=1000, poll_ms=1, stable_samples=5,
+            )
+        assert elapsed < 0.5  # should still be fast
+        # Confirm we consumed enough samples to reach the stable run
+        assert idx[0] >= 8  # 3 (flap) + 5 (stable) = 8
 
 
 # --- Netlink helpers ---

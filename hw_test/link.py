@@ -244,44 +244,165 @@ def link_down(iface: str) -> None:
     _set_link_flags(iface, set_up=False)
 
 
-def link_set_speed(iface: str, mbps: int, duplex: str = "full") -> None:
-    """Force speed/duplex with autoneg off.
+def link_get_mtu(iface: str) -> int:
+    """Read the interface MTU from sysfs (no caps needed)."""
+    return int(_sysfs_read(iface, "mtu"))
 
-    Most NICs require autoneg off when forcing speed; that's why this
-    helper does both in one call.
+
+def link_set_mtu(iface: str, mtu: int) -> None:
+    """Set the interface MTU via AF_NETLINK.
+
+    Required for oversize-frame tests: AF_PACKET SOCK_RAW sends are
+    rejected with EMSGSIZE if the frame exceeds the device MTU. Bump
+    the laptop NIC's MTU above the maximum frame the test will send,
+    and the Pi (whose own MTU stays at 1500) sees the frames as
+    oversize and drops them — which is what we want to verify.
+    """
+    if mtu < 68 or mtu > 65535:
+        raise ValueError(f"mtu out of range: {mtu}")
+    ifindex = _ifindex(iface)
+
+    # ifinfomsg
+    ifinfomsg = struct.pack("=BBHiII", AF_UNSPEC, 0, 0, ifindex, 0, 0)
+    # IFLA_MTU rtattr: len(2) + type(2) + value(4) = 8 bytes
+    IFLA_MTU = 4
+    rtattr = struct.pack("=HHI", 8, IFLA_MTU, mtu)
+    payload = ifinfomsg + rtattr
+
+    msg_len = 16 + len(payload)
+    nlmsghdr = struct.pack(
+        "=IHHII",
+        msg_len,
+        RTM_NEWLINK,
+        NLM_F_REQUEST | NLM_F_ACK,
+        2,  # seq — distinct from _set_link_flags's seq=1
+        0,
+    )
+    request = nlmsghdr + payload
+
+    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+    try:
+        try:
+            sock.bind((0, 0))
+        except PermissionError as e:
+            raise LinkError(
+                f"AF_NETLINK bind denied — does this python interpreter "
+                f"have cap_net_admin set?"
+            ) from e
+        sock.send(request)
+        sock.settimeout(2.0)
+        try:
+            reply = sock.recv(8192)
+        except socket.timeout as e:
+            raise LinkError(
+                f"netlink ack for {iface} mtu={mtu} timed out"
+            ) from e
+    finally:
+        sock.close()
+
+    if len(reply) < 20:
+        raise LinkError(f"short netlink reply ({len(reply)} bytes)")
+    rlen, rtype, rflags, rseq, rpid = struct.unpack("=IHHII", reply[:16])
+    if rtype != NLMSG_ERROR:
+        raise LinkError(f"unexpected netlink reply type {rtype}")
+    (errno,) = struct.unpack("=i", reply[16:20])
+    if errno != 0:
+        from errno import errorcode
+        e = -errno
+        name = errorcode.get(e, str(e))
+        raise LinkError(
+            f"netlink RTM_NEWLINK mtu={mtu} on {iface} failed: {name} ({e})"
+        )
+
+
+def link_set_speed(iface: str, mbps: int, duplex: str = "full") -> None:
+    """Restrict the link's advertised speed to one mode and let
+    auto-negotiation pick it.
+
+    NOTE: this does NOT use `autoneg off speed N`. When the local
+    side forces speed with autoneg disabled and the remote side has
+    autoneg enabled (which the Pi 4's BCM54213PE PHY does — we have
+    no kernel-side mechanism to force speed on the Pi), the link
+    behaviour is undefined per IEEE 802.3 and typically fails to
+    establish carrier. Empirically the laptop's r8152 + the Pi's
+    BCM54213PE will not bring up carrier in this configuration.
+
+    The IEEE-correct way to "force" a speed when both endpoints are
+    autoneg-capable is for one side to advertise only the desired
+    mode. Both sides keep autoneg ON, the laptop only offers `mbps`,
+    and the Pi negotiates that as the highest common mode.
+
+    `ethtool advertise` mask values:
+        10baseT/Half   = 0x001
+        10baseT/Full   = 0x002
+        100baseT/Half  = 0x004
+        100baseT/Full  = 0x008
+        1000baseT/Half = 0x010   (rarely supported)
+        1000baseT/Full = 0x020
     """
     if duplex not in ("full", "half"):
         raise ValueError(f"duplex must be 'full' or 'half', got {duplex!r}")
+    masks = {
+        (10,   "half"): 0x001,
+        (10,   "full"): 0x002,
+        (100,  "half"): 0x004,
+        (100,  "full"): 0x008,
+        (1000, "half"): 0x010,
+        (1000, "full"): 0x020,
+    }
+    if (mbps, duplex) not in masks:
+        raise ValueError(f"unsupported speed/duplex: {mbps}/{duplex}")
+    mask = masks[(mbps, duplex)]
     _run([
         "ethtool", "-s", iface,
-        "autoneg", "off",
-        "speed", str(mbps),
-        "duplex", duplex,
+        "autoneg", "on",
+        "advertise", f"0x{mask:03x}",
     ])
 
 
 def link_set_autoneg(iface: str) -> None:
-    """Re-enable auto-negotiation (caller usually wants this on restore)."""
+    """Re-enable auto-negotiation with the full default advertisement.
+
+    Use this on restore to undo a link_set_speed() that restricted
+    the advertise mask. Calling `ethtool -s ... autoneg on` without
+    an `advertise` argument resets the advertise mask to all
+    supported modes (verified empirically — `advertise 0x0` is NOT
+    valid; ethtool returns EINVAL for that).
+    """
     _run(["ethtool", "-s", iface, "autoneg", "on"])
 
 
 # --- Wait helpers (deadline-polled, not bare sleeps) ---
 
 def wait_for_carrier(iface: str, *, deadline_ms: int = 5000,
-                     poll_ms: int = 20) -> float:
-    """Block until carrier is up or deadline expires.
+                     poll_ms: int = 20, stable_samples: int = 5) -> float:
+    """Block until carrier is STABLY up or deadline expires.
 
-    Returns the elapsed seconds. Raises LinkError on timeout so the
-    caller can fail loudly with the iface name in the message.
+    Auto-negotiation can flap carrier multiple times before settling
+    on a final speed (especially when changing the advertise mask).
+    A naive "first carrier=1 wins" wait can return on a transient
+    blip and the caller's next sysfs read sees carrier=0 again. We
+    require `stable_samples` consecutive carrier=1 reads before
+    declaring success.
+
+    Returns the elapsed seconds (from start to first stable). Raises
+    LinkError on timeout so the caller can fail loudly with the
+    iface name in the message.
     """
     deadline = time.monotonic() + deadline_ms / 1000.0
     start = time.monotonic()
+    consecutive = 0
     while time.monotonic() < deadline:
         if link_carrier(iface):
-            return time.monotonic() - start
+            consecutive += 1
+            if consecutive >= stable_samples:
+                return time.monotonic() - start
+        else:
+            consecutive = 0
         time.sleep(poll_ms / 1000.0)
     raise LinkError(
-        f"{iface} carrier did not come up within {deadline_ms} ms"
+        f"{iface} carrier did not stably come up within {deadline_ms} ms "
+        f"(needed {stable_samples} consecutive samples)"
     )
 
 
@@ -299,6 +420,50 @@ def wait_for_speed(iface: str, expected_mbps: int, *,
     raise LinkError(
         f"{iface} did not reach {expected_mbps} Mb/s within "
         f"{deadline_ms} ms (last seen: {last_seen})"
+    )
+
+
+def wait_for_link_at(iface: str, expected_mbps: int, *,
+                     deadline_ms: int = 10000, poll_ms: int = 50,
+                     stable_samples: int = 3) -> float:
+    """Block until BOTH carrier=1 AND speed=expected_mbps, stably.
+
+    Required after a link_set_speed() call. The naive approach
+    (wait_for_carrier then wait_for_speed) is racy because:
+      - When the test calls link_set_speed, the kernel queues the
+        change but the PHY hasn't started renegotiating yet
+      - wait_for_carrier polls immediately and sees carrier=1 from
+        the OLD speed → returns instantly with stale data
+      - The link THEN actually renegotiates, dropping carrier and
+        coming back at the new speed
+      - The test body is now running and sees carrier=0 or
+        speed=old, depending on timing
+
+    Requiring carrier=1 AND speed=expected simultaneously, for
+    `stable_samples` consecutive polls, is robust against this race
+    because the stale (old-speed) state cannot satisfy both
+    conditions.
+    """
+    deadline = time.monotonic() + deadline_ms / 1000.0
+    start = time.monotonic()
+    consecutive = 0
+    last_speed = None
+    last_carrier = None
+    while time.monotonic() < deadline:
+        carrier = link_carrier(iface)
+        speed = link_state(iface)["speed_mbps"]
+        last_carrier = carrier
+        last_speed = speed
+        if carrier and speed == expected_mbps:
+            consecutive += 1
+            if consecutive >= stable_samples:
+                return time.monotonic() - start
+        else:
+            consecutive = 0
+        time.sleep(poll_ms / 1000.0)
+    raise LinkError(
+        f"{iface} did not reach stable carrier+{expected_mbps}Mb/s within "
+        f"{deadline_ms} ms (last: carrier={last_carrier}, speed={last_speed})"
     )
 
 
@@ -332,29 +497,36 @@ def restore_link(iface: str, saved: dict) -> None:
 
 @contextmanager
 def temporary_link_speed(iface: str, mbps: int, duplex: str = "full",
-                         *, settle_ms: int = 5000):
-    """Force a speed for the duration of the with-block, then restore.
+                         *, settle_ms: int = 10000):
+    """Restrict advertised speed for the duration of the with-block,
+    then restore.
 
-    On entry: saves current state, applies the forced speed, waits for
-    carrier to come back at the new speed (renegotiation can take a
-    second or two), then yields.
+    On entry: saves current state, restricts the advertise mask via
+    link_set_speed, then uses wait_for_link_at to require carrier=1
+    AND speed=mbps stably (3 consecutive samples) before yielding.
+    The combined wait is essential — see wait_for_link_at's docstring
+    for the race that wait_for_carrier alone is exposed to.
 
-    On exit: restores the saved state — never to a hardcoded default.
-    Restoration runs even if the body raised. If restoration itself
-    fails, the exception propagates after the test body's exception
-    (Python's standard finally semantics).
+    On exit: restores the saved state via link_set_autoneg, then
+    waits for the link to come back stably at the saved speed.
     """
     saved = link_state(iface)
     try:
         link_set_speed(iface, mbps, duplex)
-        wait_for_carrier(iface, deadline_ms=settle_ms)
-        wait_for_speed(iface, mbps, deadline_ms=settle_ms)
+        wait_for_link_at(iface, mbps, deadline_ms=settle_ms)
         yield saved
     finally:
-        restore_link(iface, saved)
-        # After restore, the link should come back at the saved speed.
-        # Don't fail here if it doesn't — the session-scope finalizer
-        # will catch a wedged link with a louder error.
+        try:
+            link_set_autoneg(iface)
+            if saved["speed_mbps"]:
+                wait_for_link_at(
+                    iface, saved["speed_mbps"],
+                    deadline_ms=settle_ms,
+                )
+        except LinkError:
+            # Don't mask the test body exception; the session
+            # finalizer will catch a wedged link with a louder error.
+            pass
 
 
 @contextmanager
