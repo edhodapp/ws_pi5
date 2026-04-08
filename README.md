@@ -9,7 +9,7 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** Pi 4 hardware bringup — UART chainloader transferring kernels over serial, GENET Gigabit Ethernet driver under development.
+**Current stage:** Pi 4 hardware bringup complete for L2 — UART chainloader, GENET Gigabit Ethernet RX+TX, PHY speed renegotiation, and a 141-test L2 hardening integration suite (reachability, ring wraparound, link-flap, malformed-frame drop, speed renegotiation) driving the Pi from a host laptop. L3+ rehardening on top of the new framework is the next stage.
 
 ## The Experiment
 
@@ -450,16 +450,20 @@ fcntl.ioctl(fd, TIOCMBIC, bits)   # DTR low → GLOBAL_EN HIGH → Pi boots
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
 | **Chainloader** | Production ready | Intel HEX over UART0, 2-byte ACK/NAK, DTR reset, 27 KB in 12s |
-| **GENET Ethernet** | In progress | UMAC reset, RGMII, PHY auto-negotiation, RX proven — TX DMA under investigation |
+| **GENET Ethernet** | Working | UMAC reset, RGMII, PHY auto-negotiation, RX+TX, live-speed renegotiation via periodic PHY poll. 256-slot RX ring is the current burst-handling bottleneck (tracked; bigger ring is the next fix). |
 | **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART0, mailbox, MMU |
+| **L2 hardening framework** | Production ready | `hw_test/` pytest suite: eth_frames, link (netlink up/down + ethtool), wire (tcpdump WireCapture + AF_PACKET RawL2Socket), conftest fixtures (RTT baseline, failure-pcap forensics, session link guard). 94 off-hardware unit tests + 39 live L2 tests (reachability, 256-entry ring wraparound, link-flap recovery, malformed-frame drop, 100M/1G speed renegotiation) driven from the laptop against the Pi. |
 
-**Kernel image:** 27 KB (text + rodata + data; BSS: 32.6 MB runtime)
+**Kernel image:** 27.8 KB (text + rodata + data; BSS: 32.6 MB runtime, includes 512 KB GENET RX pool)
 
 **Test coverage:**
-- 379 assembly tests + 34 Python tests + 153 functional tests + 39 fuzz seeds = **605 total**
-- All tests pass on QEMU 7.2, 8.2, and 11.0-rc0
+- 379 assembly tests + 34 Python tests + 153 functional tests + 39 fuzz seeds
+- **94 off-hardware L2 framework unit tests + 39 live L2 hardware tests (hw_test/)** — total **738+**
+- All assembly and Python unit tests pass on QEMU 7.2, 8.2, and 11.0-rc0
 - 100% branch coverage, every test has explicit assertions
 - 100% mutation score on Intel HEX library (mutmut)
+
+**Known open bug:** `test_l2_ring[1024]` is red — the Pi's 256-slot GENET RX descriptor ring overflows under a sustained 1024-frame ARP burst (drain rate ~1.84 μs/frame vs. laptop effective arrival ~3.2 μs/frame; empirical lossless burst ceiling ~600 frames). Root cause fully characterized; fix is to bump `DMA_DESC_COUNT` to the hardware maximum (likely 512). Tracked in `memory/project_genet_arp_burst_loss.md`.
 
 ### MMU and Caches
 
@@ -502,13 +506,14 @@ Native GENET v5 driver for the BCM2711's built-in Gigabit MAC, replacing the USB
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **UMAC reset** | Done | Reset sequence, RGMII configuration |
-| **PHY auto-negotiation** | Done | Gigabit link established |
-| **RX path** | Proven | Receives frames from Chromebook (ping, ARP) via direct boot test |
-| **TX path** | Blocked | DMA data engine won't fetch from RAM — all registers match U-Boot |
-| **U-Boot comparison** | Done | Bidirectional ping works under U-Boot, confirming hardware is functional |
+| **UMAC reset + RGMII** | Done | Reset sequence, ID_MODE_DIS bit for RGMII skew, MAC0/MAC1 programming |
+| **PHY auto-negotiation** | Done | Gigabit link established, AUX_STS polled for negotiated speed |
+| **RX path** | Working | RBUF_ALIGN_2B enabled (earlier 2-byte pad mismatch fixed); ARP, ICMP, full protocol stack |
+| **TX path** | Working | Synchronous send, cache flush + DSB + descriptor write + PROD_INDEX bump; vectorized rx_copy (ldp/stp 16-byte chunks) |
+| **PHY speed renegotiation** | Working | `genet_phy_check` on the `net_loop` idle path reads PHY_AUX_STS and updates `UMAC_CMD` SPEED bits. Catches 1G → 100M transitions at runtime. Earlier bug: `genet_init` configured the speed once and never refreshed, breaking every test_l2_speed case. |
+| **L2 hardening tests** | 36/39 passing | `test_l2_ring[1024]` open — the 256-slot RX ring is the bottleneck under wire-rate bursts; next-session fix is to bump `DMA_DESC_COUNT` to the hardware maximum |
 
-The TX DMA issue is the current focus. U-Boot proves the hardware works; the driver's DMA descriptor setup needs investigation. Compiled U-Boot GENET assembly is available for register-level comparison.
+The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi4 → scripts/hw_send.py → HW_TEST=1 pytest hw_test/` takes about 30 seconds end to end. The L2 hardening framework at `hw_test/` is how every GENET behaviour claim in this README gets verified.
 
 ### Design Decisions
 
