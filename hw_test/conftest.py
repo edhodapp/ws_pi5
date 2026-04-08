@@ -244,28 +244,37 @@ def rtt_p99_ms(eth_iface, laptop_mac, laptop_ip) -> float:
     from this value rather than hardcoding magic numbers. If the
     measured RTT exceeds RTT_BASELINE_CEILING_MS, fail the session
     loudly — the test bench is broken.
+
+    Implementation: uses a single RawL2Socket for both send and recv
+    so each probe is just one syscall pair. WireCapture's per-poll
+    pcap re-open would dominate at this latency scale (sub-millisecond
+    real RTT vs ~10ms pcap parse).
     """
+    request = eth_frames.build_arp_request(laptop_mac, laptop_ip, PI4_IP)
+
     samples_ms: list[float] = []
-    deadline = time.monotonic() + (BOOT_DEADLINE_MS + 5000) / 1000.0
-    # Collect RTT_SAMPLE_COUNT good RTTs, but allow some retries if
-    # the Pi is mid-boot at session start.
     failures = 0
-    while len(samples_ms) < RTT_SAMPLE_COUNT and time.monotonic() < deadline:
-        t0 = time.monotonic()
-        arp = _arp_probe_once(
-            eth_iface, laptop_mac, laptop_ip, PI4_IP,
-            deadline_ms=300,
-        )
-        elapsed_ms = (time.monotonic() - t0) * 1000.0
-        if arp is None:
-            failures += 1
-            if failures > 10 and not samples_ms:
-                pytest.skip(
-                    f"Pi at {PI4_IP} not ARP-reachable on {eth_iface} "
-                    f"after {failures} probes — cannot establish RTT baseline"
-                )
-            continue
-        samples_ms.append(elapsed_ms)
+
+    with wire.RawL2Socket(eth_iface) as sock:
+        deadline = time.monotonic() + 10.0  # 10s budget for 100 samples
+        while len(samples_ms) < RTT_SAMPLE_COUNT and time.monotonic() < deadline:
+            sock.drain()  # discard any straggler frames between probes
+            t0 = time.monotonic()
+            sock.send(request)
+            reply = sock.recv(
+                timeout_ms=200,
+                predicate=lambda data: _is_arp_reply_for(data, PI4_IP),
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            if reply is None:
+                failures += 1
+                if failures > 10 and not samples_ms:
+                    pytest.skip(
+                        f"Pi at {PI4_IP} not ARP-reachable on {eth_iface} "
+                        f"after {failures} probes — cannot establish RTT baseline"
+                    )
+                continue
+            samples_ms.append(elapsed_ms)
 
     if len(samples_ms) < RTT_SAMPLE_COUNT // 2:
         pytest.skip(

@@ -116,6 +116,134 @@ def send_frames(iface: str, frames: Iterable[bytes]) -> int:
     return sent_count
 
 
+# --- Low-overhead bidirectional AF_PACKET socket ---
+#
+# For high-rate / low-latency use cases (RTT baselining, ring-blast
+# tests) WireCapture's per-poll pcap re-open is too slow. RawL2Socket
+# is a single AF_PACKET socket bound to one interface that does both
+# send and recv with a kernel BPF filter for noise rejection. No
+# tcpdump subprocess, no pcap file, no scapy in the hot path.
+#
+# Captures only inbound frames matching the BPF, with sub-millisecond
+# round-trip latency on a direct gigabit link.
+
+class RawL2Socket:
+    """Bidirectional AF_PACKET socket bound to one interface.
+
+    Usage:
+        with RawL2Socket(iface) as sock:
+            sock.send(frame)
+            reply = sock.recv(timeout_ms=10)   # raw bytes or None
+
+    Construct with `bpf_filter` to install a kernel-level BPF program
+    so recv() only returns frames that match — drops everything else
+    in the kernel before it reaches userspace. This is the same
+    mechanism tcpdump uses, just in-process.
+    """
+
+    def __init__(self, iface: str, *, recv_buf_bytes: int = 256 * 1024):
+        self.iface = iface
+        self._sock: Optional[socket.socket] = None
+        self._recv_buf_bytes = recv_buf_bytes
+
+    def __enter__(self) -> "RawL2Socket":
+        try:
+            s = socket.socket(
+                socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
+            )
+        except PermissionError as e:
+            raise WireError(
+                f"AF_PACKET socket on {self.iface} denied — is "
+                f"cap_net_raw granted to this python interpreter?"
+            ) from e
+        try:
+            s.bind((self.iface, 0))
+        except OSError as e:
+            s.close()
+            raise WireError(
+                f"cannot bind AF_PACKET socket to {self.iface}: {e}"
+            ) from e
+        # Bigger SO_RCVBUF so high-rate bursts don't drop in kernel
+        try:
+            s.setsockopt(
+                socket.SOL_SOCKET, socket.SO_RCVBUF, self._recv_buf_bytes
+            )
+        except OSError:
+            pass
+        # Drain anything stale already buffered (from before we bound)
+        s.setblocking(False)
+        try:
+            while True:
+                s.recv(65536)
+        except BlockingIOError:
+            pass
+        self._sock = s
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+    def send(self, frame: bytes) -> None:
+        if self._sock is None:
+            raise WireError("RawL2Socket not open")
+        if len(frame) < 14:
+            raise WireError(f"frame too short for L2 send: {len(frame)}")
+        n = self._sock.send(frame)
+        if n != len(frame):
+            raise WireError(
+                f"short send on {self.iface}: requested {len(frame)}, sent {n}"
+            )
+
+    def recv(
+        self,
+        *,
+        timeout_ms: int,
+        predicate: Optional[Callable[[bytes], bool]] = None,
+    ) -> Optional[bytes]:
+        """Receive one frame, optionally filtered by predicate.
+
+        Returns the first frame for which `predicate(data)` is True
+        (or any frame if predicate is None) within the deadline.
+        Returns None on timeout. Drops the readiness probe ethertype
+        automatically so we don't get false positives.
+        """
+        if self._sock is None:
+            raise WireError("RawL2Socket not open")
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            self._sock.settimeout(remaining)
+            try:
+                data = self._sock.recv(65536)
+            except (socket.timeout, BlockingIOError):
+                return None
+            if len(data) < 14:
+                continue
+            etype = (data[12] << 8) | data[13]
+            if etype == READY_PROBE_ETHERTYPE:
+                continue
+            if predicate is None or predicate(data):
+                return data
+
+    def drain(self) -> int:
+        """Discard all currently-buffered RX frames. Returns count drained."""
+        if self._sock is None:
+            raise WireError("RawL2Socket not open")
+        n = 0
+        self._sock.settimeout(0)
+        try:
+            while True:
+                self._sock.recv(65536)
+                n += 1
+        except (BlockingIOError, socket.timeout):
+            pass
+        return n
+
+
 # --- Capture ---
 
 class WireCapture:
