@@ -4,7 +4,22 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TEST_KERNEL="$PROJECT_DIR/build/test_kernel8.img"
-QEMU=${QEMU:-$HOME/qemu-dev/qemu/build/qemu-system-aarch64}
+
+# QEMU selection order:
+#   1. explicit $QEMU env var (user override)
+#   2. custom build at $HOME/qemu-dev/qemu/build/qemu-system-aarch64
+#      (historical default from the Chromebook dev setup)
+#   3. system qemu-system-aarch64 on PATH
+if [ -n "${QEMU:-}" ]; then
+    :  # user override — use as-is
+elif [ -x "$HOME/qemu-dev/qemu/build/qemu-system-aarch64" ]; then
+    QEMU="$HOME/qemu-dev/qemu/build/qemu-system-aarch64"
+elif command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    QEMU="$(command -v qemu-system-aarch64)"
+else
+    echo "ERROR: no qemu-system-aarch64 found. Install it or set \$QEMU." >&2
+    exit 1
+fi
 TIMEOUT=${QEMU_TIMEOUT:-10}
 
 if [ ! -f "$TEST_KERNEL" ]; then
