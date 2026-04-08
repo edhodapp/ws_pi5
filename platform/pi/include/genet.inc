@@ -108,10 +108,11 @@
 /* RX descriptor length_status */
 .equ RX_DMA_OWN,              0x8000
 
-/* GENET state struct — tracks DMA ring indices */
+/* GENET state struct — tracks DMA ring indices and cached PHY state */
 .equ GENET_STATE_RX_CIDX,     0    /* RX consumer index (16-bit) */
 .equ GENET_STATE_RX_RIDX,     4    /* RX ring index (0-255) */
 .equ GENET_STATE_TX_PIDX,     8    /* TX producer index (16-bit) */
 .equ GENET_STATE_TX_RIDX,     12   /* TX ring index (0-255) */
-.equ GENET_STATE_RX_POOL,     16   /* RX buffer pool CPU address */
-.equ GENET_STATE_SIZE,        24
+.equ GENET_STATE_RX_POOL,     16   /* RX buffer pool CPU address (8 bytes) */
+.equ GENET_STATE_PHY_SPEED,   24   /* cached PHY speed code from AUX_STS */
+.equ GENET_STATE_SIZE,        32   /* padded to 8-byte alignment */

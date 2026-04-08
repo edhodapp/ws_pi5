@@ -191,7 +191,7 @@ net_loop:
 .else
     bl      cdc_ecm_recv
 .endif
-    cbnz    w0, .Lnet_timers        /* recv failed / no frame → check timers */
+    cbnz    w0, .Lnet_idle          /* recv returned no frame → idle path */
 
     /* w1 = actual frame length */
     ldr     x0, =rx_buf
@@ -206,6 +206,21 @@ net_loop:
     bl      genet_send
 .else
     bl      cdc_ecm_send
+.endif
+    b       .Lnet_timers
+
+.Lnet_idle:
+    /* No frame this iteration — burst (if any) has drained.
+     * Run background work that's too expensive for the recv hot path:
+     * polling the PHY for link-speed changes. genet_phy_check costs
+     * one MDIO read (~50us), which would shrink burst-drain throughput
+     * if it ran on every loop iteration; gating it on the no-frame
+     * idle path keeps speed-change responsiveness without slowing
+     * burst handling. */
+.ifdef PLATFORM_PI4
+    ldr     x0, =NET_BASE_SYM
+    ldr     x1, =NET_STATE_SYM
+    bl      genet_phy_check
 .endif
 
 .Lnet_timers:

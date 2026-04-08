@@ -277,6 +277,12 @@ genet_init:
     orr     w0, w0, #(UMAC_CMD_TX_EN | UMAC_CMD_RX_EN)
     str     w0, [x19, #GENET_UMAC_CMD]
 
+    /* Cache the boot speed code in state. genet_phy_check uses this
+     * to detect link renegotiation and update UMAC_CMD's SPEED bits
+     * accordingly. Without this the MAC stays at the boot speed and
+     * silently drops all RX after a link speed change. */
+    str     w23, [x20, #GENET_STATE_PHY_SPEED]
+
     /* Init state indices */
     ldr     w0, [x19, #RDMA_PROD_INDEX]
     and     w0, w0, #0xFFFF
@@ -570,4 +576,91 @@ genet_set_mac:
     ldrb    w3, [x1, #5]
     orr     w2, w2, w3
     str     w2, [x0, #GENET_UMAC_MAC1]
+    ret
+
+/*
+ * genet_phy_check — Poll the PHY for a speed change and update
+ * UMAC_CMD's SPEED bits if the link has renegotiated.
+ *
+ * Without this, after the PHY auto-negotiates to a different speed
+ * (e.g. the link partner restricts its advertise mask to 100M),
+ * the GENET MAC remains configured for the boot speed and samples
+ * RGMII at the wrong rate, silently dropping all RX traffic.
+ *
+ * x0: GENET base address
+ * x1: pointer to genet_state struct (uses GENET_STATE_PHY_SPEED slot)
+ *
+ * Cost: ~one MDIO read per call (a few microseconds). Idempotent —
+ * if the PHY speed hasn't changed since the last call, this is a
+ * no-op except for the MDIO transaction. Safe to call from the main
+ * net_loop on every iteration.
+ *
+ * Speed code from PHY_AUX_STS bits [10:8] per BCM54213PE datasheet:
+ *   7 = 1000baseT/Full
+ *   6 = 1000baseT/Half
+ *   5 = 100baseTX/Full
+ *   3 = 100baseTX/Half
+ *   2 = 10baseT/Full
+ *   1 = 10baseT/Half
+ *   0 = no link
+ *
+ * Mapped to UMAC_CMD bits:
+ *   1G  → UMAC_CMD_SPEED_1000 (bit 3)
+ *   100 → UMAC_CMD_SPEED_100  (bit 2)
+ *   10  → both bits clear
+ */
+.global genet_phy_check
+genet_phy_check:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    mov     x19, x0                       /* base */
+    mov     x20, x1                       /* state */
+
+    /* Read current PHY speed code */
+    mov     w0, #PHY_AUX_STS
+    bl      genet_mdio_read
+    /* w0 = full register; speed code is bits [10:8] */
+    lsr     w0, w0, #8
+    and     w0, w0, #7                    /* w0 = current speed code */
+
+    /* Compare to cached value; bail if unchanged */
+    ldr     w1, [x20, #GENET_STATE_PHY_SPEED]
+    cmp     w0, w1
+    b.eq    .Lphy_check_done
+
+    /* Speed changed: derive the new UMAC_CMD SPEED bits */
+    mov     w2, #0                        /* w2 = new SPEED bits (default 10M) */
+    cmp     w0, #7
+    b.eq    .Lphy_set_1000
+    cmp     w0, #6
+    b.eq    .Lphy_set_1000
+    cmp     w0, #5
+    b.eq    .Lphy_set_100
+    cmp     w0, #3
+    b.eq    .Lphy_set_100
+    b       .Lphy_apply
+.Lphy_set_1000:
+    mov     w2, #UMAC_CMD_SPEED_1000
+    b       .Lphy_apply
+.Lphy_set_100:
+    mov     w2, #UMAC_CMD_SPEED_100
+
+.Lphy_apply:
+    /* RMW UMAC_CMD: clear both SPEED bits (mask 0xC), then OR in
+     * the new ones. Preserves TX_EN, RX_EN, PROMISC, and any other
+     * runtime state. The pre-computed mask 0xC = SPEED_100 |
+     * SPEED_1000 is a hex literal because GNU as doesn't allow OR
+     * of two .equ symbols in an immediate. */
+    ldr     w3, [x19, #GENET_UMAC_CMD]
+    bic     w3, w3, #0xc
+    orr     w3, w3, w2
+    str     w3, [x19, #GENET_UMAC_CMD]
+
+    /* Cache the new speed code so the next call is a no-op */
+    str     w0, [x20, #GENET_STATE_PHY_SPEED]
+
+.Lphy_check_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
