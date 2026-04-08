@@ -456,17 +456,38 @@ genet_recv:
     cmp     w5, w22
     csel    w5, w5, w22, lt
 
-    /* Copy frame to caller's buffer */
-    mov     x3, x21                 /* dst */
-    mov     w4, #0
-.Lrx_copy:
-    cmp     w4, w5
-    b.ge    .Lrx_copy_done
-    ldrb    w6, [x0, x4]
-    strb    w6, [x3, x4]
-    add     w4, w4, #1
-    b       .Lrx_copy
+    /* Copy frame to caller's buffer, 16 bytes per iteration via
+     * ldp/stp with post-increment addressing. For a 60-byte ARP
+     * frame: 3 × 16-byte copies (~12 cycles) + 12 × 1-byte tail
+     * (~48 cycles) = ~60 cycles vs ~240 for the old byte loop.
+     * For a 1500-byte TCP payload the speedup is ~10x because
+     * the 16-byte inner loop dominates.
+     *
+     * The byte-copy to a fixed rx_buf is intentional, not legacy:
+     * it's a cache-locality optimization. The protocol stack then
+     * works on the same hot L1 line across frames, which is faster
+     * than a "zero-copy" in-place approach that would miss on a
+     * different rx_pool slot for each frame. See
+     * project_genet_arp_burst_loss.md for the investigation. */
+    mov     x3, x21                 /* dst (rx_buf) */
+    mov     w9, w5                  /* save length for return (w5 is
+                                     * clobbered by the copy loop) */
+.Lrx_copy16:
+    cmp     w5, #16
+    b.lt    .Lrx_copy_tail
+    ldp     x7, x8, [x0], #16
+    stp     x7, x8, [x3], #16
+    sub     w5, w5, #16
+    b       .Lrx_copy16
+.Lrx_copy_tail:
+    cbz     w5, .Lrx_copy_done
+.Lrx_copy_byte:
+    ldrb    w6, [x0], #1
+    strb    w6, [x3], #1
+    subs    w5, w5, #1
+    b.ne    .Lrx_copy_byte
 .Lrx_copy_done:
+    mov     w5, w9                  /* restore length for return */
 
     /* Update consumer index */
     ldr     w0, [x20, #GENET_STATE_RX_CIDX]
