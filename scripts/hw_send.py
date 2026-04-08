@@ -33,7 +33,18 @@ def set_dtr(fd, state):
 
 
 def open_serial(path):
-    """Open serial port: 115200 8N1, raw, CRTSCTS."""
+    """Open serial port: 115200 8N1, raw, no flow control.
+
+    NOTE: must set ispeed/ospeed (attrs[4], attrs[5]) explicitly in
+    addition to the CBAUD bits in cflag. On modern Linux the kernel
+    keeps the legacy CBAUD bits in sync with the separate c_ispeed /
+    c_ospeed fields, and when they conflict the explicit speed fields
+    win. If a previous opener (e.g. ModemManager probing) left the
+    cp210x at 9600, leaving attrs[4]/[5] alone preserves 9600 even
+    though we set B115200 in cflag — and the chainloader's 115200
+    output comes back as garbage. Setting both is the only reliable
+    way.
+    """
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
     attrs = termios.tcgetattr(fd)
     attrs[0] = 0                    # iflag: raw
@@ -41,6 +52,8 @@ def open_serial(path):
     attrs[2] = (termios.CS8 | termios.CLOCAL | termios.CREAD
                 | termios.B115200)
     attrs[3] = 0                    # lflag: raw
+    attrs[4] = termios.B115200      # ispeed — required, not optional
+    attrs[5] = termios.B115200      # ospeed — required, not optional
     attrs[6][termios.VMIN] = 1      # blocking read, 1 byte min
     attrs[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
