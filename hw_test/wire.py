@@ -405,13 +405,44 @@ def wait_for_frame(
     actively writing — relies on `-U --immediate-mode` to keep the
     pcap consistent on disk.
     """
+    matches = wait_for_frames(
+        capture, predicate, count=1,
+        deadline_ms=deadline_ms, poll_ms=poll_ms,
+    )
+    return matches[0] if matches else None
+
+
+def wait_for_frames(
+    capture: WireCapture,
+    predicate: Callable[[bytes], bool],
+    *,
+    count: int,
+    deadline_ms: int,
+    poll_ms: int = 5,
+) -> list[bytes]:
+    """Poll a LIVE WireCapture until `count` frames match `predicate`,
+    or deadline expires.
+
+    Returns the list of matching frames in capture order. If the
+    deadline is hit before `count` matches are seen, returns whatever
+    has been collected so far (which may be empty or short of `count`).
+    Tests should assert on `len(result) == count` to fail with the
+    actual short count rather than a generic timeout.
+
+    Implementation note: re-opens the pcap on each poll cycle so
+    fresh writes from tcpdump are picked up. O(N²) in the number of
+    captured frames, but N is small (a few thousand at most for the
+    L2 ring tests). Uses an offset cursor to skip already-seen
+    packets in the parse loop.
+    """
     if capture._exited:
-        raise WireError("wait_for_frame requires a live (in-progress) capture")
+        raise WireError("wait_for_frames requires a live (in-progress) capture")
 
     import scapy.layers.l2  # noqa: F401  # register DLT_EN10MB
     from scapy.utils import PcapReader  # cold-path import
 
     deadline = time.monotonic() + deadline_ms / 1000.0
+    matches: list[bytes] = []
     seen_offset = 0
     while time.monotonic() < deadline:
         try:
@@ -430,8 +461,10 @@ def wait_for_frame(
                     if etype == READY_PROBE_ETHERTYPE:
                         continue
                     if predicate(data):
-                        return data
+                        matches.append(data)
+                        if len(matches) >= count:
+                            return matches
         except Exception:  # noqa: BLE001 — reader can race tcpdump's writes
             pass
         time.sleep(poll_ms / 1000.0)
-    return None
+    return matches

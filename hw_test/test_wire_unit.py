@@ -158,6 +158,47 @@ class TestWaitForFrameGuard:
         with pytest.raises(wire.WireError, match="live"):
             wire.wait_for_frame(cap, lambda d: True, deadline_ms=10)
 
+    def test_wait_for_frames_on_exited_capture_raises(self):
+        cap = wire.WireCapture("eth0", verify_ready=False)
+        cap._exited = True
+        with pytest.raises(wire.WireError, match="live"):
+            wire.wait_for_frames(cap, lambda d: True, count=3, deadline_ms=10)
+
+    def test_wait_for_frames_returns_partial_on_timeout(self, tmp_path):
+        # Build a pcap with 2 matching frames, then ask wait_for_frames
+        # for 5 frames with a tiny deadline. Should return the 2 it found.
+        from scapy.layers.l2 import Ether
+        from scapy.utils import wrpcap
+        a = b"\xff" * 6 + b"\x00" * 6 + struct.pack("!H", 0x0806) + b"\x00" * 46
+        b = b"\xff" * 6 + b"\x11" * 6 + struct.pack("!H", 0x0806) + b"\x00" * 46
+        pcap = tmp_path / "two.pcap"
+        wrpcap(str(pcap), [Ether(a), Ether(b)])
+
+        cap = wire.WireCapture("eth0", verify_ready=False)
+        cap._pcap_path = pcap
+        result = wire.wait_for_frames(
+            cap, lambda d: True, count=5, deadline_ms=50, poll_ms=10,
+        )
+        assert len(result) == 2
+
+    def test_wait_for_frames_finds_exact_count(self, tmp_path):
+        from scapy.layers.l2 import Ether
+        from scapy.utils import wrpcap
+        frames = [
+            b"\xff" * 6 + bytes([i]) * 6 + struct.pack("!H", 0x0806) + b"\x00" * 46
+            for i in range(5)
+        ]
+        pcap = tmp_path / "five.pcap"
+        wrpcap(str(pcap), [Ether(f) for f in frames])
+
+        cap = wire.WireCapture("eth0", verify_ready=False)
+        cap._pcap_path = pcap
+        result = wire.wait_for_frames(
+            cap, lambda d: True, count=3, deadline_ms=50, poll_ms=10,
+        )
+        # Stops at 3 — fourth and fifth not returned
+        assert len(result) == 3
+
 
 class TestPcapProbeFiltering:
 
