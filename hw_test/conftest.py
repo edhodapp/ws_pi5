@@ -328,8 +328,15 @@ def rtt_p99_ms(eth_iface, laptop_mac, laptop_ip) -> float:
     samples_ms: list[float] = []
     failures = 0
 
+    # Patience for the FIRST sample is generous: previous test runs in
+    # the same process or back-to-back invocations may have left the
+    # Pi mid-renegotiation. We allow up to ~10 seconds of failed
+    # probes before declaring the Pi truly absent. Subsequent samples
+    # share a tighter overall deadline.
+    FIRST_SAMPLE_FAILURE_BUDGET = 50  # x 200ms = 10s
+
     with wire.RawL2Socket(eth_iface) as sock:
-        deadline = time.monotonic() + 10.0  # 10s budget for 100 samples
+        deadline = time.monotonic() + 20.0  # 20s budget total
         while len(samples_ms) < RTT_SAMPLE_COUNT and time.monotonic() < deadline:
             sock.drain()  # discard any straggler frames between probes
             t0 = time.monotonic()
@@ -341,10 +348,11 @@ def rtt_p99_ms(eth_iface, laptop_mac, laptop_ip) -> float:
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             if reply is None:
                 failures += 1
-                if failures > 10 and not samples_ms:
+                if failures > FIRST_SAMPLE_FAILURE_BUDGET and not samples_ms:
                     pytest.skip(
                         f"Pi at {PI4_IP} not ARP-reachable on {eth_iface} "
-                        f"after {failures} probes — cannot establish RTT baseline"
+                        f"after {failures} probes (~{failures * 200} ms of "
+                        f"patience) — cannot establish RTT baseline"
                     )
                 continue
             samples_ms.append(elapsed_ms)
