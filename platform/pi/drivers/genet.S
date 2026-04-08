@@ -319,11 +319,24 @@ genet_init:
  *
  * Returns: w0 = 0 on success, 1 on timeout
  * Clobbers: x0-x5
+ *
+ * Under PERF=1 the frame is bumped by 16 bytes to save x23 (probe
+ * start tick) + x24 (pad; unused but paired with x23 for ldp/stp).
+ * Default builds keep the original 48-byte frame, no extra cost.
  */
 genet_send:
+.ifdef PERF_COUNTERS
+    stp     x19, x20, [sp, #-64]!
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x29, x30, [sp, #48]
+.else
     stp     x19, x20, [sp, #-48]!
     stp     x21, x22, [sp, #16]
     stp     x29, x30, [sp, #32]
+.endif
+
+    PROBE_ENTRY x23                 /* no-op unless PERF_COUNTERS */
 
     mov     x19, x0                 /* GENET base */
     mov     x20, x1                 /* state */
@@ -384,14 +397,38 @@ genet_send:
     b.eq    .Ltx_ok
     subs    w4, w4, #1
     b.ne    .Ltx_wait
+
+    /* Timeout path — bump PERF_SEND_FAIL only, do NOT accumulate
+     * ticks. A timeout means we just spent ~100k MMIO reads on a
+     * CONS_INDEX poll, which is orders of magnitude longer than a
+     * normal send. Mixing that into PERF_SEND_TICKS would destroy
+     * mean-per-successful-send as a useful number. Count only. */
     mov     w0, #1
+    PROBE_COUNT_INC PERF_SEND_FAIL, w2, x3
     b       .Ltx_ret
+
 .Ltx_ok:
+    /* Success path — accumulate ticks into PERF_SEND_TICKS (u64
+     * at offset 32) and bump PERF_SEND_COUNT (u32 at offset 40).
+     * w0 is set to the return value FIRST and is preserved across
+     * the probe macros. x2 and x3 are dead at this point (x2 was
+     * only used in the prologue; x3/w3 held the expected PROD_INDEX
+     * which is no longer needed once the cmp matched). */
     mov     w0, #0
+    PROBE_EXIT x23, PERF_SEND_TICKS, x2, x3
+    PROBE_COUNT_INC PERF_SEND_COUNT, w2, x3
+
 .Ltx_ret:
+.ifdef PERF_COUNTERS
+    ldp     x29, x30, [sp, #48]
+    ldp     x23, x24, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp], #64
+.else
     ldp     x29, x30, [sp, #32]
     ldp     x21, x22, [sp, #16]
     ldp     x19, x20, [sp], #48
+.endif
     ret
 
 /*
