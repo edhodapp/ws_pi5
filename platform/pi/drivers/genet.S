@@ -10,6 +10,7 @@
 
 .include "genet.inc"
 .include "mailbox.inc"
+.include "perf.inc"
 
 .global genet_init
 .global genet_send
@@ -405,11 +406,25 @@ genet_send:
  *   w0 = 0 on success (frame copied), 1 if no frame available
  *   w1 = actual frame length (valid when w0 = 0)
  * Clobbers: x0-x5
+ *
+ * Under PERF=1 the frame is bumped by 16 bytes to save x23 (probe
+ * start tick) + x24 (pad; unused but paired with x23 for ldp/stp).
+ * In the default (non-PERF) build the frame stays 48 bytes and no
+ * extra instructions execute in the hot path.
  */
 genet_recv:
+.ifdef PERF_COUNTERS
+    stp     x19, x20, [sp, #-64]!
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x29, x30, [sp, #48]
+.else
     stp     x19, x20, [sp, #-48]!
     stp     x21, x22, [sp, #16]
     stp     x29, x30, [sp, #32]
+.endif
+
+    PROBE_ENTRY x23                 /* no-op unless PERF_COUNTERS */
 
     mov     x19, x0                 /* GENET base */
     mov     x20, x1                 /* state */
@@ -505,16 +520,42 @@ genet_recv:
     /* Return success + length */
     mov     w1, w5
     mov     w0, #0
+
+    /* Accumulate elapsed ticks into PERF_RECV_TICKS (u64 at off 0)
+     * and bump PERF_RECV_COUNT (u32 at off 8). w0/w1 hold return
+     * values and are preserved by the probe macros (they only touch
+     * x23/x2/x3 + w2 + w0/w1 alias). x2/x3 are caller-saved scratch,
+     * free here because we're on the return path. No-op in default
+     * builds. Note: PROBE_COUNT_INC takes a w-register first so the
+     * load/store is 4 bytes, not 8 — critical for u32 fields. */
+    PROBE_EXIT x23, PERF_RECV_TICKS, x2, x3
+    PROBE_COUNT_INC PERF_RECV_COUNT, w2, x3
+
     b       .Lrx_ret
 
 .Lrx_none:
     mov     w0, #1
     mov     w1, #0
 
+    /* Bump PERF_RECV_NONE on the no-frame path. Do NOT accumulate
+     * ticks here: this path is trivial (one MMIO read + compare)
+     * and mixing its time into PERF_RECV_TICKS would make
+     * mean-per-successful-frame unreadable. Keeping recv_ticks
+     * success-only means burst_stats.py can divide ticks by
+     * recv_count for a clean per-frame number. */
+    PROBE_COUNT_INC PERF_RECV_NONE, w2, x3
+
 .Lrx_ret:
+.ifdef PERF_COUNTERS
+    ldp     x29, x30, [sp, #48]
+    ldp     x23, x24, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp], #64
+.else
     ldp     x29, x30, [sp, #32]
     ldp     x21, x22, [sp, #16]
     ldp     x19, x20, [sp], #48
+.endif
     ret
 
 /*

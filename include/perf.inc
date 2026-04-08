@@ -57,57 +57,64 @@
 
 /* --- Probe macros --------------------------------------------------- */
 /*
- * PROBE_ENTRY tmp_reg
- *     Snapshot CNTVCT_EL0 into tmp_reg at the start of a timed region.
- *     Caller is responsible for ensuring tmp_reg is free.
+ * PROBE_ENTRY tmp_x
+ *     Snapshot CNTVCT_EL0 into an x-register at the start of a
+ *     timed region. Caller ensures tmp_x is free across the region.
  *
- * PROBE_EXIT start_reg, offset, scratch1, scratch2
+ * PROBE_EXIT start_x, offset, scratch_x, base_x
  *     End a timed region started with PROBE_ENTRY. Computes the
- *     elapsed ticks and adds them to perf_counters[offset]. The
- *     caller supplies all scratch registers explicitly — this forces
- *     every probe site to audit register pressure rather than
- *     quietly relying on specific registers being free.
+ *     elapsed ticks and adds them to a u64 field at
+ *     perf_counters[offset]. All four registers MUST be x-registers
+ *     (64-bit) and MUST be distinct. Offset MUST correspond to a
+ *     u64 field (8-byte aligned) in the struct. Clobbers start_x,
+ *     scratch_x, base_x. The counter field is updated atomically
+ *     with respect to single-core execution; there is no barrier.
  *
- *     Uses: reads [perf_counters+offset], writes back updated total.
- *     Clobbers: start_reg, scratch1, scratch2.
- *     All four registers must be distinct.
+ * PROBE_COUNT_INC offset, scratch_w, base_x
+ *     Increment a u32 counter at perf_counters[offset] by 1.
+ *     `scratch_w` MUST be a w-register (32-bit) so the load/store
+ *     emits a 4-byte access — using an x-register here would do an
+ *     8-byte access that overlaps the adjacent struct field. `base_x`
+ *     MUST be an x-register (64-bit) for the perf_counters address.
+ *     Clobbers scratch_w and base_x.
  *
- * PROBE_COUNT_INC offset, scratch1, scratch2
- *     Increment a 32-bit u32 counter at perf_counters[offset].
- *     Used for frame counts independent of tick totals.
+ *     The caller supplies every scratch register explicitly; there
+ *     is no hidden global reservation. This forces each probe site
+ *     to audit live-register pressure rather than implicitly trusting
+ *     a specific register to be free.
  */
 
 .ifdef PERF_COUNTERS
 
-.macro PROBE_ENTRY tmp
-    mrs     \tmp, cntvct_el0
+.macro PROBE_ENTRY tmp_x
+    mrs     \tmp_x, cntvct_el0
 .endm
 
-.macro PROBE_EXIT start, offset, scratch1, scratch2
-    mrs     \scratch1, cntvct_el0
-    sub     \scratch1, \scratch1, \start
-    ldr     \scratch2, =perf_counters
-    ldr     \start, [\scratch2, \offset]
-    add     \start, \start, \scratch1
-    str     \start, [\scratch2, \offset]
+.macro PROBE_EXIT start_x, offset, scratch_x, base_x
+    mrs     \scratch_x, cntvct_el0
+    sub     \scratch_x, \scratch_x, \start_x
+    ldr     \base_x, =perf_counters
+    ldr     \start_x, [\base_x, \offset]
+    add     \start_x, \start_x, \scratch_x
+    str     \start_x, [\base_x, \offset]
 .endm
 
-.macro PROBE_COUNT_INC offset, scratch1, scratch2
-    ldr     \scratch2, =perf_counters
-    ldr     \scratch1, [\scratch2, \offset]
-    add     \scratch1, \scratch1, #1
-    str     \scratch1, [\scratch2, \offset]
+.macro PROBE_COUNT_INC offset, scratch_w, base_x
+    ldr     \base_x, =perf_counters
+    ldr     \scratch_w, [\base_x, \offset]
+    add     \scratch_w, \scratch_w, #1
+    str     \scratch_w, [\base_x, \offset]
 .endm
 
 .else
 
-.macro PROBE_ENTRY tmp
+.macro PROBE_ENTRY tmp_x
 .endm
 
-.macro PROBE_EXIT start, offset, scratch1, scratch2
+.macro PROBE_EXIT start_x, offset, scratch_x, base_x
 .endm
 
-.macro PROBE_COUNT_INC offset, scratch1, scratch2
+.macro PROBE_COUNT_INC offset, scratch_w, base_x
 .endm
 
 .endif
