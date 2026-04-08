@@ -92,8 +92,15 @@
 
 /* DMA constants */
 .equ DMA_DESC_SIZE,            12
-.equ DMA_DESC_COUNT,           256
+.equ DMA_DESC_COUNT,           512
 .equ RX_BUF_LENGTH,           2048
+/* Ring-index wrap mask: (DMA_DESC_COUNT - 1). Must be used anywhere
+ * an 8/16-bit RIDX is masked back into range after increment.
+ * Hardware ceiling on BCM2711 GENET v5 for a single ring (ring 16)
+ * is ~682 descriptors because the descriptor area at GENET_BASE+0x2000
+ * spans 8 KB and each descriptor is 12 bytes. 512 is the highest
+ * power-of-two that fits and keeps the wrap mask a clean bitmask. */
+.equ DMA_RIDX_MASK,           (DMA_DESC_COUNT - 1)
 /* GENET DMA uses CPU physical addresses directly (no bus offset needed) */
 .equ DMA_BURST_SIZE,          8
 .equ DMA_RING_CFG_EN,         0x00010000   /* ring 16 */
@@ -110,9 +117,9 @@
 
 /* GENET state struct — tracks DMA ring indices and cached PHY state */
 .equ GENET_STATE_RX_CIDX,     0    /* RX consumer index (16-bit) */
-.equ GENET_STATE_RX_RIDX,     4    /* RX ring index (0-255) */
+.equ GENET_STATE_RX_RIDX,     4    /* RX ring index (0..DMA_DESC_COUNT-1) */
 .equ GENET_STATE_TX_PIDX,     8    /* TX producer index (16-bit) */
-.equ GENET_STATE_TX_RIDX,     12   /* TX ring index (0-255) */
+.equ GENET_STATE_TX_RIDX,     12   /* TX ring index (0..DMA_DESC_COUNT-1) */
 .equ GENET_STATE_RX_POOL,     16   /* RX buffer pool CPU address (8 bytes) */
 .equ GENET_STATE_PHY_SPEED,   24   /* cached PHY speed code from AUX_STS */
 .equ GENET_STATE_SIZE,        32   /* padded to 8-byte alignment */

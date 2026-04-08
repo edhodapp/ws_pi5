@@ -287,12 +287,12 @@ genet_init:
     ldr     w0, [x19, #RDMA_PROD_INDEX]
     and     w0, w0, #0xFFFF
     str     w0, [x20, #GENET_STATE_RX_CIDX]
-    and     w0, w0, #0xFF
+    and     w0, w0, #DMA_RIDX_MASK
     str     w0, [x20, #GENET_STATE_RX_RIDX]
     ldr     w0, [x22, #TDMA_CONS_INDEX_OFS]
     and     w0, w0, #0xFFFF
     str     w0, [x20, #GENET_STATE_TX_PIDX]
-    and     w0, w0, #0xFF
+    and     w0, w0, #DMA_RIDX_MASK
     str     w0, [x20, #GENET_STATE_TX_RIDX]
 
     mov     w0, #0
@@ -371,7 +371,7 @@ genet_send:
     /* Update state */
     str     w3, [x20, #GENET_STATE_TX_PIDX]
     add     w4, w4, #1
-    and     w4, w4, #0xFF
+    and     w4, w4, #DMA_RIDX_MASK
     str     w4, [x20, #GENET_STATE_TX_RIDX]
 
     /* Poll CONS_INDEX for completion (x5 = TDMA base, preserved) */
@@ -499,7 +499,7 @@ genet_recv:
     /* Update ring index */
     ldr     w0, [x20, #GENET_STATE_RX_RIDX]
     add     w0, w0, #1
-    and     w0, w0, #0xFF
+    and     w0, w0, #DMA_RIDX_MASK
     str     w0, [x20, #GENET_STATE_RX_RIDX]
 
     /* Return success + length */
