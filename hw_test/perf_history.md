@@ -25,6 +25,62 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `b8dad94` + uncommitted dispatch probes — PERF=dispatch — add net_recv_one dispatch probes
+
+Wires the third and final per-stage probe: `PROBE_ENTRY` /
+`PROBE_EXIT` / `PROBE_COUNT_INC` around the `bl net_recv_one` call
+in `net_loop` (platform/pi/main.S). A single probe pair measures
+dispatch + every protocol handler (ARP, IP, ICMP, etc.) as one
+aggregate — we don't split by inner branch.
+
+Register analysis: x23 holds start tick; `net_recv_one` and its
+AAPCS callees preserve x19-x28 so x23 survives across the `bl`.
+PROBE_EXIT uses x2/x3 as scratch — both caller-saved and free at
+that point. w0 (net_recv_one's return: reply length) is NOT touched
+by the probe macros, so the subsequent `cbz w0, net_loop` gets the
+correct value.
+
+Also fixes Makefile dep tracking: `main.o` and `genet.o` rules now
+list `include/perf.inc` as a dependency. Pre-existing latent bug —
+would only manifest if someone changed perf.inc without `make clean`
+between configurations, which our workflow already enforces.
+
+| flavor        | mean    | stdev | lossless | min  |
+|---------------|---------|-------|----------|------|
+| default       | 1020.0  | 12.65 | 9/10     | 984  |
+| PERF=recv     | 1019.1  | 15.50 | 9/10     | 975  |
+| PERF=send     | 1020.2  | 12.02 | 9/10     | 986  |
+| PERF=dispatch | 1016.7  | 15.71 | 7/10*    | 979  |
+| PERF=all      |  998.6  | 39.06 | 5/10     | 925  |
+
+*One of the three "non-lossless" runs was 1023/1024 (off by one),
+effectively near-lossless.
+
+**Observations:**
+- PERF=dispatch has slightly more variance than PERF=recv/send,
+  consistent with the dispatch probe wrapping a larger code region
+  (entire net_recv_one call including handler dispatch). Still
+  within the single-stage noise band.
+- All per-stage flavors remain statistically close to default.
+- Probe budget confirmed: single-stage probes cost at most ~3-4%
+  of drain rate. PERF=all at 5/10 is the worst case for cumulative
+  overhead; per-stage is the right way to measure.
+
+**Decision:** keep. Phase 0 instrumentation probe-wiring is now
+complete. Three probe points, three measurement flavors, plus
+PERF=all for cross-stage spot checks. Next: the readout protocol
+(ethertype 0x88B6 handler) so burst_stats.py can actually READ
+these counters from the Pi.
+
+Build sizes (this commit):
+  default         27832
+  PERF=recv       27912 (+80)
+  PERF=send       27912 (+80)
+  PERF=dispatch   27896 (+64)
+  PERF=all        28040 (+208)
+
+---
+
 ## 2026-04-08 — `b33aaee` + uncommitted refactor — per-stage PERF flags
 
 Refactors `PERF=1` into per-stage flags: `PERF=recv`, `PERF=send`,

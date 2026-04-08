@@ -7,6 +7,7 @@
 .include "ntp.inc"
 .include "tcp.inc"
 .include "http.inc"
+.include "perf.inc"
 .ifdef PLATFORM_PI4
 .include "genet.inc"
 .endif
@@ -196,9 +197,25 @@ net_loop:
     /* w1 = actual frame length. On the drop path (no reply) go
      * straight back to recv — batch drain: while frames are
      * available we do nothing but recv/dispatch/send. Background
-     * work only runs when the ring empties (.Lnet_idle). */
+     * work only runs when the ring empties (.Lnet_idle).
+     *
+     * PERF=dispatch: probe ticks around the net_recv_one call. The
+     * measurement captures dispatch + whatever handler ran (ARP,
+     * IP, ICMP, etc.) as a single aggregate — we don't split the
+     * inner branches. x23 holds the start tick across the call;
+     * net_recv_one and its callees preserve x19-x28 per AAPCS so
+     * x23 survives. The PROBE_* macros don't touch w0/w1, so the
+     * return value (reply length) is preserved for the cbz and
+     * subsequent send path. */
     ldr     x0, =rx_buf
+.ifdef PERF_DISPATCH
+    PROBE_ENTRY x23
+.endif
     bl      net_recv_one
+.ifdef PERF_DISPATCH
+    PROBE_EXIT x23, PERF_DISPATCH_TICKS, x2, x3
+    PROBE_COUNT_INC PERF_DISPATCH_COUNT, w2, x3
+.endif
     cbz     w0, net_loop
 
     mov     w3, w0                  /* w3 = reply_len */

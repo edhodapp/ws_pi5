@@ -205,7 +205,7 @@ $(BUILD)/test_uart.o: platform/pi/drivers/uart.S $(PI_INC)/uart.inc | $(BUILD)
 $(BUILD)/boot.o: $(PLATFORM_DIR)/boot.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/main.o: $(PLATFORM_DIR)/main.S | $(BUILD)
+$(BUILD)/main.o: $(PLATFORM_DIR)/main.S include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
@@ -289,7 +289,7 @@ $(BUILD)/cdc_ecm.o: platform/pi/drivers/cdc_ecm.S $(PI_INC)/dwc2.inc $(PI_INC)/u
 $(BUILD)/usb_bulk.o: platform/pi/drivers/usb_bulk.S $(PI_INC)/dwc2.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/genet.o: platform/pi/drivers/genet.S $(PI_INC)/genet.inc $(PI_INC)/mailbox.inc | $(BUILD)
+$(BUILD)/genet.o: platform/pi/drivers/genet.S $(PI_INC)/genet.inc $(PI_INC)/mailbox.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
