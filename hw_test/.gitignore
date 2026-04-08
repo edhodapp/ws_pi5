@@ -1,1 +1,9 @@
 .venv/
+
+# Failure-forensics pcaps captured by the `wire_capture` fixture.
+# Generated on test failure; safe to delete any time.
+artifacts/
+
+__pycache__/
+*.pyc
+.pytest_cache/
