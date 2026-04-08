@@ -1,22 +1,28 @@
 """
 wire.py — capture and send raw L2 frames from the test driver.
 
-Two primitives:
+Primitives:
 
 * WireCapture — context manager wrapping `tcpdump` for capture. The
   capture is verified to be live BEFORE the with-block runs (via a
   self-addressed probe frame), so the classic capture-then-send race
   cannot produce silent flaky tests.
 
-* send_frame — fire-and-forget L2 send via an AF_PACKET raw socket.
-  No scapy, no threads, no signal handlers — just a bound socket and
-  one syscall.
+* send_frame / send_frames / RawL2Socket — AF_PACKET raw socket send
+  and recv primitives. Low overhead, Python-paced.
+
+* build_arp_pcap + tcpreplay_send — deterministic-rate L2 burst send
+  via the `tcpreplay` userspace tool. Use this when the Python-paced
+  AF_PACKET send rate is too variable (e.g. the r8152 USB NIC batches
+  our sends bimodally at 2ms vs 12ms for a 1024-frame ARP burst). A
+  pre-built pcap avoids per-loop pcap-rewind overhead.
 
 Pcap parsing on capture exit uses scapy's PcapReader (cold path only;
 no scapy threads ever run during capture).
 
 Capabilities required (granted by hw_test/bin/setup-caps.sh):
-  - tcpdump: cap_net_raw,cap_net_admin
+  - tcpdump:   cap_net_raw,cap_net_admin
+  - tcpreplay: cap_net_raw
   - The python interpreter running this module: cap_net_raw
     (for AF_PACKET in send_frame and the readiness probe)
 """
@@ -141,7 +147,14 @@ class RawL2Socket:
     mechanism tcpdump uses, just in-process.
     """
 
-    def __init__(self, iface: str, *, recv_buf_bytes: int = 256 * 1024):
+    # SO_RCVBUFFORCE bypasses the net.core.rmem_max clamp. Linux
+    # exposes it as constant 33. Requires CAP_NET_ADMIN on the caller
+    # (granted to the venv python in setup-caps.sh). We need this
+    # because the system-wide rmem_max default is 208 KB, which caps
+    # AF_PACKET at ~200 buffered frames — below the range we test.
+    _SO_RCVBUFFORCE = 33
+
+    def __init__(self, iface: str, *, recv_buf_bytes: int = 8 * 1024 * 1024):
         self.iface = iface
         self._sock: Optional[socket.socket] = None
         self._recv_buf_bytes = recv_buf_bytes
@@ -163,11 +176,21 @@ class RawL2Socket:
             raise WireError(
                 f"cannot bind AF_PACKET socket to {self.iface}: {e}"
             ) from e
-        # Bigger SO_RCVBUF so high-rate bursts don't drop in kernel
+        # Bigger SO_RCVBUF so high-rate bursts don't drop in kernel.
+        # Try SO_RCVBUFFORCE first (bypasses net.core.rmem_max, needs
+        # CAP_NET_ADMIN); fall back to the clamped SO_RCVBUF if the
+        # caller lacks the capability.
         try:
             s.setsockopt(
-                socket.SOL_SOCKET, socket.SO_RCVBUF, self._recv_buf_bytes
+                socket.SOL_SOCKET, self._SO_RCVBUFFORCE, self._recv_buf_bytes
             )
+        except PermissionError:
+            try:
+                s.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_RCVBUF, self._recv_buf_bytes
+                )
+            except OSError:
+                pass
         except OSError:
             pass
         # Drain anything stale already buffered (from before we bound)
@@ -242,6 +265,138 @@ class RawL2Socket:
         except (BlockingIOError, socket.timeout):
             pass
         return n
+
+
+# --- Deterministic-rate burst send via tcpreplay ---
+#
+# Python raw socket send() plus the r8152 USB NIC's bulk-OUT batcher
+# produces a bimodal send-rate distribution: ~2ms for 1024 frames on
+# one run, ~12ms on the next, with nothing in between. This makes it
+# impossible to measure a 1-5% kernel drain-rate change in the burst
+# tests. tcpreplay + PACKET_MMAP cuts the variance sharply (2.05-2.25ms
+# typical, with occasional 3ms outliers) because the kernel only sees
+# one syscall setup + a memory-mapped ring, not N individual send()
+# calls.
+#
+# Two helpers: `build_arp_pcap` (scapy-backed, called once per test to
+# generate the burst as a pcap file) and `tcpreplay_send` (subprocess
+# wrapper; no scapy involved in the hot path).
+
+def build_arp_pcap(
+    path: Path,
+    count: int,
+    src_mac: str,
+    src_ip: str,
+    target_ip: str,
+) -> None:
+    """Write `count` identical ARP request frames to `path` as a pcap.
+
+    Writing all frames up front avoids the per-loop pcap-rewind
+    overhead that would otherwise cap tcpreplay's effective rate at
+    ~66 kpps. With a multi-frame pcap, tcpreplay reaches >500 kpps.
+
+    The frames are byte-identical (same src/dst MAC, same target IP),
+    which is all the Pi's ARP responder needs to reply N times.
+    """
+    from scapy.layers.l2 import Ether, ARP  # cold-path import
+    from scapy.utils import wrpcap
+
+    frame = Ether(src=src_mac, dst="ff:ff:ff:ff:ff:ff") / ARP(
+        op=1,
+        hwsrc=src_mac,
+        psrc=src_ip,
+        hwdst="00:00:00:00:00:00",
+        pdst=target_ip,
+    )
+    wrpcap(str(path), [frame] * count)
+
+
+def tcpreplay_send(
+    iface: str,
+    pcap_path: Path,
+    *,
+    pps: Optional[int] = None,
+    topspeed: bool = False,
+    timeout_s: float = 30.0,
+) -> dict:
+    """Replay `pcap_path` onto `iface` via tcpreplay.
+
+    Exactly one of `pps` or `topspeed` must be specified — the default
+    tcpreplay rate (1 Mbps) is never what we want for a burst test.
+
+    Returns a dict with 'sent', 'elapsed_s', and 'pps' parsed from the
+    tcpreplay summary line. Raises WireError on non-zero exit or on a
+    subprocess timeout.
+
+    Requires cap_net_raw on /usr/bin/tcpreplay (set by setup-caps.sh).
+    """
+    if (pps is None) == (not topspeed):
+        raise WireError("tcpreplay_send: specify exactly one of pps= or topspeed=True")
+
+    cmd = [
+        "tcpreplay",
+        "--intf1", iface,
+        "--quiet",
+        "--stats", "0",
+    ]
+    if pps is not None:
+        cmd += ["--pps", str(pps)]
+    else:
+        cmd += ["--topspeed"]
+    cmd.append(str(pcap_path))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise WireError(
+            f"tcpreplay timed out after {timeout_s}s on {iface}"
+        ) from e
+
+    if result.returncode != 0:
+        raise WireError(
+            f"tcpreplay exited {result.returncode} on {iface}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    # Parse the summary line:
+    #   "Actual: 1024 packets (43008 bytes) sent in 0.002050 seconds"
+    #   "Rated: 20979512.1 Bps, 167.83 Mbps, 499512.19 pps"
+    actual: Optional[tuple[int, float]] = None
+    observed_pps: Optional[float] = None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Actual:"):
+            # very last "Actual:" line is the total; keep overwriting
+            try:
+                sent = int(line.split("Actual:", 1)[1].strip().split()[0])
+                elapsed = float(line.split("sent in", 1)[1].strip().split()[0])
+                actual = (sent, elapsed)
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith("Rated:"):
+            # "Rated: ... Bps, ... Mbps, NNN pps"
+            try:
+                observed_pps = float(line.rsplit(",", 1)[1].strip().split()[0])
+            except (IndexError, ValueError):
+                pass
+
+    if actual is None:
+        raise WireError(
+            f"tcpreplay output did not contain an 'Actual:' summary line:\n"
+            f"{result.stdout}"
+        )
+
+    sent, elapsed_s = actual
+    return {
+        "sent": sent,
+        "elapsed_s": elapsed_s,
+        "pps": observed_pps if observed_pps is not None else sent / elapsed_s,
+    }
 
 
 # --- Capture ---

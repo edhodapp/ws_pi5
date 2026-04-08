@@ -53,6 +53,16 @@ REPLY_QUIESCE_MS = 500
 # test contaminates the next test's measurement.
 PRE_TEST_QUIESCE_MS = 100
 
+# Extra settle delay before tests with bursts larger than the ring
+# (>256). The motivation is the bimodal reply distribution observed
+# on repeated runs of N=1024: fast userspace sends (~2ms) give
+# ~600 replies, slow sends (~4-5ms) give ~450 replies, with nothing
+# in between. Hypothesis: the laptop NIC's AF_PACKET TX buffer / CPU
+# scheduler state from the previous run is contaminating the next
+# send rate. A longer settle delay before large-burst tests should
+# let all of that drain and flatten the bimodality.
+LARGE_BURST_SETTLE_MS = 2000
+
 
 @requires_hardware
 @pytest.mark.l2
@@ -60,11 +70,17 @@ class TestRingWraparound:
 
     @pytest.mark.parametrize("n", RING_BURST_SIZES)
     def test_burst_n_arp_replies_received(
-        self, n, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
+        self, n, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+        tmp_path,
     ):
         """Send `n` ARP requests as a tight burst, count replies.
 
         ASSERTION: every request gets a reply. Zero loss.
+
+        Send side uses tcpreplay (PACKET_MMAP) against a pre-built
+        pcap to avoid the bimodal send-rate variance seen when doing
+        the same job with a Python AF_PACKET send loop on the r8152
+        USB NIC. See wire.tcpreplay_send docstring for background.
 
         Currently FAILS at n >= ~444 due to the GENET ARP burst loss
         anomaly tracked in project_genet_arp_burst_loss.md. When the
@@ -72,11 +88,25 @@ class TestRingWraparound:
         test should turn green.
         """
         time.sleep(PRE_TEST_QUIESCE_MS / 1000.0)
+        if n > 256:
+            time.sleep(LARGE_BURST_SETTLE_MS / 1000.0)
 
-        request = eth_frames.build_arp_request(laptop_mac, laptop_ip, PI4_IP)
-        burst = [request] * n
+        laptop_mac_str = ":".join(f"{b:02x}" for b in laptop_mac)
         expected_pi_mac = pi_mac
         expected_pi_ip = PI4_IP
+
+        # Build the burst pcap once for this test. Done outside the
+        # RawL2Socket with-block so the recv socket is open for as
+        # short a time as possible before tcpreplay fires (minimising
+        # the chance of missing early replies).
+        pcap_path = tmp_path / f"arp_burst_{n}.pcap"
+        wire.build_arp_pcap(
+            pcap_path,
+            count=n,
+            src_mac=laptop_mac_str,
+            src_ip=laptop_ip,
+            target_ip=PI4_IP,
+        )
 
         def is_target_reply(frame: bytes) -> bool:
             try:
@@ -92,11 +122,14 @@ class TestRingWraparound:
         with wire.RawL2Socket(eth_iface) as sock:
             sock.drain()  # discard any pre-test stragglers
 
-            # Tight send loop. RawL2Socket.send is one syscall per
-            # frame; AF_PACKET batches under the hood.
+            # Deterministic-rate send via tcpreplay + PACKET_MMAP.
+            # --topspeed is "as fast as the NIC will accept"; this
+            # matches the original Python-loop test intent but with
+            # far lower variance (see tcpreplay_send docstring).
             t0 = time.monotonic()
-            for frame in burst:
-                sock.send(frame)
+            result = wire.tcpreplay_send(
+                eth_iface, pcap_path, topspeed=True,
+            )
             send_done = time.monotonic()
 
             # Drain replies until we see no more for REPLY_QUIESCE_MS.
@@ -116,12 +149,24 @@ class TestRingWraparound:
 
         send_ms = (send_done - t0) * 1000.0
         total_ms = (recv_done - t0) * 1000.0
+        wire_pps = result["pps"]
+
+        # Always emit a one-line machine-parseable summary (both on
+        # pass and fail) so hw_test/bin/burst_stats.py can collect
+        # reply counts / send times for variance analysis regardless
+        # of test outcome. Prefixed with BURST_STATS: for grep.
+        print(
+            f"BURST_STATS: n={n} replies={len(replies)} "
+            f"send_ms={send_ms:.1f} wire_pps={wire_pps:.0f} "
+            f"total_ms={total_ms:.1f}"
+        )
 
         # Lossless assertion. When the GENET burst-loss bug is fixed,
         # this stays green; until then it surfaces the count clearly.
         assert len(replies) == n, (
             f"GENET ARP burst loss: got {len(replies)}/{n} replies "
-            f"(send_time={send_ms:.1f}ms total={total_ms:.1f}ms). "
+            f"(send_time={send_ms:.1f}ms wire={wire_pps:.0f}pps "
+            f"total={total_ms:.1f}ms). "
             f"See project_genet_arp_burst_loss.md."
         )
 

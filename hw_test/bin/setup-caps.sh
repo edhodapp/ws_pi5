@@ -9,6 +9,10 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/dumpcap
 sudo setcap cap_net_admin=eip             /usr/sbin/ethtool
 sudo setcap cap_net_raw=eip               /usr/sbin/arping
+# tcpreplay sends raw frames via PACKET_MMAP — needs cap_net_raw.
+# Used by hw_test for deterministic-rate L2 burst tests (see
+# hw_test/test_l2_ring.py, hw_test/bin/arp_burst_send.py).
+sudo setcap cap_net_raw=eip               /usr/bin/tcpreplay
 # NOTE: we deliberately do NOT setcap /usr/bin/ip here. On at least one
 # Ubuntu 24.04 / kernel 6.17 system, file caps applied to /usr/bin/ip
 # are recorded by setcap but not honoured by the kernel at exec time
