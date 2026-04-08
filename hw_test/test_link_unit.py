@@ -242,3 +242,124 @@ class TestWaitForCarrier:
         with patch("link.link_carrier", return_value=False):
             with pytest.raises(link.LinkError, match="did not come up"):
                 link.wait_for_carrier("eth0", deadline_ms=50, poll_ms=10)
+
+
+# --- Netlink helpers ---
+
+class TestIfindex:
+
+    def test_ifindex_reads_sysfs(self):
+        with patch("link._sysfs_read", return_value="42\n"):
+            assert link._ifindex("eth0") == 42
+
+    def test_ifindex_strips_whitespace(self):
+        with patch("link._sysfs_read", return_value="  7  "):
+            assert link._ifindex("eth0") == 7
+
+
+class TestSetLinkFlagsReplyParsing:
+    """Exercise the netlink reply parser without an actual netlink socket.
+
+    Patches socket.socket to return a fake that records the request,
+    yields a canned ack/error reply, and never actually talks to the
+    kernel. Verifies the request layout AND error decoding paths.
+    """
+
+    @staticmethod
+    def _make_fake_socket(reply: bytes, raise_on_bind=None):
+        captured = {"sent": None, "bound": False}
+
+        class FakeSock:
+            def __init__(self, *a, **kw):
+                pass
+
+            def bind(self, addr):
+                if raise_on_bind:
+                    raise raise_on_bind
+                captured["bound"] = True
+
+            def send(self, data):
+                captured["sent"] = data
+                return len(data)
+
+            def settimeout(self, t):
+                pass
+
+            def recv(self, n):
+                return reply
+
+            def close(self):
+                pass
+
+        return FakeSock, captured
+
+    @staticmethod
+    def _ack_reply(seq=1, errno=0):
+        # nlmsghdr (16) + error payload (4 + original 16-byte header)
+        payload = struct.pack("=i", errno) + b"\x00" * 16
+        nlmsghdr = struct.pack("=IHHII", 16 + len(payload), 2, 0, seq, 0)
+        return nlmsghdr + payload
+
+    def test_ack_reply_returns_normally(self):
+        fake_sock, captured = self._make_fake_socket(self._ack_reply(errno=0))
+        with patch("link._sysfs_read", return_value="2"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            link._set_link_flags("eth0", set_up=True)
+        # Verify the request payload encoded the right index and flags
+        sent = captured["sent"]
+        assert sent is not None
+        # nlmsghdr is 16 bytes; ifinfomsg follows
+        # ifinfomsg layout: family(B) pad(B) type(H) index(i) flags(I) change(I)
+        family, pad, ifi_type, ifi_index, ifi_flags, ifi_change = struct.unpack(
+            "=BBHiII", sent[16:32]
+        )
+        assert ifi_index == 2
+        assert ifi_flags == link.IFF_UP
+        assert ifi_change == link.IFF_UP
+
+    def test_set_down_clears_flag(self):
+        fake_sock, captured = self._make_fake_socket(self._ack_reply(errno=0))
+        with patch("link._sysfs_read", return_value="3"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            link._set_link_flags("eth0", set_up=False)
+        sent = captured["sent"]
+        _, _, _, _, ifi_flags, ifi_change = struct.unpack("=BBHiII", sent[16:32])
+        assert ifi_flags == 0
+        assert ifi_change == link.IFF_UP  # mask is still IFF_UP
+
+    def test_error_reply_raises_LinkError_with_errname(self):
+        # errno = -EPERM (-1)
+        fake_sock, _ = self._make_fake_socket(self._ack_reply(errno=-1))
+        with patch("link._sysfs_read", return_value="2"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            with pytest.raises(link.LinkError, match="EPERM"):
+                link._set_link_flags("eth0", set_up=True)
+
+    def test_permission_error_on_bind_wraps_to_LinkError(self):
+        fake_sock, _ = self._make_fake_socket(
+            self._ack_reply(errno=0), raise_on_bind=PermissionError("denied")
+        )
+        with patch("link._sysfs_read", return_value="2"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            with pytest.raises(link.LinkError, match="cap_net_admin"):
+                link._set_link_flags("eth0", set_up=True)
+
+    def test_short_reply_raises_LinkError(self):
+        fake_sock, _ = self._make_fake_socket(b"\x00" * 8)
+        with patch("link._sysfs_read", return_value="2"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            with pytest.raises(link.LinkError, match="short netlink reply"):
+                link._set_link_flags("eth0", set_up=True)
+
+    def test_unexpected_msg_type_raises_LinkError(self):
+        # Build a reply with a non-NLMSG_ERROR type
+        bogus = struct.pack("=IHHII", 20, 99, 0, 1, 0) + b"\x00\x00\x00\x00"
+        fake_sock, _ = self._make_fake_socket(bogus)
+        with patch("link._sysfs_read", return_value="2"), \
+             patch("link.socket.socket", side_effect=fake_sock):
+            with pytest.raises(link.LinkError, match="unexpected netlink reply type"):
+                link._set_link_flags("eth0", set_up=True)
+
+
+# --- struct import for the netlink test ---
+import struct  # noqa: E402 — used by TestSetLinkFlagsReplyParsing

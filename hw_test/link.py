@@ -1,23 +1,29 @@
 """
 link.py — link state query, mutation, and save/restore for L2 tests.
 
-Wraps `ethtool` and `ip link` so test code never shells out directly.
+Read-only state queries are unprivileged (sysfs + ethtool stdout
+parsing). Speed/duplex changes shell out to `ethtool` (which has
+cap_net_admin). Link admin up/down uses raw `AF_NETLINK` from this
+process directly, NOT a subprocess to `ip link`, because on Ubuntu
+24.04 / kernel 6.17 file caps applied to /usr/bin/ip are silently
+ignored at exec time. The netlink path requires cap_net_admin on the
+running python interpreter, which setup-caps.sh grants to the venv
+python alongside cap_net_raw.
+
 All mutations go through context managers that always restore the
 saved state on exit, even if the test body raises.
 
 Capabilities required (granted by hw_test/bin/setup-caps.sh):
   - ethtool needs cap_net_admin (speed/duplex/autoneg)
-  - /bin/ip needs cap_net_admin (link set down/up)
+  - the running python interpreter needs cap_net_admin
+    (AF_NETLINK link up/down)
   - link_state() is read-only and needs no caps
-
-This module deliberately does NOT use pyroute2 or raw netlink — the
-subprocess approach is one less moving part, has zero new Python
-dependencies, and matches the existing hw_test convention of leaning
-on system tools that already have caps applied.
 """
 
 import os
 import re
+import socket
+import struct
 import subprocess
 import time
 from contextlib import contextmanager
@@ -132,14 +138,110 @@ def _run(cmd: list[str], *, timeout: float = 5.0) -> None:
         raise LinkError(f"{' '.join(cmd)} timed out after {timeout}s") from e
 
 
+# --- Netlink helper for link admin up/down ---
+#
+# Builds a single RTM_NEWLINK message that sets the IFF_UP bit (or
+# clears it). Equivalent to `ip link set <iface> up/down` but goes
+# straight to the kernel via AF_NETLINK so we don't depend on /bin/ip
+# having a working file cap.
+#
+# rtnetlink message layout:
+#   nlmsghdr (16 bytes) | ifinfomsg (16 bytes)
+# We use the ifinfomsg.ifi_change field to mask exactly IFF_UP, and set
+# ifi_flags to IFF_UP or 0 to set/clear. No attributes are needed when
+# the index is supplied directly.
+
+NLM_F_REQUEST = 0x01
+NLM_F_ACK     = 0x04
+NLMSG_ERROR   = 0x02
+RTM_NEWLINK   = 16
+AF_UNSPEC     = 0
+IFF_UP        = 0x1
+
+
+def _ifindex(iface: str) -> int:
+    """Look up an interface index via /sys/class/net/<iface>/ifindex.
+
+    No syscall needed; sysfs already exposes it. Avoids needing
+    SIOCGIFINDEX or any privileged netlink dump.
+    """
+    text = _sysfs_read(iface, "ifindex")
+    return int(text)
+
+
+def _set_link_flags(iface: str, *, set_up: bool) -> None:
+    """Send a single RTM_NEWLINK netlink message to bring iface up or down.
+
+    Requires CAP_NET_ADMIN on this process. Raises LinkError on netlink
+    error responses (parses NLMSG_ERROR payloads).
+    """
+    ifindex = _ifindex(iface)
+    flags = IFF_UP if set_up else 0
+
+    # ifinfomsg: family(B) pad(B) type(H) index(i) flags(I) change(I)
+    ifinfomsg = struct.pack("=BBHiII", AF_UNSPEC, 0, 0, ifindex, flags, IFF_UP)
+
+    # nlmsghdr: length(I) type(H) flags(H) seq(I) pid(I)
+    msg_len = 16 + len(ifinfomsg)
+    nlmsghdr = struct.pack(
+        "=IHHII",
+        msg_len,
+        RTM_NEWLINK,
+        NLM_F_REQUEST | NLM_F_ACK,
+        1,            # seq — we don't pipeline so 1 is fine
+        0,            # pid — kernel fills in
+    )
+    request = nlmsghdr + ifinfomsg
+
+    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+    try:
+        try:
+            sock.bind((0, 0))
+        except PermissionError as e:
+            raise LinkError(
+                f"AF_NETLINK bind denied — does this python interpreter "
+                f"have cap_net_admin set? "
+                f"(setup-caps.sh grants it to the venv python.)"
+            ) from e
+        sock.send(request)
+        sock.settimeout(2.0)
+        try:
+            reply = sock.recv(8192)
+        except socket.timeout as e:
+            raise LinkError(
+                f"netlink ack for {iface} {'up' if set_up else 'down'} "
+                f"timed out"
+            ) from e
+    finally:
+        sock.close()
+
+    # Parse the NLMSG_ERROR / ack
+    if len(reply) < 16:
+        raise LinkError(f"short netlink reply ({len(reply)} bytes)")
+    rlen, rtype, rflags, rseq, rpid = struct.unpack("=IHHII", reply[:16])
+    if rtype != NLMSG_ERROR:
+        raise LinkError(f"unexpected netlink reply type {rtype}")
+    if len(reply) < 20:
+        raise LinkError("netlink error reply missing errno")
+    (errno,) = struct.unpack("=i", reply[16:20])
+    if errno != 0:
+        # ack carries errno=0; nonzero is the actual failure (negative)
+        from errno import errorcode
+        e = -errno
+        name = errorcode.get(e, str(e))
+        raise LinkError(
+            f"netlink RTM_NEWLINK on {iface} failed: {name} ({e})"
+        )
+
+
 def link_up(iface: str) -> None:
-    """Bring the interface administratively up."""
-    _run(["ip", "link", "set", iface, "up"])
+    """Bring the interface administratively up via AF_NETLINK."""
+    _set_link_flags(iface, set_up=True)
 
 
 def link_down(iface: str) -> None:
-    """Bring the interface administratively down."""
-    _run(["ip", "link", "set", iface, "down"])
+    """Bring the interface administratively down via AF_NETLINK."""
+    _set_link_flags(iface, set_up=False)
 
 
 def link_set_speed(iface: str, mbps: int, duplex: str = "full") -> None:

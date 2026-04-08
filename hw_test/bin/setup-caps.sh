@@ -9,12 +9,14 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump
 sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/dumpcap
 sudo setcap cap_net_admin=eip             /usr/sbin/ethtool
 sudo setcap cap_net_raw=eip               /usr/sbin/arping
-# /bin/ip is multi-purpose; cap_net_admin is needed for `ip link set
-# <iface> down/up`, used by hw_test/link.py for the L2 link-flap tests.
-# Resolve the symlink (/usr/sbin/ip -> /bin/ip on Ubuntu) so caps land
-# on the real inode.
-IP_BIN=$(readlink -f "$(command -v ip)")
-sudo setcap cap_net_admin=eip             "$IP_BIN"
+# NOTE: we deliberately do NOT setcap /usr/bin/ip here. On at least one
+# Ubuntu 24.04 / kernel 6.17 system, file caps applied to /usr/bin/ip
+# are recorded by setcap but not honoured by the kernel at exec time
+# (the running process gets CapPrm=0), even though the same caps work
+# fine on tcpdump, ethtool, dumpcap, and arping. Rather than spelunk
+# into that, hw_test/link.py uses raw AF_NETLINK from the venv python
+# for link up/down — which only requires cap_net_admin on the venv
+# python interpreter (added below).
 
 # setcap cannot operate on symlinks, and venvs symlink python3 by default.
 # Replace the symlink with a real copy of the interpreter so caps attach
@@ -25,9 +27,11 @@ if [ -L "$VENV_PY" ]; then
     rm "$VENV_PY"
     cp "$REAL_PY" "$VENV_PY"
 fi
-sudo setcap cap_net_raw=eip               "$VENV_PY"
+# Venv python needs cap_net_raw for AF_PACKET sends (wire.send_frame)
+# AND cap_net_admin for AF_NETLINK link up/down (link.link_up/down).
+sudo setcap cap_net_admin,cap_net_raw=eip "$VENV_PY"
 
 echo
 echo "Current caps:"
 getcap /usr/bin/tcpdump /usr/bin/dumpcap /usr/sbin/ethtool \
-       /usr/sbin/arping "$IP_BIN" /home/ed/ws_pi5/.venv/bin/python3
+       /usr/sbin/arping /home/ed/ws_pi5/.venv/bin/python3
