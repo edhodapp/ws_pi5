@@ -193,10 +193,13 @@ net_loop:
 .endif
     cbnz    w0, .Lnet_idle          /* recv returned no frame → idle path */
 
-    /* w1 = actual frame length */
+    /* w1 = actual frame length. On the drop path (no reply) go
+     * straight back to recv — batch drain: while frames are
+     * available we do nothing but recv/dispatch/send. Background
+     * work only runs when the ring empties (.Lnet_idle). */
     ldr     x0, =rx_buf
     bl      net_recv_one
-    cbz     w0, .Lnet_timers
+    cbz     w0, net_loop
 
     mov     w3, w0                  /* w3 = reply_len */
     ldr     x0, =NET_BASE_SYM
@@ -207,23 +210,21 @@ net_loop:
 .else
     bl      cdc_ecm_send
 .endif
-    b       .Lnet_timers
+    b       net_loop
 
 .Lnet_idle:
-    /* No frame this iteration — burst (if any) has drained.
-     * Run background work that's too expensive for the recv hot path:
-     * polling the PHY for link-speed changes. genet_phy_check costs
-     * one MDIO read (~50us), which would shrink burst-drain throughput
-     * if it ran on every loop iteration; gating it on the no-frame
-     * idle path keeps speed-change responsiveness without slowing
-     * burst handling. */
+    /* Ring empty — burst (if any) has drained. Run the background
+     * work that's too expensive for the recv hot path: PHY speed
+     * poll, expired timers, HTTP connection service. Amortizing
+     * these across a whole burst (instead of per-frame) cuts
+     * per-frame overhead during sustained traffic. PHY first so a
+     * link-speed change takes effect on the NEXT recv attempt. */
 .ifdef PLATFORM_PI4
     ldr     x0, =NET_BASE_SYM
     ldr     x1, =NET_STATE_SYM
     bl      genet_phy_check
 .endif
 
-.Lnet_timers:
     bl      timer_now
     mov     x1, x0
     ldr     x0, =timer_pool
