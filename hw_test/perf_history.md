@@ -25,6 +25,65 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `65a6210` + uncommitted perf_handle + 0x88B6 dispatch
+
+Adds the readout-protocol wire handler — ethertype 0x88B6 queries
+now dispatch to `perf_handle` in `lib/perf.S`. Under PERF builds the
+handler responds with a 64 B copy of `perf_counters` in the reply
+payload; in default builds the handler silently drops.
+
+| flavor         | mean    | stdev | lossless | min  | notes           |
+|----------------|---------|-------|----------|------|-----------------|
+| default run 1  | 1013.10 | 23.97 | ~7/10    | 955  | first run       |
+| default run 2  | 1017.90 | 15.03 | 8/10     | 977  | second run      |
+| PERF=all       | 1009.80 | 30.07 | 8/10     | 947  | same commit     |
+
+**Interpretation:**
+- Default kernel picks up a small regression vs pre-commit (was
+  mean 1020, stdev 13; now 1013-1018, stdev 15-24). The new
+  dispatch case in `net_recv_one` adds ~3 instructions per frame
+  (ldr literal + cmp + b.eq) = ~15 ns/frame. At the wire-rate
+  margin that's enough to push a frame or two over the edge on
+  the noisiest cold-start runs. Still 8-10/10 lossless every time.
+- PERF=all is in the same range as the pre-commit PERF=all
+  measurement (5-8/10 lossless, mean ~1000-1010). Probes still
+  function. Consistent.
+- L2 suite: 39 passed, 8 skipped on both flavors.
+
+**Tradeoff accepted:** adding any feature to the hot path costs
+drain-rate margin. The readout protocol is essential for the rest
+of the grind (we need to actually READ the counters) so this cost
+is unavoidable. The follow-up Python commit does not change kernel
+behavior, so it should not add more cost.
+
+**Not yet tested end-to-end:** the actual 0x88B6 query round-trip
+(send frame, receive reply, parse counter payload). That requires
+the Python side which lands in the next commit. For now we've
+verified:
+- L2 suite unchanged (no new frames are being sent, so perf_handle
+  is never invoked; this just proves the dispatch case doesn't
+  break other ethertype handling)
+- PERF=all probes still accumulate correctly (burst_stats numbers
+  unchanged)
+
+**Decision:** keep the commit. Next commit wires the Python side
+(`wire.perf_query()` + `burst_stats.py` integration) which finally
+lets us READ the counters. That's where we'll get the first
+per-stage ns-per-frame numbers.
+
+Build sizes (this commit):
+  default         27880 (+48 from 65a6210)
+  PERF=recv       28104 (+192)
+  PERF=send       28104 (+192)
+  PERF=dispatch   28088 (+192)
+  PERF=all        28232 (+192)
+
+The +192 bytes for PERF flavors is the `perf_handle` function body
+(~30 instructions) plus literal pool entries (net_our_mac,
+perf_counters, PERF_ETHERTYPE).
+
+---
+
 ## 2026-04-08 — `b8dad94` + uncommitted dispatch probes — PERF=dispatch — add net_recv_one dispatch probes
 
 Wires the third and final per-stage probe: `PROBE_ENTRY` /

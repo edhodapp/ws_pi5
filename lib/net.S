@@ -5,6 +5,7 @@
  */
 
 .include "net.inc"
+.include "perf.inc"
 
 .global net_recv_one
 
@@ -53,6 +54,16 @@ net_recv_one:
     cmp     w0, #ETHERTYPE_IPV4
     b.eq    .Lnr_ipv4
 
+    /* PERF_ETHERTYPE (0x88B6) doesn't fit in a cmp immediate, so
+     * load from the literal pool. perf_handle is always linked:
+     * under PERF_COUNTERS it responds with a counter snapshot,
+     * otherwise it silently drops the frame. Dispatch is
+     * unconditional so default and PERF builds share the same
+     * net_recv_one code path. */
+    ldr     w1, =PERF_ETHERTYPE
+    cmp     w0, w1
+    b.eq    .Lnr_perf
+
 .Lnr_drop_mac:
 .Lnr_drop:
     mov     w0, #0
@@ -68,6 +79,12 @@ net_recv_one:
     mov     x0, x19
     mov     w1, w20
     bl      ip_handle
+    b       .Lnr_done
+
+.Lnr_perf:
+    mov     x0, x19
+    mov     w1, w20
+    bl      perf_handle
 
 .Lnr_done:
     ldr     x20, [sp, #16]

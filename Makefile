@@ -244,7 +244,7 @@ $(BUILD)/tcp.o: lib/tcp.S include/tcp.inc include/net.inc include/vmio.inc | $(B
 $(BUILD)/http.o: lib/http.S include/http.inc include/tcp.inc include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/net.o: lib/net.S include/net.inc | $(BUILD)
+$(BUILD)/net.o: lib/net.S include/net.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/timer_hw.o: lib/timer_hw.S | $(BUILD)
