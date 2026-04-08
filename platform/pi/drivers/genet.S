@@ -320,23 +320,23 @@ genet_init:
  * Returns: w0 = 0 on success, 1 on timeout
  * Clobbers: x0-x5
  *
- * Under PERF=1 the frame is bumped by 16 bytes to save x23 (probe
- * start tick) + x24 (pad; unused but paired with x23 for ldp/stp).
- * Default builds keep the original 48-byte frame, no extra cost.
+ * Under PERF=send (or PERF=all) the frame is bumped by 16 bytes to
+ * save x23 (probe start tick) + x24 (pad; unused but paired with
+ * x23 for ldp/stp). Other PERF flavors and the default build keep
+ * the 48-byte frame — no extra cost.
  */
 genet_send:
-.ifdef PERF_COUNTERS
+.ifdef PERF_SEND
     stp     x19, x20, [sp, #-64]!
     stp     x21, x22, [sp, #16]
     stp     x23, x24, [sp, #32]
     stp     x29, x30, [sp, #48]
+    PROBE_ENTRY x23
 .else
     stp     x19, x20, [sp, #-48]!
     stp     x21, x22, [sp, #16]
     stp     x29, x30, [sp, #32]
 .endif
-
-    PROBE_ENTRY x23                 /* no-op unless PERF_COUNTERS */
 
     mov     x19, x0                 /* GENET base */
     mov     x20, x1                 /* state */
@@ -404,7 +404,9 @@ genet_send:
      * normal send. Mixing that into PERF_SEND_TICKS would destroy
      * mean-per-successful-send as a useful number. Count only. */
     mov     w0, #1
+.ifdef PERF_SEND
     PROBE_COUNT_INC PERF_SEND_FAIL, w2, x3
+.endif
     b       .Ltx_ret
 
 .Ltx_ok:
@@ -415,11 +417,13 @@ genet_send:
      * only used in the prologue; x3/w3 held the expected PROD_INDEX
      * which is no longer needed once the cmp matched). */
     mov     w0, #0
+.ifdef PERF_SEND
     PROBE_EXIT x23, PERF_SEND_TICKS, x2, x3
     PROBE_COUNT_INC PERF_SEND_COUNT, w2, x3
+.endif
 
 .Ltx_ret:
-.ifdef PERF_COUNTERS
+.ifdef PERF_SEND
     ldp     x29, x30, [sp, #48]
     ldp     x23, x24, [sp, #32]
     ldp     x21, x22, [sp, #16]
@@ -444,24 +448,24 @@ genet_send:
  *   w1 = actual frame length (valid when w0 = 0)
  * Clobbers: x0-x5
  *
- * Under PERF=1 the frame is bumped by 16 bytes to save x23 (probe
- * start tick) + x24 (pad; unused but paired with x23 for ldp/stp).
- * In the default (non-PERF) build the frame stays 48 bytes and no
- * extra instructions execute in the hot path.
+ * Under PERF=recv (or PERF=all) the frame is bumped by 16 bytes to
+ * save x23 (probe start tick) + x24 (pad; unused but paired with
+ * x23 for ldp/stp). Other PERF flavors and the default build keep
+ * the 48-byte frame — no extra instructions execute in the hot
+ * path.
  */
 genet_recv:
-.ifdef PERF_COUNTERS
+.ifdef PERF_RECV
     stp     x19, x20, [sp, #-64]!
     stp     x21, x22, [sp, #16]
     stp     x23, x24, [sp, #32]
     stp     x29, x30, [sp, #48]
+    PROBE_ENTRY x23
 .else
     stp     x19, x20, [sp, #-48]!
     stp     x21, x22, [sp, #16]
     stp     x29, x30, [sp, #32]
 .endif
-
-    PROBE_ENTRY x23                 /* no-op unless PERF_COUNTERS */
 
     mov     x19, x0                 /* GENET base */
     mov     x20, x1                 /* state */
@@ -558,15 +562,17 @@ genet_recv:
     mov     w1, w5
     mov     w0, #0
 
+.ifdef PERF_RECV
     /* Accumulate elapsed ticks into PERF_RECV_TICKS (u64 at off 0)
      * and bump PERF_RECV_COUNT (u32 at off 8). w0/w1 hold return
      * values and are preserved by the probe macros (they only touch
-     * x23/x2/x3 + w2 + w0/w1 alias). x2/x3 are caller-saved scratch,
-     * free here because we're on the return path. No-op in default
-     * builds. Note: PROBE_COUNT_INC takes a w-register first so the
-     * load/store is 4 bytes, not 8 — critical for u32 fields. */
+     * x23/x2/x3 + w2). x2/x3 are caller-saved scratch, free here
+     * because we're on the return path. PROBE_COUNT_INC takes a
+     * w-register first so the load/store is 4 bytes, not 8 —
+     * critical for u32 fields. */
     PROBE_EXIT x23, PERF_RECV_TICKS, x2, x3
     PROBE_COUNT_INC PERF_RECV_COUNT, w2, x3
+.endif
 
     b       .Lrx_ret
 
@@ -574,6 +580,7 @@ genet_recv:
     mov     w0, #1
     mov     w1, #0
 
+.ifdef PERF_RECV
     /* Bump PERF_RECV_NONE on the no-frame path. Do NOT accumulate
      * ticks here: this path is trivial (one MMIO read + compare)
      * and mixing its time into PERF_RECV_TICKS would make
@@ -581,9 +588,10 @@ genet_recv:
      * success-only means burst_stats.py can divide ticks by
      * recv_count for a clean per-frame number. */
     PROBE_COUNT_INC PERF_RECV_NONE, w2, x3
+.endif
 
 .Lrx_ret:
-.ifdef PERF_COUNTERS
+.ifdef PERF_RECV
     ldp     x29, x30, [sp, #48]
     ldp     x23, x24, [sp, #32]
     ldp     x21, x22, [sp, #16]

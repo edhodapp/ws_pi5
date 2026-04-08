@@ -21,17 +21,37 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-# Profile build flag
-#   make PERF=1               — enable cycle-counter instrumentation
+# Profile build flag — per-stage cycle-counter instrumentation
 #
-# PERF=1 defines PERF_COUNTERS at assembly time. The hot-path probe
-# macros in include/perf.inc then expand into CNTVCT_EL0 reads and
-# accumulator updates. Without PERF=1 the macros are no-ops and the
-# perf_counters struct is not linked into the kernel.
+#   make PLATFORM=pi4 PERF=recv      — probe only genet_recv
+#   make PLATFORM=pi4 PERF=send      — probe only genet_send
+#   make PLATFORM=pi4 PERF=dispatch  — probe only net_recv_one dispatch
+#   make PLATFORM=pi4 PERF=all       — probe all stages (highest overhead)
+#
+# Default (no PERF flag) builds the production kernel with zero
+# instrumentation overhead. Use per-stage builds during the grind
+# to keep probe overhead small enough that the measurement is
+# representative of the default kernel's behavior; use PERF=all
+# only for spot-checks or when comparing across stages.
+#
+# Each stage defines PERF_COUNTERS (umbrella — enables the
+# perf_counters struct in lib/perf.S and the macro bodies in
+# include/perf.inc) plus a stage-specific flag (PERF_RECV /
+# PERF_SEND / PERF_DISPATCH) that gates the actual probe call
+# sites in the hot path.
 # ---------------------------------------------------------------------------
 PERF_ASFLAGS =
-ifeq ($(PERF),1)
-  PERF_ASFLAGS = --defsym PERF_COUNTERS=1
+ifeq ($(PERF),recv)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_RECV=1
+else ifeq ($(PERF),send)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_SEND=1
+else ifeq ($(PERF),dispatch)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_DISPATCH=1
+else ifeq ($(PERF),all)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_RECV=1 \
+                 --defsym PERF_SEND=1 --defsym PERF_DISPATCH=1
+else ifneq ($(PERF),)
+  $(error Unknown PERF=$(PERF); use recv, send, dispatch, or all)
 endif
 
 ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)

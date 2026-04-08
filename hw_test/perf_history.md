@@ -25,6 +25,48 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `b33aaee` + uncommitted refactor — per-stage PERF flags
+
+Refactors `PERF=1` into per-stage flags: `PERF=recv`, `PERF=send`,
+`PERF=dispatch`, `PERF=all`. Each flag enables only its own probes
+so single-stage measurements are near-default-kernel fidelity.
+`PERF=all` retains the kitchen-sink behavior of old `PERF=1`.
+
+Validation that the refactor (a) is a no-op for the default kernel,
+(b) preserves PERF=all behavior, and (c) the new per-stage flavors
+have significantly lower overhead than PERF=all.
+
+| flavor      | mean    | stdev | lossless | min  | range  |
+|-------------|---------|-------|----------|------|--------|
+| default     | 1020.00 | 12.65 | 9/10     | 984  | 40     |
+| PERF=recv   | 1019.10 | 15.50 | 9/10     | 975  | 49     |
+| PERF=send   | 1020.20 | 12.02 | 9/10     | 986  | 38     |
+| PERF=all    |  998.60 | 39.06 | 5/10     | 925  | 99     |
+
+**Key observations:**
+
+- **`default` kernel is byte-identical** to the pre-refactor default
+  (`md5sum` matches on both `kernel8.img` and `build/genet.o`). The
+  9/10 vs 10/10 swing vs earlier baseline is pure measurement noise
+  on a system running at the drain-rate edge.
+- **PERF=recv and PERF=send are statistically indistinguishable**
+  from default. Per-stage probe overhead is within the 10-sample
+  noise floor — exactly the goal. This means we can measure a
+  single stage's cost without contaminating the measurement with
+  probe overhead on the OTHER stages.
+- **PERF=all is clearly worse** than any single-stage flavor:
+  mean 998.60 vs ~1020, 5/10 lossless vs 9/10, stdev 39 vs ~13.
+  Cumulative probe overhead is real and additive. PERF=all is
+  still useful for comparing stages against each other, but the
+  absolute numbers are biased low by ~20 frames per burst.
+- L2 suite: 39 passed, 8 skipped on all flavors.
+
+**Decision:** keep the refactor. Going forward every grind commit
+measures with PERF=<stage> (targeted) instead of PERF=all. PERF=all
+stays as a cross-stage spot check.
+
+---
+
 ## 2026-04-08 — `b9ba5c7` + uncommitted send probes — PERF=1 — add genet_send probes on top of genet_recv
 
 Second probe wiring: adds `PROBE_ENTRY` / `PROBE_EXIT` /
