@@ -417,6 +417,7 @@ def tcpreplay_send(
 PERF_ETHERTYPE = 0x88B6
 PERF_CMD_DUMP = 0
 PERF_CMD_DUMP_RESET = 1
+PERF_CMD_DUMP_REGS = 2
 
 # Minimum Ethernet frame (including FCS added by hardware) is 64
 # bytes, payload minimum 46 bytes. We send a 60-byte frame (14 B
@@ -434,9 +435,10 @@ def perf_query(
     laptop_mac: bytes,
     *,
     reset: bool = False,
+    dump_regs: bool = False,
     timeout_ms: int = 100,
 ) -> dict:
-    """Query the Pi's perf_counters via ethertype 0x88B6.
+    """Query the Pi's perf state via ethertype 0x88B6.
 
     Sends a single request frame to the Pi and waits for the reply.
     Requires the Pi to be running a PERF build (the readout handler
@@ -449,23 +451,43 @@ def perf_query(
       laptop_mac: 6-byte laptop MAC (request source / reply dst)
       reset:      if True, Pi zeros counters AFTER snapshot. The
                   returned dict still shows the pre-reset values.
+                  Mutually exclusive with dump_regs.
+      dump_regs:  if True, issue PERF_CMD_DUMP_REGS instead of
+                  PERF_CMD_DUMP. The reply contains a GENET
+                  register+state snapshot (see _parse_genet_regs)
+                  rather than the perf_counters struct. Pi 4 only —
+                  other platforms silently drop the request.
+                  Mutually exclusive with reset.
       timeout_ms: max wait for the reply
 
     Returns:
-      A dict with all the u64/u32 counter fields. See the
-      _parse_perf_counters helper below for the full list.
+      - When dump_regs=False: a dict of perf_counters fields (see
+        _parse_perf_counters).
+      - When dump_regs=True:  a dict of GENET register/state fields
+        (see _parse_genet_regs).
 
     Raises:
       WireError on timeout (Pi unreachable or not a PERF build),
-      short reply, or socket errors.
+      short reply, socket errors, or contradictory arguments.
     """
     if len(pi_mac) != 6 or len(laptop_mac) != 6:
         raise WireError(
             f"perf_query: MAC addresses must be 6 bytes each "
             f"(got pi={len(pi_mac)}, laptop={len(laptop_mac)})"
         )
+    if reset and dump_regs:
+        raise WireError(
+            "perf_query: reset=True and dump_regs=True are mutually "
+            "exclusive (DUMP_RESET operates on perf_counters; "
+            "DUMP_REGS dumps a different struct)"
+        )
 
-    cmd = PERF_CMD_DUMP_RESET if reset else PERF_CMD_DUMP
+    if dump_regs:
+        cmd = PERF_CMD_DUMP_REGS
+    elif reset:
+        cmd = PERF_CMD_DUMP_RESET
+    else:
+        cmd = PERF_CMD_DUMP
 
     # 14 B eth header (dst=pi, src=laptop, etype=0x88B6) +
     # 1 B cmd + 45 B zero pad = 60 B.
@@ -492,14 +514,17 @@ def perf_query(
             f"{timeout_ms} ms. Is the Pi running a PERF build?"
         )
 
-    # Reply frame = 14 B eth + 64 B perf_counters payload = 78 B min
+    # Reply frame = 14 B eth + 64 B payload = 78 B min.
     expected_min = 14 + 64
     if len(reply) < expected_min:
         raise WireError(
             f"perf_query reply too short: {len(reply)} bytes "
             f"(expected at least {expected_min})"
         )
-    return _parse_perf_counters(reply[14:14 + 64])
+    payload = reply[14:14 + 64]
+    if dump_regs:
+        return _parse_genet_regs(payload)
+    return _parse_perf_counters(payload)
 
 
 def _is_perf_reply(frame: bytes) -> bool:
@@ -558,6 +583,59 @@ def _parse_perf_counters(payload: bytes) -> dict:
 def perf_ticks_to_ns(ticks: int) -> float:
     """Convert Pi 4 CNTVCT_EL0 ticks to nanoseconds."""
     return ticks * 1e9 / PI4_CNTVCT_FREQ_HZ
+
+
+# GENET register + driver state snapshot layout.
+# MUST stay in sync with platform/pi/drivers/genet.S::genet_dump_state.
+# All 16 fields are u32 little-endian. Two fields are reserved
+# placeholders that should always read as 0.
+#
+#   off  name
+#   0    umac_cmd
+#   4    umac_tx_fifo_status
+#   8    umac_rx_fifo_status
+#   12   (reserved)
+#   16   rdma_prod_index    (upper 16 bits = discard count)
+#   20   rdma_cons_index
+#   24   rdma_dma_ctrl
+#   28   rdma_xon_xoff_thresh
+#   32   tdma_prod_index
+#   36   tdma_cons_index
+#   40   tdma_dma_ctrl
+#   44   (reserved)
+#   48   state_rx_cidx      (driver's software ring tracking)
+#   52   state_rx_ridx
+#   56   state_tx_pidx
+#   60   state_tx_ridx
+_GENET_REGS_STRUCT = struct.Struct("<16I")
+assert _GENET_REGS_STRUCT.size == 64
+
+
+def _parse_genet_regs(payload: bytes) -> dict:
+    """Parse the 64-byte GENET register snapshot into a named dict."""
+    if len(payload) != 64:
+        raise WireError(
+            f"_parse_genet_regs: expected 64 bytes, got {len(payload)}"
+        )
+    f = _GENET_REGS_STRUCT.unpack(payload)
+    return {
+        "umac_cmd":             f[0],
+        "umac_tx_fifo_status":  f[1],
+        "umac_rx_fifo_status":  f[2],
+        # f[3] reserved
+        "rdma_prod_index":      f[4],
+        "rdma_cons_index":      f[5],
+        "rdma_dma_ctrl":        f[6],
+        "rdma_xon_xoff_thresh": f[7],
+        "tdma_prod_index":      f[8],
+        "tdma_cons_index":      f[9],
+        "tdma_dma_ctrl":        f[10],
+        # f[11] reserved
+        "state_rx_cidx":        f[12],
+        "state_rx_ridx":        f[13],
+        "state_tx_pidx":        f[14],
+        "state_tx_ridx":        f[15],
+    }
 
 
 # --- Capture ---

@@ -15,8 +15,102 @@
 .global genet_init
 .global genet_send
 .global genet_recv
+.ifdef PLATFORM_PI4
+.global genet_dump_state
+.endif
 
 .section .text
+
+.ifdef PLATFORM_PI4
+/*
+ * genet_dump_state — Snapshot GENET hardware + driver state
+ *
+ * Writes a 64-byte register/state snapshot to a caller-provided
+ * buffer. Layout (little-endian, host order, u32 per field):
+ *
+ *     off  name
+ *     0    umac_cmd
+ *     4    umac_tx_fifo_status
+ *     8    umac_rx_fifo_status
+ *     12   (reserved — zero)
+ *     16   rdma_prod_index    (full 32-bit; upper 16 = discard count)
+ *     20   rdma_cons_index
+ *     24   rdma_dma_ctrl
+ *     28   rdma_xon_xoff_thresh
+ *     32   tdma_prod_index
+ *     36   tdma_cons_index
+ *     40   tdma_dma_ctrl
+ *     44   (reserved — zero)
+ *     48   state.rx_cidx       (software-side ring tracking)
+ *     52   state.rx_ridx
+ *     56   state.tx_pidx
+ *     60   state.tx_ridx
+ *
+ * Used by lib/perf.S::perf_handle on PERF_CMD_DUMP_REGS. Exposed
+ * to the test harness via the 0x88B6 query protocol so
+ * test_l2_dump_state can assert on the runtime state of the
+ * GENET driver + hardware without needing a JTAG probe.
+ *
+ * Guarded on PLATFORM_PI4 because it references GENET_BASE and
+ * genet_state, both of which only exist in Pi 4 builds. The test
+ * kernel (QEMU raspi3b) doesn't have GENET hardware at all.
+ *
+ * x0: destination buffer (at least 64 bytes, any alignment)
+ * Clobbers: x1-x5
+ * Leaf function — no prologue/epilogue.
+ */
+genet_dump_state:
+    ldr     x1, =GENET_BASE
+
+    /* UMAC block — bytes [0..11] */
+    ldr     w2, [x1, #GENET_UMAC_CMD]
+    str     w2, [x0, #0]
+    ldr     w2, [x1, #GENET_UMAC_TX_FIFO_STATUS]
+    str     w2, [x0, #4]
+    ldr     w2, [x1, #GENET_UMAC_RX_FIFO_STATUS]
+    str     w2, [x0, #8]
+    str     wzr, [x0, #12]          /* reserved */
+
+    /* RDMA block — bytes [16..31] */
+    ldr     w2, [x1, #RDMA_PROD_INDEX]
+    str     w2, [x0, #16]
+    ldr     w2, [x1, #RDMA_CONS_INDEX]
+    str     w2, [x0, #20]
+    ldr     w2, [x1, #RDMA_DMA_CTRL]
+    str     w2, [x0, #24]
+    ldr     w2, [x1, #RDMA_XON_XOFF_THRESH]
+    str     w2, [x0, #28]
+
+    /* TDMA block — bytes [32..47]
+     * TDMA ring 16 registers sit at GENET_BASE + 0x5000; the offsets
+     * in genet.inc (TDMA_*_OFS) are relative to that base. Compute
+     * the TDMA ring base in x3, then use the small offsets. */
+    add     x3, x1, #5, lsl #12
+    ldr     w2, [x3, #TDMA_PROD_INDEX_OFS]
+    str     w2, [x0, #32]
+    ldr     w2, [x3, #TDMA_CONS_INDEX_OFS]
+    str     w2, [x0, #36]
+    ldr     w2, [x3, #TDMA_DMA_CTRL_OFS]
+    str     w2, [x0, #40]
+    str     wzr, [x0, #44]          /* reserved */
+
+    /* Software state — bytes [48..63]
+     * genet_state is declared .global in platform/pi/main.S so
+     * this cross-module reference resolves at link time. */
+    ldr     x3, =genet_state
+    ldr     w2, [x3, #GENET_STATE_RX_CIDX]
+    str     w2, [x0, #48]
+    ldr     w2, [x3, #GENET_STATE_RX_RIDX]
+    str     w2, [x0, #52]
+    ldr     w2, [x3, #GENET_STATE_TX_PIDX]
+    str     w2, [x0, #56]
+    ldr     w2, [x3, #GENET_STATE_TX_RIDX]
+    str     w2, [x0, #60]
+
+    ret
+
+.endif  /* PLATFORM_PI4 — end of genet_dump_state guard */
+
 
 /*
  * genet_init — Full GENET initialization

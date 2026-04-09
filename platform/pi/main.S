@@ -253,6 +253,7 @@ net_loop:
 
 .ifdef PLATFORM_PI4
 .balign 16
+.global genet_state                 /* referenced by genet_dump_state */
 genet_state:
     .space  GENET_STATE_SIZE
 

@@ -30,17 +30,29 @@
  *   [0..5]   eth_dst   = our MAC
  *   [6..11]  eth_src   = peer MAC
  *   [12..13] etype     = 0x88B6
- *   [14]     cmd       = PERF_CMD_DUMP (0) or PERF_CMD_DUMP_RESET (1)
+ *   [14]     cmd       = PERF_CMD_DUMP (0), PERF_CMD_DUMP_RESET (1),
+ *                        or PERF_CMD_DUMP_REGS (2)
  *   [15..]   pad       (ignored)
  *
  * Reply frame (built in-place in the same rx_buf):
  *   [0..5]   eth_dst   = peer MAC (from request's eth_src)
  *   [6..11]  eth_src   = our MAC  (from net_our_mac)
  *   [12..13] etype     = 0x88B6
- *   [14..77] payload   = 64-byte copy of perf_counters
+ *   [14..77] payload   = 64-byte snapshot (see below)
  *
- * On PERF_CMD_DUMP_RESET the counters are zeroed AFTER being copied
- * into the reply — the reply frame sees the pre-reset values.
+ * Payload shape depends on cmd:
+ *   cmd 0/1: copy of perf_counters (cycle counters + event counts)
+ *            cmd 1 also zeros the source after snapshot.
+ *   cmd 2:   GENET register + driver-state snapshot via
+ *            genet_dump_state. See platform/pi/drivers/genet.S
+ *            for the exact layout — it is NOT the same shape as
+ *            the perf_counters struct.
+ *
+ * Under PERF_COUNTERS undef, cmd 0/1 drop silently (no counter
+ * struct to read). cmd 2 still works because genet_dump_state is
+ * platform code, not instrumentation. We keep the whole handler
+ * behind PERF_COUNTERS for now so default builds have zero
+ * overhead on the 0x88B6 dispatch path.
  *
  * x0: frame buffer pointer (same buffer used for reply)
  * w1: frame length
@@ -48,18 +60,28 @@
  *   w0 = 78 on successful reply built in-place (14 + 64)
  *   w0 = 0  on drop (PERF build disabled; frame too short;
  *           unknown command)
- * Clobbers: x0-x7. Leaf function — no prologue/epilogue.
+ * Clobbers: x0-x7, x30. Saves x30 because cmd 2 does a bl.
  */
 perf_handle:
 .ifdef PERF_COUNTERS
+    stp     x29, x30, [sp, #-16]!   /* prologue: save link reg for bl */
+    mov     x29, sp
+
     /* Length check: need at least ETH_HDR_LEN (14) + 1 cmd byte */
     cmp     w1, #15
     b.lt    .Lperf_drop
 
-    /* Read command byte at offset 14. Reject anything above
-     * PERF_CMD_DUMP_RESET (the highest defined command). */
+    /* Read command byte at offset 14. Reject anything above the
+     * highest defined command for this platform. PERF_CMD_DUMP_REGS
+     * is only available on Pi 4 because the register dump it maps
+     * to touches GENET hardware; non-Pi-4 builds cap at
+     * PERF_CMD_DUMP_RESET and silently drop cmd 2. */
     ldrb    w2, [x0, #14]
+.ifdef PLATFORM_PI4
+    cmp     w2, #PERF_CMD_DUMP_REGS
+.else
     cmp     w2, #PERF_CMD_DUMP_RESET
+.endif
     b.hi    .Lperf_drop
 
     /* ---- Build Ethernet header in place ---- */
@@ -85,11 +107,14 @@ perf_handle:
     rev16   w4, w4
     strh    w4, [x0, #12]
 
-    /* ---- Copy perf_counters (64 bytes) to payload at offset 14 ----
-     * Four 16-byte ldp/stp pairs. The counters struct is
-     * 16-byte aligned (.balign 64 in the BSS declaration), so
-     * ldp is safe. The payload start (x0 + 14) is NOT 16-aligned,
-     * but unaligned stp is legal on AArch64 Normal memory. */
+    /* ---- Branch on cmd to fill the 64-byte payload ---- */
+.ifdef PLATFORM_PI4
+    cmp     w2, #PERF_CMD_DUMP_REGS
+    b.eq    .Lperf_regs
+.endif
+
+    /* Cmd 0 or 1: copy perf_counters (64 bytes) to payload at
+     * offset 14. Four 16-byte ldp/stp pairs. */
     ldr     x4, =perf_counters
     add     x5, x0, #14
 
@@ -102,23 +127,41 @@ perf_handle:
     ldp     x6, x7, [x4, #48]
     stp     x6, x7, [x5, #48]
 
-    /* ---- Optionally reset counters AFTER snapshot ----
-     * PERF_CMD_DUMP_RESET → zero the whole struct so the next
-     * perf_query gets a fresh per-test window. The reply frame
-     * already carries the pre-reset values via the copy above. */
+    /* PERF_CMD_DUMP_RESET → zero the source struct AFTER the
+     * copy so the next perf_query(reset=True) gets a fresh
+     * per-test window. Reply frame already has the pre-reset
+     * values from the copy above. */
     cmp     w2, #PERF_CMD_DUMP_RESET
-    b.ne    .Lperf_no_reset
+    b.ne    .Lperf_ret
     stp     xzr, xzr, [x4, #0]
     stp     xzr, xzr, [x4, #16]
     stp     xzr, xzr, [x4, #32]
     stp     xzr, xzr, [x4, #48]
-.Lperf_no_reset:
+    b       .Lperf_ret
 
+.ifdef PLATFORM_PI4
+.Lperf_regs:
+    /* Cmd 2: GENET register + driver-state snapshot.
+     * genet_dump_state takes x0 = destination buffer and writes
+     * 64 bytes. We need to point it at the reply payload
+     * (frame + 14) and then restore x0 to the frame base afterwards
+     * because the return value needs to be the reply length.
+     *
+     * Save frame base on the stack across the call. */
+    stp     x0, xzr, [sp, #-16]!
+    add     x0, x0, #14
+    bl      genet_dump_state
+    ldp     x0, xzr, [sp], #16
+.endif
+
+.Lperf_ret:
     mov     w0, #78
+    ldp     x29, x30, [sp], #16
     ret
 
 .Lperf_drop:
     mov     w0, #0
+    ldp     x29, x30, [sp], #16
     ret
 
 .else
