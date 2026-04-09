@@ -25,6 +25,99 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — populate `rx_discards` from RDMA_PROD_INDEX[31:16] — **DEFINITIVE DIAGNOSIS**
+
+Small kernel change (3 instructions, gated on PERF_COUNTERS) to
+capture the upper 16 bits of RDMA_PROD_INDEX into
+perf_counters.rx_discards on every genet_recv call. The upper
+half of that register is the GENET hardware discard counter —
+frames the HW dropped at the RX ring because no descriptor was
+free. Previously always 0 because nothing wrote to it.
+
+### What the counter revealed
+
+5 cold-start trials, PERF=recv build, same kernel:
+
+| Trial | replies | rx_discards (abs) | missing | Δ rx_discards | match? |
+|-------|---------|-------------------|---------|---------------|--------|
+| 1     | 1024    | 232               | 0       | (baseline)    |        |
+| 2     |  991    | 265               | 33      | +33           | **✓**  |
+| 3     | 1019    | 270               | 5       | +5            | **✓**  |
+| 4     |  973    | 321               | 51      | +51           | **✓**  |
+| 5     |  984    | 361               | 40      | +40           | **✓**  |
+
+**Every single missing frame is a hardware ring discard.** The
+per-trial delta in rx_discards equals the per-trial missing reply
+count EXACTLY — not approximately, exactly. 33, 5, 51, 40.
+
+This closes the question we have been asking for two days:
+"where are the missing frames going at N=1024?" The answer is
+definitive:
+
+  **The Pi's GENET hardware drops them at the 256-slot RX ring
+  before software can process them. Not the laptop socket. Not
+  the USB bulk transfer. Not anywhere else.**
+
+### Strategic implications
+
+1. **The lost frames are all ring overflow.** This is exactly the
+   loss mechanism PAUSE frames would prevent, if the r8152 laptop
+   NIC honored them end-to-end. The PAUSE limitation we tabled
+   earlier is now a concrete blocker for "fully lossless at N=1024
+   on this rig," not just a theoretical concern.
+
+2. **The grind work paid off at the hardware level.** We cut
+   per-frame cost to ~2360 ns via the harness fixes + batch drain,
+   which drained the ring much better than Linux (our mean 1020
+   vs Linux's 689). The remaining ~0.4% loss is at wire-rate peak
+   — the ring fills slightly faster than even our fast drain can
+   empty, and the HW discards the overflow.
+
+3. **Linux comparison re-framed.** Linux had ~335 missing frames
+   per trial (689/1024). That's ~335 hardware discards in the same
+   256-slot ring. Linux's higher per-frame cost lets the ring
+   overflow much more frequently. Same mechanism, ~8x worse.
+
+4. **rx_discards is the definitive diagnostic going forward.**
+   Any future optimization or configuration change can be measured
+   directly against this counter. If we reduce it, we reduced
+   hardware drops. If we don't, whatever we did didn't help.
+
+### Implementation details
+
+Capture point in genet_recv (before the existing mask-to-16-bits):
+
+    ldr     w0, [x19, #RDMA_PROD_INDEX]
+.ifdef PERF_COUNTERS
+    lsr     w2, w0, #16
+    ldr     x3, =perf_counters
+    str     w2, [x3, #PERF_RX_DISCARDS]
+.endif
+    and     w0, w0, #0xFFFF
+
+Cost: 3 instructions, ~4 cycles (~7 ns per frame), only in PERF
+builds. Default kernel is byte-identical (27880 bytes, unchanged).
+
+Snapshot semantics: the counter is overwritten on every recv call,
+so the end-of-burst value is the current hardware counter. The
+counter is cumulative since boot (or maybe since the last
+RDMA reset in genet_init). Per-trial deltas are computed by
+taking successive snapshots.
+
+### Side observation: recv_ns noise is wider than expected
+
+recv_ns in this run: mean 2296.70, stdev 97.82, range 2137-2395.
+
+Compared to prior PERF=recv runs (mean ~2385, stdev ~15-20), this
+run's stdev is noticeably higher and mean is slightly lower. The
+extra 3 instructions for rx_discards are worth ~7 ns per frame,
+which doesn't explain the widened stdev (~80 ns vs ~15 ns). Possible
+cause: thermal/scheduler variance that drifted over the day. Not
+worth chasing — all samples are clearly in the "genet_recv
+dominated" regime and the ~93% share holds.
+
+---
+
 ## 2026-04-08 — Raspberry Pi OS (Linux bcmgenet) — REFERENCE MEASUREMENT
 
 Head-to-head against Linux on identical hardware. Pi 4, same

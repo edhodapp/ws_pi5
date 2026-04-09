@@ -472,8 +472,24 @@ genet_recv:
     mov     x21, x2                 /* dst buf */
     mov     w22, w3                 /* max len */
 
-    /* Check if frame available: PROD_INDEX != our CONS_INDEX */
+    /* Check if frame available: PROD_INDEX != our CONS_INDEX.
+     *
+     * RDMA_PROD_INDEX is a 32-bit register whose LOWER 16 bits are
+     * the producer index (frames the HW has published into the
+     * ring) and whose UPPER 16 bits are the RDMA discard counter
+     * (frames the HW dropped at the ring because no descriptor was
+     * free). Under PERF_COUNTERS we snapshot the upper half into
+     * perf_counters.rx_discards so the test harness can see it
+     * via the 0x88B6 query. The snapshot overwrites on every call,
+     * so the last-read value at end-of-burst is what the test sees
+     * — close enough to "final discard count for the burst" given
+     * the snapshot cadence. */
     ldr     w0, [x19, #RDMA_PROD_INDEX]
+.ifdef PERF_COUNTERS
+    lsr     w2, w0, #16
+    ldr     x3, =perf_counters
+    str     w2, [x3, #PERF_RX_DISCARDS]
+.endif
     and     w0, w0, #0xFFFF
     ldr     w1, [x20, #GENET_STATE_RX_CIDX]
     cmp     w0, w1
