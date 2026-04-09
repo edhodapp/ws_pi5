@@ -25,6 +25,71 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `aa4e625` + tried RX pool prefetch — **REVERTED**, made it WORSE (conceptual error)
+
+Second Phase 1 grind attempt. Added an early `prfm pldl1keep` for
+the next frame's first cache line, reasoning that we could hide
+~100-200 ns of memory latency by starting the cache fetch during
+the current frame's processing.
+
+**Result: +30 ns/frame regression, not an improvement.**
+
+| metric | baseline   | change (prefetch) | delta |
+|--------|------------|---------------------|-------|
+| recv_ns mean  | 2385.90 | 2416.10 | **+30.20** |
+| recv_ns stdev |   14.39 |   19.32 | |
+| min           |    2367 |    2371 | |
+| max           |    2408 |    2439 | |
+
+**Why it failed — the conceptual error:**
+
+`dc civac` in the receive path invalidates cache lines *down to
+the Point of Coherency*, which on BCM2711 is DRAM (GENET DMA does
+not participate in CPU cache coherency, so PoC sits below L2).
+Every cache level between the CPU and the DMA agent is wiped by
+`civac`, including any lines we pre-loaded via `prfm`.
+
+The sequence that defeats the prefetch:
+
+1. Frame K processed in slot ridx=K → we `prfm` slot K+1
+2. Next call genet_recv for frame K+1 → `dc civac` on slot K+1's
+   cache lines wipes everything the prefetch had loaded
+3. The subsequent copy-loop load is a cache miss, same as before
+4. Net effect: 5 extra instructions (add, and, ldr, add, prfm) of
+   pure overhead per frame with zero benefit
+
+**Lesson:** any prefetch before a `dc civac` is destroyed by the
+invalidate. The only way prefetching could help this code path
+is if we had ~100-200 ns of real work between the `civac` and
+the subsequent load — which we don't (the copy loop starts
+immediately after `dsb`). Moving the prefetch AFTER `civac` just
+makes the prefetch race with the copy's first load — no benefit.
+
+**What would actually help:** eliminate or batch the `dc civac`.
+That would require either (a) making the rx_pool non-cacheable
+(losing L1 locality for the copy), (b) using cache-bypass loads,
+or (c) a bigger architectural change that's out of scope for a
+single grind tweak. None of these is a single-commit change.
+
+**Decision:** reverted. Only the perf_history log is kept.
+
+**Grind strategy update:** prefetching small regions doesn't help
+in this hot path. The *dominant* cost in genet_recv is going to be
+one of:
+* the MMIO descriptor read (~150-300 ns, unavoidable for this HW)
+* the `dc civac` loop (~150-250 ns for one cache line)
+* the `dsb sy` barrier (~30-50 cycles ~ 20-30 ns)
+* the `ldr x, [x19, #RDMA_PROD_INDEX]` MMIO check (~150-300 ns)
+
+The biggest potential win is **eliminating one MMIO read per
+frame**. Current code does two MMIO reads per frame: PROD_INDEX
+(to check if a frame is available) and the descriptor's
+length_status. If we can combine these, or check the descriptor's
+OWN/valid bit instead of PROD_INDEX, we save ~150-300 ns — well
+above the noise floor. That's the next target.
+
+---
+
 ## 2026-04-08 — `9dc7a81` + tried `dsb sy` → `dsb ish` — **REVERTED**, no measurable signal
 
 First Phase 1 grind attempt on `genet_recv`. Weakened the post-
