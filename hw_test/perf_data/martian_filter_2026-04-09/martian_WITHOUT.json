@@ -1,0 +1,116 @@
+{
+  "label": "WITHOUT",
+  "N": 500,
+  "trials": [
+    {
+      "trial": 0,
+      "delivered": 500,
+      "elapsed_ms": 7511.655086000246,
+      "ip_ticks": 15768,
+      "ip_count": 500,
+      "ip_ns_per_frame": 584.0,
+      "icmp_ticks": 13240,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 490.3703703703704
+    },
+    {
+      "trial": 1,
+      "delivered": 500,
+      "elapsed_ms": 8925.772931997926,
+      "ip_ticks": 15722,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.2962962962963,
+      "icmp_ticks": 13207,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.14814814814815
+    },
+    {
+      "trial": 2,
+      "delivered": 500,
+      "elapsed_ms": 9067.38362899705,
+      "ip_ticks": 15723,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.3333333333334,
+      "icmp_ticks": 13225,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.81481481481484
+    },
+    {
+      "trial": 3,
+      "delivered": 500,
+      "elapsed_ms": 7007.792915999744,
+      "ip_ticks": 15762,
+      "ip_count": 500,
+      "ip_ns_per_frame": 583.7777777777777,
+      "icmp_ticks": 13270,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 491.48148148148147
+    },
+    {
+      "trial": 4,
+      "delivered": 500,
+      "elapsed_ms": 9058.21126599767,
+      "ip_ticks": 15726,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.4444444444445,
+      "icmp_ticks": 13228,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.9259259259259
+    },
+    {
+      "trial": 5,
+      "delivered": 500,
+      "elapsed_ms": 9258.171522000339,
+      "ip_ticks": 15724,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.3703703703703,
+      "icmp_ticks": 13226,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.85185185185185
+    },
+    {
+      "trial": 6,
+      "delivered": 500,
+      "elapsed_ms": 9250.395079001464,
+      "ip_ticks": 15738,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.8888888888889,
+      "icmp_ticks": 13233,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 490.11111111111114
+    },
+    {
+      "trial": 7,
+      "delivered": 500,
+      "elapsed_ms": 9206.069072999526,
+      "ip_ticks": 15733,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.7037037037037,
+      "icmp_ticks": 13234,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 490.14814814814815
+    },
+    {
+      "trial": 8,
+      "delivered": 500,
+      "elapsed_ms": 9196.14650999938,
+      "ip_ticks": 15713,
+      "ip_count": 500,
+      "ip_ns_per_frame": 581.9629629629629,
+      "icmp_ticks": 13227,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.88888888888886
+    },
+    {
+      "trial": 9,
+      "delivered": 500,
+      "elapsed_ms": 9306.510334998165,
+      "ip_ticks": 15720,
+      "ip_count": 500,
+      "ip_ns_per_frame": 582.2222222222223,
+      "icmp_ticks": 13209,
+      "icmp_count": 500,
+      "icmp_ns_per_frame": 489.22222222222223
+    }
+  ]
+}

@@ -4,6 +4,162 @@ Durable record of 10-trial `burst_stats.py` runs at N=1024, with the
 purpose of each trial and the commit it was measured against. Append
 new entries at the TOP so the latest work is immediately visible.
 
+---
+
+## 2026-04-09 — martian source IP filter cost (commit bdf0ef0 vs synthetic baseline) — **EFFECTIVELY FREE**
+
+Follow-up measurement closing the review of the L3 hardening cycle.
+Commit #7.5 (`bdf0ef0`) added a three-check martian source IP filter
+to `lib/ip.S::ip_handle` (`src == 0.0.0.0`, `src in 127.0.0.0/8`,
+`src == net_our_ip`). That added 16 bytes to the default kernel
+text. Ed asked: what is the actual runtime cost per frame?
+
+### Method
+
+One-off A/B with a temporary `.ifndef DISABLE_MARTIAN` gate in
+`lib/ip.S` so both kernels build from the same HEAD:
+
+* **WITH**:    `make PLATFORM=pi4 PERF=l3`
+* **WITHOUT**: `make PLATFORM=pi4 PERF=l3 ASFLAGS="... --defsym DISABLE_MARTIAN=1"`
+
+Both kernels flash to the same Pi 4 across the same USB-to-serial
+chainloader, same direct gigabit cable, same r8152 laptop NIC. The
+harness at `hw_test/perf_data/martian_filter_2026-04-09/measure_martian.py`:
+
+1. DUMP_L3_RESET before each trial (so the delta captures only that
+   trial's work).
+2. 3000-echo warm-up before the measurement loop, with a
+   wait-for-all-replies drain, so the Pi's icache / branch predictor
+   / net_loop polling-spinner state are in steady state. (Earlier
+   attempts at cold-start showed a 2x cost transition across the
+   first ~2500 processed frames — `ip_handle` costs ~265 ns while
+   fresh from boot and ~575 ns once net_loop's spinner has displaced
+   it into L2. Warm-up eliminates that phase before we touch the
+   counters.)
+3. 10 trials × 500 × 64-byte ICMP echoes each.
+4. Record `ip_ticks / ip_count` and `icmp_ticks / icmp_count` per
+   trial; convert via Pi 4's CNTVCT_EL0 = 54 MHz.
+
+### Steady-state results
+
+| build                | `ip_ns` median | stdev | `icmp_ns` median | stdev |
+|----------------------|---------------:|------:|-----------------:|------:|
+| **WITH martian**     |      **575.44** |  0.35 |      **476.19** |  0.50 |
+| **WITHOUT martian**  |      **582.41** |  0.68 |      **489.91** |  0.65 |
+| delta (WITHOUT − WITH) |       **+6.97** |       |      **+13.72** |       |
+
+Both builds are lossless across 10 trials (500/500 delivered
+every trial). Stdev is < 0.15% of the median on both sides — the
+CNTVCT counter is extremely precise and the per-frame cost is
+effectively deterministic at this noise floor.
+
+### Sign is backwards from the naive prediction
+
+Naive instruction-count analysis says 6 extra instructions ≈ 6-10 ns
+per frame of *added* cost in WITH. But the measurement shows WITH is
+**faster** by 7 ns on `ip_handle` and 14 ns on `icmp_handle` —
+~21 ns total per echo.
+
+icmp_handle's source is identical between the two builds. The only
+thing that can shift icmp_handle's cost is its physical address and
+the resulting cache-line layout. Disassembly:
+
+| function         | WITH address | cache line offset | WITHOUT address | cache line offset |
+|------------------|-------------:|------------------:|----------------:|------------------:|
+| `ip_handle`      |   `0x200948` | +8                |      `0x200948` | +8                |
+| `ip_reasm_input` |   `0x200b20` | +32               |      `0x200b00` | +0                |
+| **`icmp_handle`**  | **`0x20111c`** | **+28**         |  **`0x2010fc`** | **+60**           |
+
+**There is the smoking gun.** Under WITHOUT, `icmp_handle` starts
+at offset +60 of a 64-byte L1 cache line. Only the first 4 bytes
+of the function (the `stp x29, x30, [sp, #-48]!` prologue
+instruction) sit on that line; every instruction from #2 onwards
+is on the NEXT cache line. Every call to `icmp_handle` therefore
+hits **two** L1 lines for the prologue alone, where WITH's +28
+alignment fits cleanly inside one line.
+
+Removing the 6 martian instructions shifted every downstream
+function forward by ~32 bytes (24 instruction bytes + 8 literal-
+pool / alignment padding). That shift moved `icmp_handle`'s
+entry from a cache-friendly +28 offset to a pathological +60
+offset. Every subsequent call pays an extra line fetch.
+
+The 14 ns delta matches one extra L1→L2 line fetch per call on
+the A72 (64 bytes from L2 at ~5-6 cycles total ≈ 10-15 ns
+amortized when the hit is under branch-predictor prefetch
+pressure).
+
+The 7 ns delta on `ip_handle` is smaller but the same shape —
+`ip_handle`'s timed region wraps the nested `bl icmp_handle`, so
+part of the icmp cache cost bleeds into `ip_ticks`, but not all of
+it, because `ip_handle`'s own body and its dispatch table also
+contribute. The arithmetic: icmp_ns delta (14) is roughly twice the
+ip_ns delta over-and-above icmp (7). The extra 7 ns inside
+`ip_handle` itself is probably `ip_handle`'s post-dispatch return
+path (after the `bl icmp_handle`) also paying a cache-line cost
+from the shift.
+
+### Verdict: the martian filter is effectively free in steady state
+
+The headline answer to "what does the martian filter cost at
+runtime?" is:
+
+* **Analytical upper bound** (instruction count × 1 cycle × 1/1.5 GHz):
+  ≤ 10 ns per frame of ip_handle cost.
+* **Measured:** indistinguishable from zero — in fact the current
+  code layout gives WITH a ~21 ns *advantage* per echo over
+  WITHOUT.
+
+The filter adds 16 bytes to the default kernel and 6 cycles of
+nominal work to every valid IP frame, and neither is observable
+in the steady-state per-frame budget. The only cost it pays is a
+16-byte binary-size delta.
+
+### Important caveats
+
+1. The "WITH is faster" advantage is NOT a property of the martian
+   filter itself — it's a property of the *accidentally cache-
+   friendly code layout* the filter produced. Any unrelated change
+   that shifts `icmp_handle`'s address forward by ~32 bytes could
+   produce the same benefit without adding security value. Treating
+   this as a feature of the martian filter would be over-fitting
+   to microarchitectural coincidence.
+2. Conversely: if the martian filter were removed in the future,
+   the replacement code should be sized or padded so `icmp_handle`
+   lands somewhere non-pathological. A no-op NOP-padded stub or an
+   `.align 16` directive on icmp_handle's entry would both work.
+3. The measurement itself took 10 minutes per side after the
+   warm-up fix was found. The harness's Python-paced AF_PACKET send
+   rate is ~55 fps, not ~500 kpps, so each 500-echo trial takes ~9
+   seconds. That's fine for averaging but the measurement is NOT
+   of "peak drain rate" — it's of "per-call CPU cost inside
+   ip_handle/icmp_handle as counted by CNTVCT_EL0." Those are
+   different quantities. The peak-drain measurement would require
+   a tcpreplay-paced burst; beyond the scope of this follow-up.
+4. Measurements are at a 64-byte payload. For larger payloads the
+   per-frame cost is dominated by `ip_checksum` scanning the ICMP
+   segment, and the martian filter's 6 instructions are an even
+   smaller fraction of the total. Upper bound: ≤ 2% at 64B, < 0.5%
+   at 1400B.
+
+### Artifacts
+
+* Raw per-trial JSON: `hw_test/perf_data/martian_filter_2026-04-09/martian_{WITH,WITHOUT}.json`
+* Measurement harness: `hw_test/perf_data/martian_filter_2026-04-09/measure_martian.py`
+* Temporary `.ifndef DISABLE_MARTIAN` gate in `lib/ip.S` — REMOVED
+  after measurement, see the commit that follows this entry.
+
+### Lesson captured
+
+At the 10-20 ns per-frame scale on A72, **instruction count is a
+poor proxy for cost** because cache-line layout dominates. Future
+micro-optimisations should measure CNTVCT ticks, not count
+instructions, and should be wary that any code shift in a hot
+function can produce a 10+ ns per-call layout swing that dwarfs
+the nominal per-instruction cost.
+
+---
+
 Format:
 
 ```
