@@ -32,13 +32,11 @@ Run:
 
 import pytest
 
-import eth_frames
 import ip_frames
 import wire
 from conftest import PI4_IP, requires_hardware
 from icmp_helpers import (
     icmp_bpf_from_pi,
-    is_any_echo_reply_from_pi,
     is_any_icmp_from_pi,
     parse_reply,
     send_echo_and_wait,
@@ -280,114 +278,110 @@ class TestTtl1Accepted:
 
 
 # ==============================================================
-# No martian filter (currently documented, not enforced)
+# Martian source IP filter (added in lib/ip.S)
 # ==============================================================
 
 @requires_hardware
 @pytest.mark.l3
-class TestNoMartianFilter:
-    """ws_pi5's ip_handle does NOT validate the source IP against
-    any martian ranges (0.0.0.0, 127.0.0.0/8, our-own-IP). The
-    checks it performs are: VER_IHL, total_length, frame bounds,
-    checksum, TTL, destination IP.
+class TestMartianSourceDropped:
+    """ws_pi5's ip_handle rejects packets whose source IP is
+    structurally impossible per RFC 1122 §3.2.1.3 and RFC 6890:
 
-    These tests pin the current NO-FILTER behaviour. If a future
-    change adds a martian filter, these tests will fail, which is
-    correct — they must be updated to assert "drop" instead.
+      * 0.0.0.0           — "this host", never valid post-DHCP
+      * 127.0.0.0/8       — loopback, never on the wire
+      * our own IP        — self-spoof
 
-    Observability: we filter on (ident, seq) AND source MAC,
-    since the reply's dst_ip might be a value our kernel refuses
-    to route. tcpdump sees all Ethernet traffic regardless.
+    All three drops are silent (no ICMP error, consistent with the
+    other ip_handle drops). These tests use the same silence-window
+    pattern as the other malformed-header tests: send the bogus
+    frame, wait for silence, then prove the Pi is still alive.
+
+    The filter does NOT do full uRPF — it's three cheap compares.
+    A future commit may add subnet-range or interface-scope checks
+    on top, which would keep these tests green as a subset.
     """
 
-    def _assert_pi_replied_to_ident_seq(
-        self,
-        eth_iface: str,
-        bogus_src_ip: str,
-        *,
-        pi_mac: bytes,
-        laptop_mac: bytes,
-        ident: int,
-        seq: int,
-        rtt_p99_ms: float,
-    ) -> bytes:
+    def test_zero_src_ip_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
         frame = ip_frames.build_icmp_echo_frame(
-            laptop_mac, pi_mac, bogus_src_ip, PI4_IP,
-            ident=ident, seq=seq, payload=b"martian?",
+            laptop_mac, pi_mac, "0.0.0.0", PI4_IP,
+            ident=0x5201, seq=1, payload=b"zero-src",
         )
-        bpf = icmp_bpf_from_pi(pi_mac, laptop_mac)
-
-        # Custom predicate: reply is an ICMP echo reply from the Pi
-        # with the matching (ident, seq). The dst_ip in the reply
-        # will be bogus_src_ip (the Pi swaps the IP addresses blindly).
-        def is_reply_for_bogus(data: bytes) -> bool:
-            if not is_any_echo_reply_from_pi(
-                data,
-                pi_mac=pi_mac, laptop_mac=laptop_mac,
-                pi_ip=PI4_IP, laptop_ip=bogus_src_ip,
-            ):
-                return False
-            icmp = parse_reply(data)["icmp"]
-            return icmp["ident"] == ident and icmp["seq"] == seq
-
-        deadline_ms = int(max(20.0 * rtt_p99_ms, 500.0))
-        with wire.WireCapture(eth_iface, bpf=bpf) as cap:
-            wire.send_frame(eth_iface, frame)
-            reply = wire.wait_for_frame(
-                cap, is_reply_for_bogus,
-                deadline_ms=deadline_ms,
-            )
-        assert reply is not None, (
-            f"Pi did NOT reply to an echo with src_ip={bogus_src_ip} — "
-            f"a martian filter appears to have been added. If this "
-            f"change is intentional, update this test to assert "
-            f"silent drop instead."
-        )
-        return reply
-
-    def test_zero_src_ip_accepted(
-        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
-    ):
-        """src_ip = 0.0.0.0 (RFC 1122 §3.2.1.3 "this host"). Pinned
-        as accepted."""
-        reply = self._assert_pi_replied_to_ident_seq(
-            eth_iface, "0.0.0.0",
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
             pi_mac=pi_mac, laptop_mac=laptop_mac,
-            ident=0x5201, seq=1, rtt_p99_ms=rtt_p99_ms,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=0.0.0.0",
         )
-        r = parse_reply(reply)
-        assert r["ip"]["dst_ip"] == "0.0.0.0"
-        assert r["ip"]["src_ip"] == PI4_IP
-        assert r["icmp"]["payload"] == b"martian?"
 
-    def test_loopback_src_ip_accepted(
+    def test_loopback_src_ip_dropped(
         self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
     ):
-        """src_ip = 127.0.0.1 (loopback, never valid on the wire).
-        Pinned as accepted."""
-        reply = self._assert_pi_replied_to_ident_seq(
-            eth_iface, "127.0.0.1",
+        """127.0.0.1 — exact loopback address."""
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, "127.0.0.1", PI4_IP,
+            ident=0x5202, seq=1, payload=b"loopback-src",
+        )
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
             pi_mac=pi_mac, laptop_mac=laptop_mac,
-            ident=0x5202, seq=1, rtt_p99_ms=rtt_p99_ms,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=127.0.0.1",
         )
-        r = parse_reply(reply)
-        assert r["ip"]["dst_ip"] == "127.0.0.1"
-        assert r["icmp"]["payload"] == b"martian?"
 
-    def test_our_own_ip_as_src_accepted(
+    def test_loopback_high_range_src_ip_dropped(
         self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
     ):
-        """src_ip = PI4_IP (claim the packet came from the Pi
-        itself). Pinned as accepted — the Pi blindly builds a reply
-        that gets sent back at itself.
+        """127.255.255.254 — upper end of the 127/8 range. Pins that
+        the filter covers the whole /8, not just 127.0.0.1 exactly.
+        A mutant that replaced the first-octet compare with an
+        exact-word compare against 127.0.0.1 would pass the
+        low-address test and fail this one.
         """
-        reply = self._assert_pi_replied_to_ident_seq(
-            eth_iface, PI4_IP,
-            pi_mac=pi_mac, laptop_mac=laptop_mac,
-            ident=0x5203, seq=1, rtt_p99_ms=rtt_p99_ms,
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, "127.255.255.254", PI4_IP,
+            ident=0x5203, seq=1, payload=b"loopback-high",
         )
-        r = parse_reply(reply)
-        # Self-reply: both src and dst are PI4_IP on the way back.
-        assert r["ip"]["dst_ip"] == PI4_IP
-        assert r["ip"]["src_ip"] == PI4_IP
-        assert r["icmp"]["payload"] == b"martian?"
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=127.255.255.254",
+        )
+
+    def test_our_own_ip_as_src_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """src_ip = our own IP — classic spoof attempt. The filter
+        rejects any incoming frame that claims to come from us.
+        """
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, PI4_IP, PI4_IP,
+            ident=0x5204, seq=1, payload=b"self-spoof",
+        )
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=PI4_IP (self-spoof)",
+        )
+
+    def test_legitimate_neighbor_src_still_accepted(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """Positive control: the laptop's real source IP must NOT
+        be filtered. If a mutant replaced one of the drop branches
+        with an unconditional drop, this test would catch it.
+        """
+        reply = send_echo_and_wait(
+            eth_iface,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            pi_ip=PI4_IP, laptop_ip=laptop_ip,
+            ident=0x5205, seq=1, payload=b"normal",
+            deadline_ms=int(max(20.0 * rtt_p99_ms, 500.0)),
+        )
+        assert reply is not None, (
+            "normal echo from laptop_ip failed — the martian filter "
+            "is over-blocking"
+        )

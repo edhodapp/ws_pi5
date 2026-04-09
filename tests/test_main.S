@@ -161,6 +161,10 @@ _start:
     bl      test_ip_handle_totlen_short
     bl      test_ip_handle_totlen_overrun
     bl      test_ip_handle_ttl_zero
+    bl      test_ip_handle_martian_src_zero
+    bl      test_ip_handle_martian_src_loopback
+    bl      test_ip_handle_martian_src_loopback_high
+    bl      test_ip_handle_martian_src_self
     bl      test_net_recv_arp
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown

@@ -26,6 +26,10 @@
 .global test_ip_handle_totlen_short
 .global test_ip_handle_totlen_overrun
 .global test_ip_handle_ttl_zero
+.global test_ip_handle_martian_src_zero
+.global test_ip_handle_martian_src_loopback
+.global test_ip_handle_martian_src_loopback_high
+.global test_ip_handle_martian_src_self
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
 .global test_ip_reasm_overlap
@@ -485,6 +489,106 @@ test_ip_handle_ttl_zero:
     ret
 
 /* ========================================================================
+ * test_ip_handle_martian_src_zero — src=0.0.0.0 → returns 0 (drop)
+ * ======================================================================== */
+test_ip_handle_martian_src_zero:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_zero_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_zero
+
+    ldr     x0, =name_ip_src_zero
+    bl      test_pass
+    b       .Ldone_ip_src_zero
+
+.Lfail_ip_src_zero:
+    ldr     x0, =name_ip_src_zero
+    bl      test_fail
+
+.Ldone_ip_src_zero:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_martian_src_loopback — src=127.0.0.1 → returns 0 (drop)
+ * ======================================================================== */
+test_ip_handle_martian_src_loopback:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_loopback_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_loopback
+
+    ldr     x0, =name_ip_src_loopback
+    bl      test_pass
+    b       .Ldone_ip_src_loopback
+
+.Lfail_ip_src_loopback:
+    ldr     x0, =name_ip_src_loopback
+    bl      test_fail
+
+.Ldone_ip_src_loopback:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_martian_src_loopback_high — src=127.255.255.254 →
+ * returns 0 (drop). Ensures the 127/8 check matches the whole range,
+ * not just 127.0.0.1 exactly — mutation testing protection.
+ * ======================================================================== */
+test_ip_handle_martian_src_loopback_high:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_loopback_high_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_loopback_high
+
+    ldr     x0, =name_ip_src_loopback_high
+    bl      test_pass
+    b       .Ldone_ip_src_loopback_high
+
+.Lfail_ip_src_loopback_high:
+    ldr     x0, =name_ip_src_loopback_high
+    bl      test_fail
+
+.Ldone_ip_src_loopback_high:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_martian_src_self — src==net_our_ip (10.0.2.15) →
+ * returns 0 (drop). Prevents the self-spoof attack where a forged
+ * frame claims to come from us.
+ * ======================================================================== */
+test_ip_handle_martian_src_self:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_self_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_self
+
+    ldr     x0, =name_ip_src_self
+    bl      test_pass
+    b       .Ldone_ip_src_self
+
+.Lfail_ip_src_self:
+    ldr     x0, =name_ip_src_self
+    bl      test_fail
+
+.Ldone_ip_src_self:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * test_ip_reasm_overlap — overlapping fragment dropped
  *
  * Frag1: offset=0, MF=1, 16 bytes (sets bitmap bits 0-1)
@@ -802,6 +906,68 @@ ip_ttl_zero_frame:
     .byte   0x08, 0x00, 0xF7, 0xFD
     .byte   0x00, 0x01, 0x00, 0x01
 
+/* ========================================================================
+ * Martian source IP test frames — each identical to ip_icmp_template
+ * except for the IP.src field and the recomputed IP checksum.
+ * Checksums computed via hw_test/ip_frames.ip_checksum and pinned here.
+ * ======================================================================== */
+
+/* src=0.0.0.0, cksum=0x5C9F */
+.balign 4
+ip_src_zero_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x5C, 0x9F
+    .byte   0x00, 0x00, 0x00, 0x00                   /* src: 0.0.0.0 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* src=127.0.0.1, cksum=0xDD9D */
+.balign 4
+ip_src_loopback_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0xDD, 0x9D
+    .byte   0x7F, 0x00, 0x00, 0x01                   /* src: 127.0.0.1 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* src=127.255.255.254, cksum=0xDCA0 — exercises the whole 127/8 range */
+.balign 4
+ip_src_loopback_high_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0xDC, 0xA0
+    .byte   0x7F, 0xFF, 0xFF, 0xFE                   /* src: 127.255.255.254 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* src=10.0.2.15 (self), cksum=0x5090 */
+.balign 4
+ip_src_self_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x50, 0x90
+    .byte   0x0A, 0x00, 0x02, 0x0F                   /* src: 10.0.2.15 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
 /* Overlapping fragment: id=0xABCD, offset=1 (8 bytes), MF=0, 8-byte payload */
 .balign 4
 ip_frag_overlap:
@@ -845,6 +1011,10 @@ name_ip_bad_ver:    .asciz "ip_handle_bad_ver"
 name_ip_totlen_short:   .asciz "ip_handle_totlen_short"
 name_ip_totlen_overrun: .asciz "ip_handle_totlen_overrun"
 name_ip_ttl_zero:   .asciz "ip_handle_ttl_zero"
+name_ip_src_zero:          .asciz "ip_handle_martian_src_zero"
+name_ip_src_loopback:      .asciz "ip_handle_martian_src_loopback"
+name_ip_src_loopback_high: .asciz "ip_handle_martian_src_loopback_high"
+name_ip_src_self:          .asciz "ip_handle_martian_src_self"
 name_ip_reasm:      .asciz "ip_reasm_two_frags"
 name_ip_timeout:    .asciz "ip_reasm_timeout"
 name_ip_overlap:    .asciz "ip_reasm_overlap"

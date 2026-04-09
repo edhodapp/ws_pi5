@@ -102,11 +102,30 @@ ip_handle:
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_TTL)]
     cbz     w0, .Lip_drop
 
-    /* 7. IP.DST == net_our_ip (wire-format compare, no rev) */
+    /* 7. Martian source IP filter (RFC 1122 §3.2.1.3, RFC 6890).
+     *    Drop packets whose source IP makes no physical sense on
+     *    the wire:
+     *      7a. src == 0.0.0.0          (never valid post-DHCP)
+     *      7b. src in 127.0.0.0/8      (loopback)
+     *      7c. src == net_our_ip       (self-spoof)
+     *
+     *    w2 = src IP in wire (NBO) order, kept for the three tests.
+     *    All comparisons are wire-format against NBO literals, no
+     *    byte-swap required.
+     */
+    ldr     w2, [x19, #(ETH_PAYLOAD + IP_SRC)]
+    cbz     w2, .Lip_drop                  /* 7a: 0.0.0.0 */
+    and     w3, w2, #0xFF                  /* low byte = first octet */
+    cmp     w3, #127
+    b.eq    .Lip_drop                      /* 7b: 127.0.0.0/8 */
+    ldr     x3, =net_our_ip
+    ldr     w3, [x3]
+    cmp     w2, w3
+    b.eq    .Lip_drop                      /* 7c: self-spoof */
+
+    /* 8. IP.DST == net_our_ip (wire-format compare, no rev) */
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
-    ldr     x1, =net_our_ip
-    ldr     w1, [x1]
-    cmp     w0, w1
+    cmp     w0, w3
     b.ne    .Lip_drop
 
     /* 8. Check for IP fragments: MF flag or non-zero offset */
