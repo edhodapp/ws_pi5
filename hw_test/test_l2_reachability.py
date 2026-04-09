@@ -141,6 +141,76 @@ class TestArpReachability:
 
 @requires_hardware
 @pytest.mark.l2
+class TestMaxFrameSize:
+    """Verify the Pi handles maximum-size (1514 B) Ethernet frames.
+
+    Ed's genet_recv copy loop uses `ldp/stp` 16-byte chunks with a
+    byte-loop tail. ARP frames (60 B) exercise ~3 iterations of the
+    16-byte loop + 12 bytes of tail. Max-size frames (1500 B IP
+    payload → 1514 B on wire) exercise ~94 loop iterations + 12
+    bytes of tail — a different code path that's worth validating
+    explicitly.
+
+    A single ICMP echo with a 1472-byte payload gives us exactly
+    1514 bytes on the wire:
+
+        14 (eth) + 20 (IPv4) + 8 (ICMP) + 1472 (payload) = 1514
+
+    If the Pi's genet_recv copy has an off-by-one or any corruption
+    bug at large frame sizes, the ICMP echo reply will either fail
+    to arrive or have a corrupted payload (and the kernel ping will
+    report it). The system `ping -s 1472` does the round-trip and
+    reports loss or success.
+    """
+
+    def test_max_size_icmp_echo_round_trip(self):
+        """A single ICMP echo with a 1472-byte payload (1514 B on
+        wire, exactly Ethernet MTU) gets a well-formed reply.
+
+        Verifies genet_recv's copy loop at the high boundary. Also
+        exercises genet_send at the same size (the Pi's ICMP handler
+        builds the reply in-place and sends it back).
+        """
+        import subprocess
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", "3", "-s", "1472", "-M", "do",
+             PI4_IP],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Max-size ping failed (rc={result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # ping prints "1 received, 0% packet loss" on success
+        assert "1 received" in result.stdout, (
+            f"Max-size ping got no reply:\n{result.stdout}"
+        )
+        assert "0% packet loss" in result.stdout, (
+            f"Max-size ping reported loss:\n{result.stdout}"
+        )
+
+    def test_max_size_icmp_echo_5_packets(self):
+        """Five max-size ICMP echoes get five replies — confirms
+        the max-size copy path is stable across repeats, not a
+        one-off lucky single frame.
+        """
+        import subprocess
+        result = subprocess.run(
+            ["ping", "-c", "5", "-W", "2", "-s", "1472", "-M", "do",
+             PI4_IP],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Max-size 5-packet ping failed:\n{result.stdout}\n{result.stderr}"
+        )
+        assert "5 received" in result.stdout, (
+            f"Max-size 5-packet ping lost frames:\n{result.stdout}"
+        )
+        assert "0% packet loss" in result.stdout
+
+
+@requires_hardware
+@pytest.mark.l2
 class TestRttBaseline:
     """Sanity checks on the measured RTT baseline."""
 

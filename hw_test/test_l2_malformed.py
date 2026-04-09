@@ -51,6 +51,19 @@ OVERSIZE_LENGTHS = [1515, 1536, 1537, 1600]
 BOGUS_ETHERTYPES = [0x0000, 0x0001, 0x88cc, 0x9999, 0xFFFF, 0x8100]
 
 
+# Locally-administered unicast MAC that doesn't match any device on
+# the test bench. The second bit of the first byte (the U/L bit = 1,
+# bit 1 of byte 0) marks it as locally-administered; the first bit
+# is the I/G bit = 0 for unicast. So 02:00:00:00:00:01 is a valid
+# unicast MAC that nobody on this cable has.
+STRANGER_UNICAST_MAC = bytes.fromhex("020000000001")
+
+# IPv4 all-systems multicast MAC (01:00:5e + 23 low bits of
+# 224.0.0.1 = 00:00:01). The I/G bit (bit 0 of byte 0) is 1, marking
+# it as multicast. We use this for the multicast-filter test.
+IPV4_ALL_SYSTEMS_MULTICAST_MAC = bytes.fromhex("01005e000001")
+
+
 @requires_hardware
 @pytest.mark.l2
 class TestMalformedFrames:
@@ -132,6 +145,64 @@ class TestMalformedFrames:
         truncated = truncated + bytes(eth_frames.ETH_MIN_FRAME - len(truncated))
         _send_garbage_then_assert_alive(
             truncated, length_label="arp[truncated]",
+            eth_iface=eth_iface, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, pi_mac=pi_mac, rtt_p99_ms=rtt_p99_ms,
+        )
+
+    def test_unknown_unicast_dst_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
+    ):
+        """An ARP request addressed to someone else's unicast MAC is
+        silently dropped — the Pi must not leak replies to frames
+        that weren't sent to its MAC address.
+
+        The frame is WELL-FORMED at every layer except the destination
+        MAC: valid ARP request asking "who has PI4_IP" but with
+        eth_dst set to a locally-administered MAC that doesn't match
+        the Pi's. The Pi should drop this at (a) the hardware MAC
+        filter, which was programmed with the Pi's MAC via
+        UMAC_MAC0/MAC1 in genet_init, OR (b) the software filter in
+        lib/net.S::net_recv_one which checks dst_mac against
+        net_our_mac and net_broadcast_mac.
+
+        A reply would indicate either the hardware MAC filter is
+        disabled/promiscuous OR the software filter is missing. Both
+        are real bugs worth catching.
+        """
+        frame = eth_frames.build_arp_request(
+            laptop_mac, laptop_ip, PI4_IP,
+            dst_mac=STRANGER_UNICAST_MAC,
+        )
+        _send_garbage_then_assert_alive(
+            frame, length_label="arp[dst=stranger]",
+            eth_iface=eth_iface, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, pi_mac=pi_mac, rtt_p99_ms=rtt_p99_ms,
+        )
+
+    def test_multicast_dst_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
+    ):
+        """An ARP request addressed to an IPv4 multicast MAC is
+        silently dropped — the Pi has no multicast group memberships
+        and should not respond to multicast traffic.
+
+        We use 01:00:5e:00:00:01 which is the IPv4 all-systems
+        multicast MAC (encoding of 224.0.0.1). The I/G bit is 1
+        marking it as a group address. Pi's software filter in
+        net_recv_one accepts only our_mac + broadcast; multicast
+        should fall through to .Lnr_drop_mac.
+
+        If the Pi DOES reply, it means either (a) the GENET hardware
+        was left in all-multicast-accept mode, OR (b) the software
+        filter is missing the multicast check. Both would be
+        regressions from the intended single-host behavior.
+        """
+        frame = eth_frames.build_arp_request(
+            laptop_mac, laptop_ip, PI4_IP,
+            dst_mac=IPV4_ALL_SYSTEMS_MULTICAST_MAC,
+        )
+        _send_garbage_then_assert_alive(
+            frame, length_label="arp[dst=multicast]",
             eth_iface=eth_iface, laptop_mac=laptop_mac,
             laptop_ip=laptop_ip, pi_mac=pi_mac, rtt_p99_ms=rtt_p99_ms,
         )
