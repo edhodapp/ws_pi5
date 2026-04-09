@@ -127,6 +127,12 @@ ip_handle:
      *    w2 = src IP in wire (NBO) order, kept for the three tests.
      *    All comparisons are wire-format against NBO literals, no
      *    byte-swap required.
+     *
+     *    Runtime cost: measured at zero-to-negative in steady state.
+     *    See hw_test/perf_history.md entry 2026-04-09. The 24-byte
+     *    code footprint shifts icmp_handle into a cache-friendly
+     *    alignment; removing it actually slows the hot path by
+     *    ~21 ns per echo on the current tree.
      */
     ldr     w2, [x19, #(ETH_PAYLOAD + IP_SRC)]
     cbz     w2, .Lip_drop                  /* 7a: 0.0.0.0 */
