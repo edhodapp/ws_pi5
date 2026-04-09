@@ -39,7 +39,7 @@ from conftest import PI4_IP, requires_hardware
 from icmp_helpers import (
     icmp_bpf_from_pi,
     is_any_echo_reply_from_pi,
-    is_echo_reply_for,
+    is_any_icmp_from_pi,
     parse_reply,
     send_echo_and_wait,
 )
@@ -75,9 +75,9 @@ def _assert_bogus_is_dropped(
         wire.send_frame(eth_iface, bogus_frame)
         uninvited = wire.wait_for_frame(
             cap,
-            lambda data: _is_any_icmp_from_pi(
+            lambda data: is_any_icmp_from_pi(
                 data, pi_mac=pi_mac, laptop_mac=laptop_mac,
-                pi_ip=PI4_IP, laptop_ip=laptop_ip,
+                pi_ip=PI4_IP,
             ),
             deadline_ms=silence_ms,
         )
@@ -98,38 +98,6 @@ def _assert_bogus_is_dropped(
         f"Pi did not reply to a normal echo after the malformed "
         f"frame ({reason}) — it may be hung"
     )
-
-
-def _is_any_icmp_from_pi(
-    frame: bytes,
-    *,
-    pi_mac: bytes,
-    laptop_mac: bytes,
-    pi_ip: str,
-    laptop_ip: str,
-) -> bool:
-    """Predicate: ANY IPv4/ICMP frame from the Pi to the laptop.
-
-    Stricter than needed for plain dst-IP-swap echo replies, but
-    catches ICMP errors too (if the Pi ever grows a "send error
-    for this kind of malformed input" path, this test will flag it).
-    """
-    try:
-        eth = eth_frames.parse_eth_header(frame)
-        if eth["ethertype"] != eth_frames.ETHERTYPE_IPV4:
-            return False
-        if eth["src"] != pi_mac or eth["dst"] != laptop_mac:
-            return False
-        ip = ip_frames.parse_ipv4_header(
-            frame[eth_frames.ETH_HEADER_LEN:
-                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-        )
-        return (
-            ip["protocol"] == ip_frames.IP_PROTO_ICMP
-            and ip["src_ip"] == pi_ip
-        )
-    except (ValueError, OSError):
-        return False
 
 
 # ==============================================================

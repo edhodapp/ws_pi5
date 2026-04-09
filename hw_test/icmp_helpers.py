@@ -60,6 +60,38 @@ def is_echo_reply_for(
         return False
 
 
+def is_any_icmp_from_pi(
+    frame: bytes,
+    *,
+    pi_mac: bytes,
+    laptop_mac: bytes,
+    pi_ip: str,
+) -> bool:
+    """Predicate: any IPv4/ICMP frame from the Pi to the laptop,
+    regardless of type (echo reply OR ICMP error).
+
+    Used by silence-window tests that want to catch ANY reply from
+    the Pi — so if a drop path ever regresses to "silently generate
+    an ICMP error" instead of "silently drop", those tests fire.
+    """
+    try:
+        eth = eth_frames.parse_eth_header(frame)
+        if eth["ethertype"] != eth_frames.ETHERTYPE_IPV4:
+            return False
+        if eth["src"] != pi_mac or eth["dst"] != laptop_mac:
+            return False
+        ip = ip_frames.parse_ipv4_header(
+            frame[eth_frames.ETH_HEADER_LEN:
+                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
+        )
+        return (
+            ip["protocol"] == ip_frames.IP_PROTO_ICMP
+            and ip["src_ip"] == pi_ip
+        )
+    except (ValueError, OSError):
+        return False
+
+
 def is_any_echo_reply_from_pi(
     frame: bytes,
     *,
