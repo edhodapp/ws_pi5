@@ -29,95 +29,12 @@ import eth_frames
 import ip_frames
 import wire
 from conftest import PI4_IP, requires_hardware
-
-
-# ==============================================================
-# Shared helpers — a predicate that matches an echo reply from
-# the Pi to the laptop for a specific (ident, seq).
-# ==============================================================
-
-def _is_icmp_echo_reply_for(
-    frame: bytes,
-    *,
-    pi_mac: bytes,
-    laptop_mac: bytes,
-    pi_ip: str,
-    laptop_ip: str,
-    ident: int,
-    seq: int,
-) -> bool:
-    """Predicate: is this frame an ICMP echo reply from the Pi to us
-    with the given (ident, seq)?
-
-    Rejects cleanly on any parse error — the predicate is called on
-    every captured frame including background noise.
-    """
-    try:
-        eth = eth_frames.parse_eth_header(frame)
-        if eth["ethertype"] != eth_frames.ETHERTYPE_IPV4:
-            return False
-        if eth["src"] != pi_mac or eth["dst"] != laptop_mac:
-            return False
-        ip = ip_frames.parse_ipv4_header(
-            frame[eth_frames.ETH_HEADER_LEN:
-                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-        )
-        if ip["protocol"] != ip_frames.IP_PROTO_ICMP:
-            return False
-        if ip["src_ip"] != pi_ip or ip["dst_ip"] != laptop_ip:
-            return False
-        icmp = ip_frames.parse_icmp(
-            frame[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:
-                  eth_frames.ETH_HEADER_LEN + ip["total_length"]]
-        )
-        if icmp["type"] != ip_frames.ICMP_ECHO_REPLY:
-            return False
-        return icmp["ident"] == ident and icmp["seq"] == seq
-    except (ValueError, OSError):
-        return False
-
-
-def _send_echo_and_wait(
-    eth_iface: str,
-    *,
-    pi_mac: bytes,
-    laptop_mac: bytes,
-    pi_ip: str,
-    laptop_ip: str,
-    ident: int,
-    seq: int,
-    payload: bytes,
-    deadline_ms: int,
-    df: bool = False,
-    ip_ident: int = 0,
-    ttl: int = ip_frames.IP_DEFAULT_TTL,
-) -> bytes | None:
-    """Send one crafted ICMP echo and return the first matching reply,
-    or None at deadline. Uses WireCapture with a tight BPF so
-    background noise on the wire doesn't slow the pcap scan.
-    """
-    frame = ip_frames.build_icmp_echo_frame(
-        laptop_mac, pi_mac, laptop_ip, pi_ip,
-        ident=ident, seq=seq, payload=payload,
-        ttl=ttl, ip_ident=ip_ident, df=df,
-    )
-    bpf = (
-        f"icmp and ether src {eth_frames.mac_bytes_to_str(pi_mac)} "
-        f"and ether dst {eth_frames.mac_bytes_to_str(laptop_mac)}"
-    )
-    with wire.WireCapture(eth_iface, bpf=bpf) as cap:
-        wire.send_frame(eth_iface, frame)
-        reply = wire.wait_for_frame(
-            cap,
-            lambda data: _is_icmp_echo_reply_for(
-                data,
-                pi_mac=pi_mac, laptop_mac=laptop_mac,
-                pi_ip=pi_ip, laptop_ip=laptop_ip,
-                ident=ident, seq=seq,
-            ),
-            deadline_ms=deadline_ms,
-        )
-    return reply
+from icmp_helpers import (
+    icmp_bpf_from_pi,
+    is_any_echo_reply_from_pi,
+    parse_reply,
+    send_echo_and_wait,
+)
 
 
 # ==============================================================
@@ -149,7 +66,7 @@ class TestIcmpReachability:
         payload = bytes(range(32))  # 0..31
         deadline_ms = int(max(20.0 * rtt_p99_ms, 500.0))
 
-        reply = _send_echo_and_wait(
+        reply = send_echo_and_wait(
             eth_iface,
             pi_mac=pi_mac, laptop_mac=laptop_mac,
             pi_ip=PI4_IP, laptop_ip=laptop_ip,
@@ -161,38 +78,32 @@ class TestIcmpReachability:
         )
 
         # Full field audit of the reply.
-        eth = eth_frames.parse_eth_header(reply)
-        assert eth["src"] == pi_mac
-        assert eth["dst"] == laptop_mac
-        assert eth["ethertype"] == eth_frames.ETHERTYPE_IPV4
+        r = parse_reply(reply)
+        assert r["eth"]["src"] == pi_mac
+        assert r["eth"]["dst"] == laptop_mac
+        assert r["eth"]["ethertype"] == eth_frames.ETHERTYPE_IPV4
 
-        ip_bytes = reply[eth_frames.ETH_HEADER_LEN:
-                         eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-        ip = ip_frames.parse_ipv4_header(ip_bytes)
-        assert ip["version"] == 4
-        assert ip["ihl"] == 5
-        assert ip["protocol"] == ip_frames.IP_PROTO_ICMP
-        assert ip["src_ip"] == PI4_IP
-        assert ip["dst_ip"] == laptop_ip
-        assert ip["ttl"] == ip_frames.IP_DEFAULT_TTL, (
+        assert r["ip"]["version"] == 4
+        assert r["ip"]["ihl"] == 5
+        assert r["ip"]["protocol"] == ip_frames.IP_PROTO_ICMP
+        assert r["ip"]["src_ip"] == PI4_IP
+        assert r["ip"]["dst_ip"] == laptop_ip
+        assert r["ip"]["ttl"] == ip_frames.IP_DEFAULT_TTL, (
             f"Pi should set reply TTL to {ip_frames.IP_DEFAULT_TTL}, "
-            f"got {ip['ttl']}"
+            f"got {r['ip']['ttl']}"
         )
-        assert ip_frames.ip_checksum(ip_bytes) == 0, (
+        assert ip_frames.ip_checksum(r["ip_bytes"]) == 0, (
             "reply IP checksum does not verify — header corruption"
         )
 
-        icmp_bytes = reply[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:
-                           eth_frames.ETH_HEADER_LEN + ip["total_length"]]
-        icmp = ip_frames.parse_icmp(icmp_bytes)
-        assert icmp["type"] == ip_frames.ICMP_ECHO_REPLY
-        assert icmp["code"] == 0
-        assert icmp["ident"] == ident
-        assert icmp["seq"] == seq
-        assert icmp["payload"] == payload, (
+        assert r["icmp"]["type"] == ip_frames.ICMP_ECHO_REPLY
+        assert r["icmp"]["code"] == 0
+        assert r["icmp"]["ident"] == ident
+        assert r["icmp"]["seq"] == seq
+        assert r["icmp"]["payload"] == payload, (
             "ICMP payload corrupted in round-trip"
         )
-        assert ip_frames.ip_checksum(icmp_bytes) == 0, (
+        assert ip_frames.ip_checksum(r["icmp_bytes"]) == 0, (
             "reply ICMP checksum does not verify"
         )
 
@@ -206,7 +117,7 @@ class TestIcmpReachability:
         pairs = [(0x1000 + i, 0x8000 - i) for i in range(10)]
 
         for ident, seq in pairs:
-            reply = _send_echo_and_wait(
+            reply = send_echo_and_wait(
                 eth_iface,
                 pi_mac=pi_mac, laptop_mac=laptop_mac,
                 pi_ip=PI4_IP, laptop_ip=laptop_ip,
@@ -216,11 +127,9 @@ class TestIcmpReachability:
             assert reply is not None, (
                 f"no reply for (id={ident:#06x}, seq={seq:#06x})"
             )
-            icmp = ip_frames.parse_icmp(
-                reply[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:]
-            )
-            assert icmp["ident"] == ident
-            assert icmp["seq"] == seq
+            r = parse_reply(reply)
+            assert r["icmp"]["ident"] == ident
+            assert r["icmp"]["seq"] == seq
 
     def test_echo_payload_integrity(
         self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
@@ -238,7 +147,7 @@ class TestIcmpReachability:
         assert len(payload) == 64
 
         deadline_ms = int(max(20.0 * rtt_p99_ms, 500.0))
-        reply = _send_echo_and_wait(
+        reply = send_echo_and_wait(
             eth_iface,
             pi_mac=pi_mac, laptop_mac=laptop_mac,
             pi_ip=PI4_IP, laptop_ip=laptop_ip,
@@ -246,13 +155,11 @@ class TestIcmpReachability:
             deadline_ms=deadline_ms,
         )
         assert reply is not None
-        icmp = ip_frames.parse_icmp(
-            reply[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:]
-        )
-        assert icmp["payload"] == payload, (
+        r = parse_reply(reply)
+        assert r["icmp"]["payload"] == payload, (
             "payload corrupted:\n"
             f"  sent: {payload.hex()}\n"
-            f"  recv: {icmp['payload'].hex()}"
+            f"  recv: {r['icmp']['payload'].hex()}"
         )
 
     def test_rtt_within_ceiling(
@@ -270,7 +177,7 @@ class TestIcmpReachability:
 
         for i in range(20):
             t0 = time.monotonic()
-            reply = _send_echo_and_wait(
+            reply = send_echo_and_wait(
                 eth_iface,
                 pi_mac=pi_mac, laptop_mac=laptop_mac,
                 pi_ip=PI4_IP, laptop_ip=laptop_ip,
@@ -312,32 +219,21 @@ class TestIcmpReachability:
             )
             for i in range(10)
         ]
-        bpf = (
-            f"icmp and ether src {eth_frames.mac_bytes_to_str(pi_mac)} "
-            f"and ether dst {eth_frames.mac_bytes_to_str(laptop_mac)}"
-        )
+        bpf = icmp_bpf_from_pi(pi_mac, laptop_mac)
         with wire.WireCapture(eth_iface, bpf=bpf) as cap:
             for f in frames:
                 wire.send_frame(eth_iface, f)
-            # Any ICMP echo reply whose ident is in [base, base+10)
+
             def is_burst_reply(data: bytes) -> bool:
-                try:
-                    ip = ip_frames.parse_ipv4_header(
-                        data[eth_frames.ETH_HEADER_LEN:
-                             eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-                    )
-                    if ip["protocol"] != ip_frames.IP_PROTO_ICMP:
-                        return False
-                    icmp = ip_frames.parse_icmp(
-                        data[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:
-                             eth_frames.ETH_HEADER_LEN + ip["total_length"]]
-                    )
-                    return (
-                        icmp["type"] == ip_frames.ICMP_ECHO_REPLY
-                        and ident_base <= icmp["ident"] < ident_base + 10
-                    )
-                except (ValueError, OSError):
+                if not is_any_echo_reply_from_pi(
+                    data,
+                    pi_mac=pi_mac, laptop_mac=laptop_mac,
+                    pi_ip=PI4_IP, laptop_ip=laptop_ip,
+                ):
                     return False
+                ident = parse_reply(data)["icmp"]["ident"]
+                return ident_base <= ident < ident_base + 10
+
             replies = wire.wait_for_frames(
                 cap, is_burst_reply,
                 count=10, deadline_ms=deadline_ms,
@@ -347,17 +243,7 @@ class TestIcmpReachability:
             f"{deadline_ms} ms"
         )
         # Each ident in the burst must appear exactly once.
-        got_idents = set()
-        for r in replies:
-            ip = ip_frames.parse_ipv4_header(
-                r[eth_frames.ETH_HEADER_LEN:
-                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-            )
-            icmp = ip_frames.parse_icmp(
-                r[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:
-                  eth_frames.ETH_HEADER_LEN + ip["total_length"]]
-            )
-            got_idents.add(icmp["ident"])
+        got_idents = {parse_reply(r)["icmp"]["ident"] for r in replies}
         expected = set(range(ident_base, ident_base + 10))
         assert got_idents == expected, (
             f"burst idents missing: {expected - got_idents}, "
@@ -378,7 +264,7 @@ class TestIcmpReachability:
         """
         deadline_ms = int(max(20.0 * rtt_p99_ms, 500.0))
         ip_ident_val = 0xC0DE
-        reply = _send_echo_and_wait(
+        reply = send_echo_and_wait(
             eth_iface,
             pi_mac=pi_mac, laptop_mac=laptop_mac,
             pi_ip=PI4_IP, laptop_ip=laptop_ip,
@@ -387,12 +273,9 @@ class TestIcmpReachability:
             ip_ident=ip_ident_val,
         )
         assert reply is not None
-        ip = ip_frames.parse_ipv4_header(
-            reply[eth_frames.ETH_HEADER_LEN:
-                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
-        )
-        assert ip["ident"] == ip_ident_val, (
+        r = parse_reply(reply)
+        assert r["ip"]["ident"] == ip_ident_val, (
             f"Pi did not preserve IP.id in reply: sent {ip_ident_val:#06x}, "
-            f"got {ip['ident']:#06x}. Update this test if the behaviour "
-            f"intentionally changed."
+            f"got {r['ip']['ident']:#06x}. Update this test if the "
+            f"behaviour intentionally changed."
         )
