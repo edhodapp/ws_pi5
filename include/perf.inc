@@ -29,7 +29,12 @@
 
 .equ PERF_DISPATCH_TICKS, 16   /* u64: ticks inside net_recv_one */
 .equ PERF_DISPATCH_COUNT, 24   /* u32: frames dispatched */
-.equ PERF_DROP_COUNT,     28   /* u32: frames dropped (not for us) */
+.equ PERF_DROP_COUNT,     28   /* u32: frames dropped in genet_recv
+                                  due to hardware descriptor error
+                                  bits (DMA_RX_FI_MASK). Distinct
+                                  from PERF_RX_DISCARDS which counts
+                                  frames the HW dropped BEFORE they
+                                  reached a descriptor. */
 
 .equ PERF_SEND_TICKS,     32   /* u64: ticks inside genet_send */
 .equ PERF_SEND_COUNT,     40   /* u32: sends issued */

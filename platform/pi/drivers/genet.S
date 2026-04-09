@@ -503,6 +503,17 @@ genet_recv:
     add     x3, x3, x4
 
     ldr     w4, [x3, #0]           /* length_status */
+
+    /* Hardware error check: if any DMA_RX_FI_MASK bit is set the
+     * frame in this descriptor is damaged (bad CRC, overrun,
+     * oversize, truncated, or generic rxer). Drop it without
+     * processing, consume the descriptor so we don't see it again,
+     * and return "no frame" so the caller retries. This is
+     * L2 hardening queue item 3: exposes the HW error path to the
+     * test harness via the PERF_DROP_COUNT counter. */
+    tst     w4, #DMA_RX_FI_MASK
+    b.ne    .Lrx_err
+
     lsr     w5, w4, #16
     and     w5, w5, #0xFFF          /* raw length (includes 2-byte pad) */
 
@@ -588,6 +599,52 @@ genet_recv:
      * critical for u32 fields. */
     PROBE_EXIT x23, PERF_RECV_TICKS, x2, x3
     PROBE_COUNT_INC PERF_RECV_COUNT, w2, x3
+.endif
+
+    b       .Lrx_ret
+
+.Lrx_err:
+    /* Hardware RX error path. The descriptor at w2 = current RIDX
+     * contains a damaged frame. Consume the descriptor (advance
+     * CIDX and RIDX past it, publish CIDX to HW) so the next
+     * recv call moves on. Bump PERF_DROP_COUNT under PERF_COUNTERS
+     * so the test harness can query the running error total.
+     * Return "no frame" so net_loop runs its idle path and comes
+     * back for the next descriptor on the next iteration.
+     *
+     * Note w2 still holds the current RIDX (loaded earlier and
+     * never clobbered up to the tst/b.ne above). x20 still holds
+     * the genet_state pointer. x19 still holds the GENET base. */
+    ldr     w0, [x20, #GENET_STATE_RX_CIDX]
+    add     w0, w0, #1
+    and     w0, w0, #0xFFFF
+    str     w0, [x20, #GENET_STATE_RX_CIDX]
+    str     w0, [x19, #RDMA_CONS_INDEX]
+
+    ldr     w0, [x20, #GENET_STATE_RX_RIDX]
+    add     w0, w0, #1
+    and     w0, w0, #0xFF
+    str     w0, [x20, #GENET_STATE_RX_RIDX]
+
+.ifdef PERF_COUNTERS
+    /* Bump PERF_DROP_COUNT (u32 at offset 28). x3 is caller-saved
+     * and free here; w2 is also free because we've finished
+     * consuming the current-RIDX value (it was already used above).
+     * Note the w-register for the counter — 4-byte access. */
+    ldr     x3, =perf_counters
+    ldr     w2, [x3, #PERF_DROP_COUNT]
+    add     w2, w2, #1
+    str     w2, [x3, #PERF_DROP_COUNT]
+.endif
+
+    mov     w0, #1
+    mov     w1, #0
+
+.ifdef PERF_RECV
+    /* Count this as a "no frame" in the recv stats — the caller
+     * sees it as a no-frame call, which matches the return code.
+     * Do NOT accumulate ticks (path is trivial). */
+    PROBE_COUNT_INC PERF_RECV_NONE, w2, x3
 .endif
 
     b       .Lrx_ret

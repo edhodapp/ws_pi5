@@ -205,6 +205,7 @@ class TestRingWraparound:
                     f"recv_count={perf['recv_count']} "
                     f"recv_none={perf['recv_none']} "
                     f"dispatch_count={perf['dispatch_count']} "
+                    f"drop_count={perf['drop_count']} "
                     f"send_count={perf['send_count']} "
                     f"send_fail={perf['send_fail']} "
                     f"max_burst={perf['max_burst']} "

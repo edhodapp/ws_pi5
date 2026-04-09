@@ -108,6 +108,17 @@
 /* RX descriptor length_status */
 .equ RX_DMA_OWN,              0x8000
 
+/* RX descriptor error bits (bits 0-4 of length_status word).
+ * Source: Linux bcmgenet.h DMA_RX_FI_MASK. If ANY of these are set
+ * the frame the HW deposited in the rx_pool slot is damaged and
+ * must be dropped (not passed to net_recv_one). */
+.equ DMA_RX_OV,               0x0001   /* RX FIFO overrun */
+.equ DMA_RX_CRC_ERROR,        0x0002   /* bad FCS (CRC) */
+.equ DMA_RX_RXER,             0x0004   /* generic receive error */
+.equ DMA_RX_NO,               0x0008   /* no SOP/EOP (truncated) */
+.equ DMA_RX_LG,               0x0010   /* oversize frame */
+.equ DMA_RX_FI_MASK,          0x001F   /* any of the above */
+
 /* GENET state struct — tracks DMA ring indices and cached PHY state */
 .equ GENET_STATE_RX_CIDX,     0    /* RX consumer index (16-bit) */
 .equ GENET_STATE_RX_RIDX,     4    /* RX ring index (0-255) */

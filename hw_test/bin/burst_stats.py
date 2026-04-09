@@ -29,7 +29,7 @@ BURST_RE = re.compile(
 PERF_RE = re.compile(
     r"PERF_STATS: n=(\d+) "
     r"recv_count=(\d+) recv_none=(\d+) "
-    r"dispatch_count=(\d+) "
+    r"dispatch_count=(\d+) drop_count=(\d+) "
     r"send_count=(\d+) send_fail=(\d+) "
     r"max_burst=(\d+) rx_discards=(\d+) "
     r"recv_ns=(\d+) dispatch_ns=(\d+) send_ns=(\d+)"
@@ -79,13 +79,14 @@ def run_once(n: int) -> dict:
             "recv_count":     int(perf_m.group(2)),
             "recv_none":      int(perf_m.group(3)),
             "dispatch_count": int(perf_m.group(4)),
-            "send_count":     int(perf_m.group(5)),
-            "send_fail":      int(perf_m.group(6)),
-            "max_burst":      int(perf_m.group(7)),
-            "rx_discards":    int(perf_m.group(8)),
-            "recv_ns":        int(perf_m.group(9)),
-            "dispatch_ns":    int(perf_m.group(10)),
-            "send_ns":        int(perf_m.group(11)),
+            "drop_count":     int(perf_m.group(5)),
+            "send_count":     int(perf_m.group(6)),
+            "send_fail":      int(perf_m.group(7)),
+            "max_burst":      int(perf_m.group(8)),
+            "rx_discards":    int(perf_m.group(9)),
+            "recv_ns":        int(perf_m.group(10)),
+            "dispatch_ns":    int(perf_m.group(11)),
+            "send_ns":        int(perf_m.group(12)),
         })
 
     return out
@@ -232,6 +233,7 @@ def main() -> int:
         _summarize("recv_count",   [t["recv_count"]   for t in perf_trials])
         _summarize("recv_none",    [t["recv_none"]    for t in perf_trials])
         _summarize("dispatch_count",[t["dispatch_count"] for t in perf_trials])
+        _summarize("drop_count",   [t["drop_count"]   for t in perf_trials])
         _summarize("send_count",   [t["send_count"]   for t in perf_trials])
         _summarize("send_fail",    [t["send_fail"]    for t in perf_trials])
         _summarize("rx_discards",  [t["rx_discards"]  for t in perf_trials])
