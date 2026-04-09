@@ -536,6 +536,60 @@ The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi
 | Shared protocol stack | `lib/` is pure computation — portable to any AArch64 board with zero changes |
 | Platform-specific boot/drivers | Boot.S, main.S, and drivers live under `platform/pi/` |
 | MMU identity map | Virtual = physical, all existing code works unchanged, caches enabled |
+| Cache-line alignment directives | Deliberately out of scope — see below |
+
+### Cache-line alignment: considered, rejected
+
+During the L3 hardening cycle we stumbled into an empirical finding
+worth recording: on Cortex-A72, the steady-state cost of
+`ip_handle` and `icmp_handle` is dominated by L1 instruction-cache
+line fetches, not by the raw instruction count of the protocol
+logic. Specifically, a 24-byte code shift in `ip_handle` changed
+`icmp_handle`'s entry from cache-line offset +28 to offset +60 —
+the latter puts the function's first instruction alone at the end
+of one 64-byte line with everything else on the next line, and
+that mis-alignment cost ~14 ns per call in extra L1→L2 line
+fetches. Full measurement in
+[`hw_test/perf_history.md`](hw_test/perf_history.md) entry
+`2026-04-09`.
+
+The obvious next move is to add `.balign 16` or `.balign 64`
+directives in front of every hot protocol handler (`ip_handle`,
+`icmp_handle`, `udp_handle`, `tcp_handle`, `arp_handle`) so their
+entry addresses are deterministically cache-friendly regardless
+of what changes upstream in the file. That would trade up to ~60
+bytes of padding per handler for a 1–3% steady-state per-frame
+improvement on bare metal.
+
+**We deliberately did not take that step in ws_pi5.** This is the
+BSD-licensed reference implementation — the code you fork, study,
+and re-use. Micro-architectural tuning (cache-line alignment,
+branch predictor layout hints, loop-buffer sizing, manual
+instruction scheduling) belongs in the *derivatives* that use
+ws_pi5 as a foundation and are free to optimize for a specific
+hardware target. Keeping the reference clean of that kind of
+tuning makes it easier to review, easier to port to new aarch64
+platforms, and easier to demonstrate the protocol logic without
+layout noise.
+
+**If you fork ws_pi5 to target specific bare-metal hardware**,
+alignment directives are a legitimate free-lunch optimization
+and you should add them after measuring. The technique is:
+put a `PROBE_L3_ENTRY`/`EXIT` pair around the function you're
+tuning, add the alignment, measure with
+`hw_test/bin/burst_stats.py --icmp-burst`, and keep only the
+changes whose deltas survive 10 trials at sub-1% stdev.
+
+**If you fork ws_pi5 to target a virtualized host** (a microVM,
+nested hypervisor, or any guest running on top of another OS),
+alignment still works mechanically — the host cache honors the
+guest's alignment within a page — but the per-frame cost in
+those environments is dominated by hypercall / vmexit overhead
+(hundreds to thousands of ns each) rather than L1 cache traffic.
+The alignment win would be ~1% against a ~1 µs hypercall floor
+versus ~3% against a ~550 ns bare-metal floor. Probably not
+worth the readability cost in that environment; measure before
+adopting.
 
 ## Future: Multi-Board Architecture
 
