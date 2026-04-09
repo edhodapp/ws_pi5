@@ -95,12 +95,15 @@
 .equ PERF_ETHERTYPE,      0x88B6
 
 /* Commands carried in payload[0] of a perf query frame. */
-.equ PERF_CMD_DUMP,       0    /* read current counters, no mutation */
-.equ PERF_CMD_DUMP_RESET, 1    /* read then zero all counters */
-.equ PERF_CMD_DUMP_REGS,  2    /* dump GENET register + driver state
-                                * snapshot (64 bytes, different shape
-                                * from perf_counters — see
-                                * hw_test/wire.py _parse_genet_regs) */
+.equ PERF_CMD_DUMP,          0   /* read L2 counters, no mutation */
+.equ PERF_CMD_DUMP_RESET,    1   /* read then zero L2 counters */
+.equ PERF_CMD_DUMP_REGS,     2   /* dump GENET register + driver state
+                                  * snapshot (64 bytes, different shape
+                                  * from perf_counters — see
+                                  * hw_test/wire.py _parse_genet_regs) */
+.equ PERF_CMD_DUMP_L3,       3   /* read perf_counters2 (64 bytes) */
+.equ PERF_CMD_DUMP_L3_RESET, 4   /* read then zero L3 counters
+                                  * (magic tag preserved) */
 
 /* --- Probe macros --------------------------------------------------- */
 /*

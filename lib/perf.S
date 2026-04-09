@@ -18,6 +18,7 @@
  */
 
 .include "perf.inc"
+.include "net.inc"
 
 .section .text
 
@@ -72,15 +73,21 @@ perf_handle:
     b.lt    .Lperf_drop
 
     /* Read command byte at offset 14. Reject anything above the
-     * highest defined command for this platform. PERF_CMD_DUMP_REGS
-     * is only available on Pi 4 because the register dump it maps
-     * to touches GENET hardware; non-Pi-4 builds cap at
-     * PERF_CMD_DUMP_RESET and silently drop cmd 2. */
+     * highest defined command for this build flavour.
+     *
+     * PERF_CMD_DUMP_REGS is Pi 4 only (register dump touches
+     * GENET hardware). PERF_CMD_DUMP_L3 / _L3_RESET are only
+     * available when PERF_L3 is set (perf_counters2 exists).
+     * The highest-cap test picks whichever is active. */
     ldrb    w2, [x0, #14]
+.ifdef PERF_L3
+    cmp     w2, #PERF_CMD_DUMP_L3_RESET
+.else
 .ifdef PLATFORM_PI4
     cmp     w2, #PERF_CMD_DUMP_REGS
 .else
     cmp     w2, #PERF_CMD_DUMP_RESET
+.endif
 .endif
     b.hi    .Lperf_drop
 
@@ -111,6 +118,12 @@ perf_handle:
 .ifdef PLATFORM_PI4
     cmp     w2, #PERF_CMD_DUMP_REGS
     b.eq    .Lperf_regs
+.endif
+.ifdef PERF_L3
+    cmp     w2, #PERF_CMD_DUMP_L3
+    b.eq    .Lperf_l3
+    cmp     w2, #PERF_CMD_DUMP_L3_RESET
+    b.eq    .Lperf_l3
 .endif
 
     /* Cmd 0 or 1: copy perf_counters (64 bytes) to payload at
@@ -152,6 +165,66 @@ perf_handle:
     add     x0, x0, #14
     bl      genet_dump_state
     ldp     x0, xzr, [sp], #16
+.ifdef PERF_L3
+    /* Needed only when the L3 block below actually exists —
+     * otherwise the original fall-through to .Lperf_ret is
+     * correct and this branch would be dead code. */
+    b       .Lperf_ret
+.endif
+.endif
+
+.ifdef PERF_L3
+.Lperf_l3:
+    /* Cmd 3/4: L3 counter dump. Before the copy, populate
+     * PERF_L3_FRAG_ACTIVE with a live count of reasm slots whose
+     * REASM_FLAGS bit 7 (active) is set. Costs one pass over the
+     * 4-slot array per query — cheap, and not counted under any
+     * probe (the query handler is not in a timed hot path).
+     *
+     * Scratch: w3 = loop counter, x5 = walking slot pointer,
+     * w6 = flags byte, w7 = active count. */
+    ldr     x5, =reasm_slots
+    mov     w3, #REASM_MAX_SLOTS
+    mov     w7, #0
+.Lperf_l3_slot_loop:
+    ldrb    w6, [x5, #REASM_FLAGS]
+    lsr     w6, w6, #7              /* bit 7 → bit 0 */
+    and     w6, w6, #1
+    add     w7, w7, w6
+    add     x5, x5, #REASM_SLOT_SIZE
+    subs    w3, w3, #1
+    b.ne    .Lperf_l3_slot_loop
+
+    /* Store the computed active count into perf_counters2. */
+    ldr     x4, =perf_counters2
+    str     w7, [x4, #PERF_L3_FRAG_ACTIVE]
+
+    /* Copy perf_counters2 (64 bytes) into the reply payload. */
+    add     x5, x0, #14
+    ldp     x6, x7, [x4, #0]
+    stp     x6, x7, [x5, #0]
+    ldp     x6, x7, [x4, #16]
+    stp     x6, x7, [x5, #16]
+    ldp     x6, x7, [x4, #32]
+    stp     x6, x7, [x5, #32]
+    ldp     x6, x7, [x4, #48]
+    stp     x6, x7, [x5, #48]
+
+    /* If this was PERF_CMD_DUMP_L3_RESET, zero the L3 counter
+     * fields AFTER the copy. The magic tag (offset 60) must be
+     * preserved so the next query can still verify the layout,
+     * so we restore it after the bulk zero. FRAG_ACTIVE (offset
+     * 48) is also zeroed and will be re-populated live on the
+     * next query. */
+    cmp     w2, #PERF_CMD_DUMP_L3_RESET
+    b.ne    .Lperf_ret
+    stp     xzr, xzr, [x4, #0]
+    stp     xzr, xzr, [x4, #16]
+    stp     xzr, xzr, [x4, #32]
+    stp     xzr, xzr, [x4, #48]
+    ldr     w6, =PERF_L3_MAGIC_VALUE
+    str     w6, [x4, #PERF_L3_MAGIC]
+    b       .Lperf_ret
 .endif
 
 .Lperf_ret:
