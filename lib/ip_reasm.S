@@ -326,7 +326,17 @@ ip_reasm_input:
     b.ne    .Lri_incomplete
 
 .Lri_complete:
-    /* ---- Reassembled datagram fits in frame buffer? ---- */
+    /* ---- Reassembled datagram fits in frame buffer? ----
+     *
+     * This is the REAL operational reassembly ceiling: the
+     * reassembled IP payload must fit in a single 1514-byte
+     * Ethernet frame because the engine rebuilds in-place.
+     * Effective max: total_length <= 1480 (= ETH_FRAME_MAX
+     * - ETH_HDR_LEN - IP_HDR_MIN). This check can fire even
+     * though REASM_BUF_SIZE is 2048, because the slot buffer
+     * is over-provisioned for historical bitmap-geometry
+     * reasons. See the DESIGN NOTE atop include/net.inc.
+     */
     ldrh    w0, [x24, #REASM_TOTAL_LEN]
     add     w0, w0, #(ETH_HDR_LEN + IP_HDR_MIN)
     cmp     w0, #ETH_FRAME_MAX

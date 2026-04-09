@@ -104,7 +104,59 @@
 .equ UDP_HDR_LEN,      8
 .equ UDP_ECHO_PORT,    7
 
-/* IP fragment reassembly — slot layout */
+/* IP fragment reassembly — slot layout
+ *
+ * DESIGN NOTE — REASM_BUF_SIZE is an over-provisioned upper bound,
+ * NOT the effective reassembly ceiling. The real operational ceiling
+ * is 1480 bytes of reassembled IP total_length. See below.
+ *
+ * Where 2048 came from:
+ *   * IPv4's fragment-offset field is in 8-byte units (RFC 791 §3.1),
+ *     so the natural representation is a bitmap with one bit per
+ *     8-byte payload unit.
+ *   * The bitmap is 32 bytes = 256 bits. 32 was chosen so that
+ *     ip_reasm_init can zero the bitmap in exactly two
+ *     `stp xzr, xzr` instructions (see lib/ip_reasm.S).
+ *   * 256 bits × 8 bytes/bit = 2048 bytes of slot-buffer capacity.
+ *     `REASM_BUF_SIZE = 2048` is a *consequence* of the bitmap
+ *     geometry, not an independent size decision.
+ *
+ * Where 1480 comes from:
+ *   * ip_reasm_input rebuilds the reassembled datagram IN PLACE in
+ *     the 1514-byte Ethernet frame buffer it received the last
+ *     fragment in.
+ *   * At completion time the engine enforces:
+ *       REASM_TOTAL_LEN + ETH_HDR_LEN + IP_HDR_MIN <= ETH_FRAME_MAX
+ *       i.e. total_length + 34 <= 1514
+ *       i.e. total_length <= 1480
+ *   * Any fragmented datagram whose reassembled IP payload exceeds
+ *     1480 bytes is silently dropped at that check (RFC-compliant;
+ *     hosts may cap their reassembly buffer). The check lives in
+ *     lib/ip_reasm.S at the `.Lri_complete` label.
+ *
+ * Consequence:
+ *   * ~568 bytes per slot × 4 slots ≈ 2.3 KB of BSS is addressable
+ *     but never usefully reachable. Negligible at this memory
+ *     budget (~32 MB total runtime footprint).
+ *
+ * Why we leave it as-is:
+ *   1. Shrinking the bitmap to match 1480 would require either a
+ *      24-byte bitmap (does not zero cleanly in stp-pair init) or
+ *      a 16-byte bitmap (1024-byte capacity, tighter than the
+ *      in-place ceiling). Neither is a clean win.
+ *   2. Lifting the in-place-rebuild constraint would require
+ *      rewriting icmp_handle / udp_handle / tcp_handle to accept a
+ *      separate reassembly output buffer and a length parameter
+ *      instead of owning a 1514-byte frame. Larger refactor,
+ *      explicitly out of scope for the L3 cycle.
+ *
+ * The inconsistency between REASM_BUF_SIZE (2048) and the
+ * effective ceiling (1480) is recorded here so future readers
+ * don't trip over it the way the L3 hardening plan did when it
+ * proposed 2×1024-byte fragment test cases that would have
+ * silently failed the completion check. See README "Design
+ * Decisions" for additional context.
+ */
 .equ REASM_SRC_IP,       0      /* u32: source IP (NBO) */
 .equ REASM_DST_IP,       4      /* u32: dest IP (NBO) */
 .equ REASM_IP_ID,        8      /* u16: IP identification (NBO) */
@@ -117,7 +169,7 @@
 .equ REASM_BITMAP,       32     /* 32-byte bitmap (256 bits, 1 per 8-byte unit) */
 .equ REASM_BITMAP_SIZE,  32
 .equ REASM_DATA,         64     /* payload buffer */
-.equ REASM_BUF_SIZE,     2048
+.equ REASM_BUF_SIZE,     2048   /* over-provisioned — see DESIGN NOTE above */
 .equ REASM_SLOT_SIZE,    2112   /* 64 + 2048 */
 .equ REASM_MAX_SLOTS,    4
 .equ REASM_TIMEOUT_SECS, 30

@@ -530,6 +530,7 @@ The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi
 | No Nagle algorithm | HTTP servers disable Nagle anyway |
 | No IP options parsing | Deliberately rejected (VER_IHL == 0x45 only) |
 | 4-slot reassembly limit | Intentional resource constraint for bare-metal |
+| Reassembly ceiling = 1480 B, not 2048 | In-place rebuild into the 1514 B frame buffer — see below |
 | Single-entry ARP cache | We only talk to the gateway |
 | NTP 32-bit seconds | Sub-second precision not needed for HTTP timestamps |
 | No PMTUD | Target network is direct Ethernet, MTU 1500; DF bit set |
@@ -537,6 +538,57 @@ The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi
 | Platform-specific boot/drivers | Boot.S, main.S, and drivers live under `platform/pi/` |
 | MMU identity map | Virtual = physical, all existing code works unchanged, caches enabled |
 | Cache-line alignment directives | Deliberately out of scope — see below |
+
+### IP reassembly ceiling: 1480 bytes, not REASM_BUF_SIZE
+
+`include/net.inc` defines `REASM_BUF_SIZE = 2048`. That number is
+misleading on its own — the **effective** reassembly ceiling is
+**1480 bytes** of reassembled IP total_length. Any fragmented
+datagram larger than that is silently dropped by
+`ip_reasm_input` at the completion check (RFC-compliant: hosts
+may cap their reassembly buffer).
+
+Two independent constraints produced the gap:
+
+1. **The bitmap geometry drove `REASM_BUF_SIZE`.** IPv4's
+   fragment-offset field is in 8-byte units, so the receiver
+   tracks filled units with a bitmap. The bitmap is 32 bytes
+   (256 bits), sized so `ip_reasm_init` can zero it in exactly
+   two `stp xzr, xzr` instructions. 256 bits × 8 bytes/bit =
+   2048 bytes of addressable slot-buffer capacity. `2048` fell
+   out of that choice; nobody sat down and said "we want to
+   reassemble up to 2 KB." It was a derived number.
+
+2. **The in-place rebuild enforces the 1480 B ceiling.** The
+   engine reassembles *in place* in the same 1514-byte
+   Ethernet frame buffer the last fragment arrived in, then
+   dispatches the reassembled frame to the protocol handler
+   just like any other incoming frame. `icmp_handle`,
+   `udp_handle`, and `tcp_handle` all assume they own a
+   single 1514-byte frame — none of them know how to receive
+   an oversized reassembled datagram. So `ip_reasm_input`'s
+   completion check enforces
+   `total_length + 34 ≤ ETH_FRAME_MAX`, i.e. `total_length ≤ 1480`.
+
+The consequence is ~568 bytes per slot × 4 slots ≈ 2.3 KB of
+BSS that's *addressable* through the bitmap but *never usable*
+through the completion check. At a ~32 MB runtime memory
+budget, that's negligible, so we leave the over-provisioning
+in place rather than try to shrink the bitmap (which doesn't
+have a clean smaller size — 16 bytes is too tight, 24 bytes
+doesn't zero cleanly in stp pairs) or rewrite the protocol
+handlers to accept a separate reassembly output buffer (a
+bigger refactor, out of scope for the L3 hardening cycle).
+
+The inconsistency is worth knowing about because the L3
+hardening plan I wrote against `REASM_BUF_SIZE = 2048`
+proposed 2×1024-byte fragment test cases that would have
+silently dropped at the completion check — which is what drove
+me to shrink the fragment test matrix to 2×736 / 3×480 / 8×168
+in the final `test_l3_frag.py`. The fix also lives as a
+multi-page DESIGN NOTE at the top of the reassembly constant
+block in `include/net.inc` so future work can't be surprised
+by it the way the L3 cycle was.
 
 ### Cache-line alignment: considered, rejected
 
