@@ -180,3 +180,35 @@ perf_counters:
     .space  PERF_COUNTERS_SIZE
 
 .endif
+
+/* ---------------------------------------------------------------------
+ * perf_counters2 — second cache line, L3 (IP / ICMP / reassembly).
+ * Emitted in .data (not .bss) so the PERF_L3_MAGIC tag can be
+ * pre-initialized at link time without a boot-time write; this lets
+ * the 0x88B6 L3 dump verify the layout on the very first query,
+ * before any counter has been incremented.
+ *
+ * Only emitted under PERF_L3, so default and PERF=recv/send/dispatch
+ * builds pay zero storage.
+ * --------------------------------------------------------------------- */
+.ifdef PERF_L3
+
+.section .data
+.balign 64
+.global perf_counters2
+perf_counters2:
+    .quad   0                           /* PERF_L3_IP_TICKS */
+    .word   0                           /* PERF_L3_IP_COUNT */
+    .word   0                           /* PERF_L3_IP_DROPS */
+    .quad   0                           /* PERF_L3_ICMP_TICKS */
+    .word   0                           /* PERF_L3_ICMP_COUNT */
+    .word   0                           /* PERF_L3_ICMP_ERR_GEN */
+    .quad   0                           /* PERF_L3_FRAG_TICKS */
+    .word   0                           /* PERF_L3_FRAG_REASSEMBLED */
+    .word   0                           /* PERF_L3_FRAG_DROPS */
+    .word   0                           /* PERF_L3_FRAG_ACTIVE */
+    .word   0                           /* PERF_L3_RSVD1 */
+    .word   0                           /* PERF_L3_RSVD2 */
+    .word   PERF_L3_MAGIC_VALUE         /* PERF_L3_MAGIC = 0xDEADBEE1 */
+
+.endif

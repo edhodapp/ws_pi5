@@ -49,6 +49,44 @@
 
 .equ PERF_MAGIC_VALUE,    0xDEADBEEF
 
+/* --- PERF_L3 struct (second cache line) ----------------------------- */
+/*
+ * A separate 64-byte struct `perf_counters2` holds L3-stage
+ * instrumentation (IP, ICMP, fragment reassembly). Kept distinct
+ * from the L2 struct so:
+ *   (a) PERF=l3 builds can be mixed with or without PERF=recv/send
+ *       without aliasing counter fields, and
+ *   (b) the 0x88B6 query protocol can target one line at a time,
+ *       keeping each response to the 64-byte frame the L2 protocol
+ *       already uses.
+ *
+ * Layout mirrors the L2 struct's discipline: every u64 on an 8-byte
+ * boundary, every u32 on a 4-byte boundary, magic tag at offset 60.
+ */
+
+.equ PERF_L3_IP_TICKS,          0   /* u64: ticks in ip_handle */
+.equ PERF_L3_IP_COUNT,          8   /* u32: dispatched to L4 protocol */
+.equ PERF_L3_IP_DROPS,         12   /* u32: ip_handle validation drops */
+
+.equ PERF_L3_ICMP_TICKS,       16   /* u64: ticks in icmp_handle */
+.equ PERF_L3_ICMP_COUNT,       24   /* u32: echo requests handled */
+.equ PERF_L3_ICMP_ERR_GEN,     28   /* u32: icmp errors generated */
+
+.equ PERF_L3_FRAG_TICKS,       32   /* u64: ticks in ip_reasm_input */
+.equ PERF_L3_FRAG_REASSEMBLED, 40   /* u32: full reassemblies */
+.equ PERF_L3_FRAG_DROPS,       44   /* u32: fragment drops */
+
+.equ PERF_L3_FRAG_ACTIVE,      48   /* u32: live slot count (populated
+                                     * on demand by the 0x88B6 dump
+                                     * handler, not by probes) */
+.equ PERF_L3_RSVD1,            52   /* u32: reserved */
+.equ PERF_L3_RSVD2,            56   /* u32: reserved */
+.equ PERF_L3_MAGIC,            60   /* u32: 0xDEADBEE1 sanity tag */
+
+.equ PERF_L3_COUNTERS_SIZE,    64   /* second A72 cache line */
+
+.equ PERF_L3_MAGIC_VALUE,      0xDEADBEE1
+
 /* --- Readout protocol ----------------------------------------------- */
 
 /* Custom ethertype for the perf query frame. Chosen from the IEEE 802
@@ -124,6 +162,54 @@
 .endm
 
 .macro PROBE_COUNT_INC offset, scratch_w, base_x
+.endm
+
+.endif
+
+/* --- L3 probe macros ----------------------------------------------- */
+/*
+ * Same shape as the L2 probes but target `perf_counters2` instead of
+ * `perf_counters`. Gated on PERF_L3 so PERF_L3 can be enabled
+ * independently of PERF_RECV / PERF_SEND / PERF_DISPATCH.
+ *
+ * The PERF_L3 flag implies PERF_COUNTERS at the build layer (the
+ * Makefile sets both together) so perf_handle is compiled, but a
+ * PERF_L3-only build with no PERF_RECV/SEND/DISPATCH will have the
+ * L2 perf_counters line sitting idle — that's fine, the readout
+ * code just reports zeros for the L2 fields.
+ */
+
+.ifdef PERF_L3
+
+.macro PROBE_L3_ENTRY tmp_x
+    mrs     \tmp_x, cntvct_el0
+.endm
+
+.macro PROBE_L3_EXIT start_x, offset, scratch_x, base_x
+    mrs     \scratch_x, cntvct_el0
+    sub     \scratch_x, \scratch_x, \start_x
+    ldr     \base_x, =perf_counters2
+    ldr     \start_x, [\base_x, \offset]
+    add     \start_x, \start_x, \scratch_x
+    str     \start_x, [\base_x, \offset]
+.endm
+
+.macro PROBE_L3_COUNT_INC offset, scratch_w, base_x
+    ldr     \base_x, =perf_counters2
+    ldr     \scratch_w, [\base_x, \offset]
+    add     \scratch_w, \scratch_w, #1
+    str     \scratch_w, [\base_x, \offset]
+.endm
+
+.else
+
+.macro PROBE_L3_ENTRY tmp_x
+.endm
+
+.macro PROBE_L3_EXIT start_x, offset, scratch_x, base_x
+.endm
+
+.macro PROBE_L3_COUNT_INC offset, scratch_w, base_x
 .endm
 
 .endif

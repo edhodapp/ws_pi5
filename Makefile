@@ -26,6 +26,8 @@ endif
 #   make PLATFORM=pi4 PERF=recv      — probe only genet_recv
 #   make PLATFORM=pi4 PERF=send      — probe only genet_send
 #   make PLATFORM=pi4 PERF=dispatch  — probe only net_recv_one dispatch
+#   make PLATFORM=pi4 PERF=l3        — probe lib/ip.S, lib/icmp.S,
+#                                      lib/ip_reasm.S (L3 stage)
 #   make PLATFORM=pi4 PERF=all       — probe all stages (highest overhead)
 #
 # Default (no PERF flag) builds the production kernel with zero
@@ -37,8 +39,9 @@ endif
 # Each stage defines PERF_COUNTERS (umbrella — enables the
 # perf_counters struct in lib/perf.S and the macro bodies in
 # include/perf.inc) plus a stage-specific flag (PERF_RECV /
-# PERF_SEND / PERF_DISPATCH) that gates the actual probe call
-# sites in the hot path.
+# PERF_SEND / PERF_DISPATCH / PERF_L3) that gates the actual probe
+# call sites in the hot path. PERF_L3 also enables a second
+# 64-byte struct `perf_counters2` in lib/perf.S (L3 cache line).
 # ---------------------------------------------------------------------------
 PERF_ASFLAGS =
 ifeq ($(PERF),recv)
@@ -47,11 +50,14 @@ else ifeq ($(PERF),send)
   PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_SEND=1
 else ifeq ($(PERF),dispatch)
   PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_DISPATCH=1
+else ifeq ($(PERF),l3)
+  PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_L3=1
 else ifeq ($(PERF),all)
   PERF_ASFLAGS = --defsym PERF_COUNTERS=1 --defsym PERF_RECV=1 \
-                 --defsym PERF_SEND=1 --defsym PERF_DISPATCH=1
+                 --defsym PERF_SEND=1 --defsym PERF_DISPATCH=1 \
+                 --defsym PERF_L3=1
 else ifneq ($(PERF),)
-  $(error Unknown PERF=$(PERF); use recv, send, dispatch, or all)
+  $(error Unknown PERF=$(PERF); use recv, send, dispatch, l3, or all)
 endif
 
 ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
@@ -227,13 +233,13 @@ $(BUILD)/eth.o: lib/eth.S include/net.inc | $(BUILD)
 $(BUILD)/arp.o: lib/arp.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/ip.o: lib/ip.S include/net.inc | $(BUILD)
+$(BUILD)/ip.o: lib/ip.S include/net.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/ip_reasm.o: lib/ip_reasm.S include/net.inc include/timer.inc | $(BUILD)
+$(BUILD)/ip_reasm.o: lib/ip_reasm.S include/net.inc include/timer.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/icmp.o: lib/icmp.S include/net.inc | $(BUILD)
+$(BUILD)/icmp.o: lib/icmp.S include/net.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/udp.o: lib/udp.S include/net.inc include/ntp.inc | $(BUILD)

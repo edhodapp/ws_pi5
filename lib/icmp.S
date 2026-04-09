@@ -9,6 +9,7 @@
 
 .include "net.inc"
 .include "timer.inc"
+.include "perf.inc"
 
 .global icmp_handle
 .global icmp_init
@@ -147,6 +148,9 @@ icmp_send_error:
     ldr     x5, [x23, #ICMPC_SEND_FN]
     cbz     x5, .Lise_ret
 
+    /* All three guards passed — this send will happen. Count it. */
+    PROBE_L3_COUNT_INC PERF_L3_ICMP_ERR_GEN, w0, x1
+
     /* === Build 70-byte ICMP error frame in tx_buf (x24) === */
 
     /* ETH header: dst = original sender's MAC, src = ours */
@@ -253,9 +257,17 @@ icmp_send_error:
  * Clobbers: x0-x5, x19-x21, x30
  */
 icmp_handle:
+.ifdef PERF_L3
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    /* [48..64] = pad/unused, keeps SP 16-aligned */
+    PROBE_L3_ENTRY x22              /* x22 = entry CNTVCT tick */
+.else
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
     str     x21, [sp, #32]
+.endif
 
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = frame_len */
@@ -277,6 +289,12 @@ icmp_handle:
     b.eq    .Licmp_dest_unreach
     cmp     w0, #ICMP_ECHO_REQUEST
     b.ne    .Licmp_ignore
+
+    /* Count a successful echo request at the point we commit to
+     * building a reply. Placed here (not at the start of the
+     * function) so checksum-fail / unknown-type / dest-unreach paths
+     * don't inflate the count. */
+    PROBE_L3_COUNT_INC PERF_L3_ICMP_COUNT, w2, x3
 
     /* === Build echo reply in-place === */
 
@@ -331,9 +349,16 @@ icmp_handle:
     mov     w0, #0
 
 .Licmp_done:
+    PROBE_L3_EXIT x22, PERF_L3_ICMP_TICKS, x2, x3
+.ifdef PERF_L3
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+.else
     ldr     x21, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
+.endif
     ret
 
 /* ===================================================================

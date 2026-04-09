@@ -3,9 +3,16 @@
  *
  * ip_checksum: ones' complement checksum (RFC 1071)
  * ip_handle:   IPv4 validation + protocol dispatch (added later)
+ *
+ * Under PERF_L3, ip_handle is instrumented with PROBE_L3_* macros
+ * that accumulate ticks (PERF_L3_IP_TICKS) and bump u32 counters
+ * for successful dispatches (PERF_L3_IP_COUNT) and validation drops
+ * (PERF_L3_IP_DROPS). The probes are zero-overhead in default
+ * builds (the macros expand to nothing).
  */
 
 .include "net.inc"
+.include "perf.inc"
 
 .global ip_checksum
 .global ip_handle
@@ -64,9 +71,17 @@ ip_checksum:
  *   ICMP(1) → icmp_handle, else → drop
  */
 ip_handle:
+.ifdef PERF_L3
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    /* [48..64] = pad/unused, keeps SP 16-aligned */
+    PROBE_L3_ENTRY x22              /* x22 = entry CNTVCT tick */
+.else
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]
     str     x21, [sp, #32]
+.endif
 
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = frame_len */
@@ -158,6 +173,7 @@ ip_handle:
     b.ne    .Lip_proto_unreach
 
     /* TCP → tcp_handle(frame, ETH_HDR_LEN + ip_total_length) */
+    PROBE_L3_COUNT_INC PERF_L3_IP_COUNT, w0, x1
     mov     x0, x19
     add     w1, w21, #ETH_HDR_LEN
     bl      tcp_handle
@@ -165,6 +181,7 @@ ip_handle:
 
 .Lip_udp:
     /* UDP → udp_handle(frame, ETH_HDR_LEN + ip_total_length) */
+    PROBE_L3_COUNT_INC PERF_L3_IP_COUNT, w0, x1
     mov     x0, x19
     add     w1, w21, #ETH_HDR_LEN
     bl      udp_handle
@@ -172,13 +189,24 @@ ip_handle:
 
 .Lip_icmp:
     /* ICMP → icmp_handle(frame, ETH_HDR_LEN + ip_total_length) */
+    PROBE_L3_COUNT_INC PERF_L3_IP_COUNT, w0, x1
     mov     x0, x19
     add     w1, w21, #ETH_HDR_LEN
     bl      icmp_handle
     b       .Lip_done
 
 .Lip_proto_unreach:
-    /* ICMP Protocol Unreachable (type 3, code 2) */
+    /* ICMP Protocol Unreachable (type 3, code 2).
+     *
+     * Falls through to .Lip_drop so default builds keep the same
+     * control flow they had pre-PERF_L3 (zero-overhead property).
+     * Under PERF_L3 this means proto-unreach packets are counted
+     * in both PERF_L3_IP_DROPS (via .Lip_drop) AND
+     * PERF_L3_ICMP_ERR_GEN (inside icmp_send_error). That's
+     * semantically consistent: ip_handle did NOT successfully
+     * dispatch to a known L4 protocol, so from ip_handle's
+     * perspective it IS a drop; the generated error is a separate,
+     * orthogonal event counted in its own field. */
     mov     x0, x19
     mov     w1, w20
     mov     w2, #ICMP_DEST_UNREACHABLE
@@ -186,10 +214,18 @@ ip_handle:
     bl      icmp_send_error
 
 .Lip_drop:
+    PROBE_L3_COUNT_INC PERF_L3_IP_DROPS, w0, x3
     mov     w0, #0
 
 .Lip_done:
+    PROBE_L3_EXIT x22, PERF_L3_IP_TICKS, x2, x3
+.ifdef PERF_L3
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+.else
     ldr     x21, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
+.endif
     ret

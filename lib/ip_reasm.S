@@ -13,6 +13,7 @@
 
 .include "net.inc"
 .include "timer.inc"
+.include "perf.inc"
 
 .global ip_reasm_init
 .global ip_reasm_input
@@ -69,10 +70,20 @@ ip_reasm_timeout_cb:
  * the buffer is at least ETH_FRAME_MAX bytes.
  */
 ip_reasm_input:
+.ifdef PERF_L3
+    stp     x29, x30, [sp, #-80]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+    str     x25, [sp, #64]
+    /* [72..80] = pad, keeps SP 16-aligned */
+    PROBE_L3_ENTRY x25              /* x25 = entry CNTVCT tick */
+.else
     stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
+.endif
 
     mov     x19, x0                 /* x19 = frame */
     mov     w20, w1                 /* w20 = frame_len */
@@ -385,6 +396,9 @@ ip_reasm_input:
     /* Free slot */
     strb    wzr, [x24, #REASM_FLAGS]
 
+    /* Count a successful reassembly */
+    PROBE_L3_COUNT_INC PERF_L3_FRAG_REASSEMBLED, w0, x1
+
     /* Return pointer to reassembled frame */
     mov     x0, x19
     b       .Lri_done
@@ -393,14 +407,37 @@ ip_reasm_input:
     strb    wzr, [x24, #REASM_FLAGS]
 
 .Lri_drop:
+    /* Actual drops (validation error, overlap, no free slot,
+     * oversized completion). Distinct from .Lri_incomplete below,
+     * which is just "more fragments expected" and is not an error.
+     *
+     * Under default build .Lri_drop and .Lri_incomplete share a
+     * single `mov x0, #0` (zero-overhead); under PERF_L3 they are
+     * split so the drop counter fires only for real drops, not
+     * for "still waiting for more fragments". */
+    PROBE_L3_COUNT_INC PERF_L3_FRAG_DROPS, w0, x1
+.ifdef PERF_L3
+    mov     x0, #0
+    b       .Lri_done
+.endif
+
 .Lri_incomplete:
     mov     x0, #0
 
 .Lri_done:
+    PROBE_L3_EXIT x25, PERF_L3_FRAG_TICKS, x2, x3
+.ifdef PERF_L3
+    ldr     x25, [sp, #64]
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #80
+.else
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #64
+.endif
     ret
 
 .section .bss
