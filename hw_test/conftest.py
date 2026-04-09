@@ -444,11 +444,14 @@ def pytest_runtest_makereport(item, call):
 def link_guard(request, eth_iface):
     """Pre-test sanity: link must be admin-up at the expected speed.
 
-    Only autouse for tests that carry the `l2` marker. If a previous
-    test crashed mid-teardown, this skips with a clear message rather
-    than failing for the wrong reason.
+    Only autouse for tests that carry the `l2` or `l3` marker. If a
+    previous test crashed mid-teardown, this skips with a clear message
+    rather than failing for the wrong reason.
     """
-    if request.node.get_closest_marker("l2") is None:
+    if (
+        request.node.get_closest_marker("l2") is None
+        and request.node.get_closest_marker("l3") is None
+    ):
         yield
         return
     state = link.link_state(eth_iface)
