@@ -25,6 +25,57 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — `9dc7a81` + tried `dsb sy` → `dsb ish` — **REVERTED**, no measurable signal
+
+First Phase 1 grind attempt on `genet_recv`. Weakened the post-
+`dc civac` barrier from `dsb sy` (full system, ~30-50 cycles on A72)
+to `dsb ish` (inner-shareable, ~10-20 cycles). `dc civac` is
+classified as a store for DSB ordering, so the correct weakening is
+the full `ish` form — `dsb ishld` (load-side) would not order the
+cache maintenance and is incorrect.
+
+Expected savings per the corrected cycle estimate: ~13-20 ns/frame.
+
+| metric | baseline (`dsb sy`) | change (`dsb ish`) | delta |
+|--------|---------------------|---------------------|-------|
+| recv_ns mean  | 2359.60 | 2385.90 | +26.30 |
+| recv_ns stdev |   63.32 |   14.39 | tighter |
+| min           |    2224 |    2367 | |
+| max           |    2406 |    2408 | |
+| 95% CI (±stderr) | ±40 | ±9 | |
+| CI interval   | [2319, 2400] | [2377, 2395] | **overlap** |
+
+**Verdict:** no measurable signal. The 95% confidence intervals
+on the two measurements overlap cleanly, so we cannot say the
+means are statistically distinguishable. The baseline's two
+outliers at 2224 and 2262 pulled its mean down artificially —
+without them the baseline would be ~2385 ns, matching the change.
+
+Expected savings of 13-20 ns is below the ~40 ns noise floor of
+a 10-trial run, so any real improvement is hidden in the noise.
+
+**Decision:** reverted, per the "if not much help, I want it out
+of there" principle. The change was architecturally correct
+(`dsb ish` is the right scope for CPU-local cache maintenance
+without system-wide ordering) but not worth keeping a kernel
+diff that doesn't move the needle on the measurement we care
+about.
+
+**Lesson for future grind commits:** any single tweak with an
+expected signal of < 40 ns will be invisible at 10 trials. Either
+the tweak needs bigger expected impact, or the measurement needs
+more trials to tighten the CI. Next tweaks to try are ones with
+expected signal >> 40 ns:
+
+1. **Prefetch** the next RX pool slot early in `genet_recv` —
+   could save 100-200 ns by hiding memory latency.
+2. **Cached PROD_INDEX** (with correct stale-detection) —
+   eliminates one MMIO read per frame, ~150-300 ns.
+3. **Reordering MMIO reads for `ldp`** of adjacent registers —
+   marginal, skip for now.
+
+---
+
 ## 2026-04-08 — `dbe6792` + uncommitted Python perf_query — FIRST PER-STAGE BREAKDOWN
 
 Wires the Python side: `wire.perf_query()` (sends a 0x88B6 request,
