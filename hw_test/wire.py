@@ -418,6 +418,14 @@ PERF_ETHERTYPE = 0x88B6
 PERF_CMD_DUMP = 0
 PERF_CMD_DUMP_RESET = 1
 PERF_CMD_DUMP_REGS = 2
+PERF_CMD_DUMP_L3 = 3
+PERF_CMD_DUMP_L3_RESET = 4
+
+# Expected PERF_L3 magic tag (lib/perf.S::perf_counters2 pre-
+# initializes this at link time). Reading a different value from a
+# DUMP_L3 reply means either the Pi isn't a PERF=l3 build or the
+# struct layout has drifted out of sync with include/perf.inc.
+PERF_L3_MAGIC_VALUE = 0xDEADBEE1
 
 # Minimum Ethernet frame (including FCS added by hardware) is 64
 # bytes, payload minimum 46 bytes. We send a 60-byte frame (14 B
@@ -434,6 +442,7 @@ def perf_query(
     pi_mac: bytes,
     laptop_mac: bytes,
     *,
+    block: str = "l2",
     reset: bool = False,
     dump_regs: bool = False,
     timeout_ms: int = 100,
@@ -441,53 +450,65 @@ def perf_query(
     """Query the Pi's perf state via ethertype 0x88B6.
 
     Sends a single request frame to the Pi and waits for the reply.
-    Requires the Pi to be running a PERF build (the readout handler
-    lives in lib/perf.S and is only active when PERF_COUNTERS is
-    defined; default builds silently drop the request).
+    Requires the Pi to be running the corresponding PERF build —
+    the readout handler in lib/perf.S is only active under
+    PERF_COUNTERS; block="l3" additionally needs PERF_L3.
 
     Arguments:
       iface:      interface name (e.g. "enx00e04c0a2bed")
       pi_mac:     6-byte Pi MAC (request destination)
       laptop_mac: 6-byte laptop MAC (request source / reply dst)
-      reset:      if True, Pi zeros counters AFTER snapshot. The
-                  returned dict still shows the pre-reset values.
-                  Mutually exclusive with dump_regs.
-      dump_regs:  if True, issue PERF_CMD_DUMP_REGS instead of
-                  PERF_CMD_DUMP. The reply contains a GENET
-                  register+state snapshot (see _parse_genet_regs)
-                  rather than the perf_counters struct. Pi 4 only —
-                  other platforms silently drop the request.
-                  Mutually exclusive with reset.
+      block:      which counter line to read.
+                    "l2"   → perf_counters (default)
+                    "l3"   → perf_counters2
+                    "regs" → GENET register + driver state snapshot
+                  `dump_regs=True` is a legacy alias for `block="regs"`.
+      reset:      if True, Pi zeros the selected line AFTER snapshot.
+                  The returned dict still shows the pre-reset values.
+                  Not valid for block="regs".
+      dump_regs:  deprecated — use `block="regs"` instead. If True,
+                  overrides `block`.
       timeout_ms: max wait for the reply
 
     Returns:
-      - When dump_regs=False: a dict of perf_counters fields (see
-        _parse_perf_counters).
-      - When dump_regs=True:  a dict of GENET register/state fields
-        (see _parse_genet_regs).
+      - block="l2":   dict from _parse_perf_counters
+      - block="l3":   dict from _parse_perf_counters2 (validates
+                      the PERF_L3 magic tag; raises WireError if
+                      the tag is wrong)
+      - block="regs": dict from _parse_genet_regs
 
     Raises:
-      WireError on timeout (Pi unreachable or not a PERF build),
-      short reply, socket errors, or contradictory arguments.
+      WireError on timeout (Pi unreachable or wrong PERF build),
+      short reply, socket errors, contradictory arguments, or a
+      magic-tag mismatch on the l3 path.
     """
     if len(pi_mac) != 6 or len(laptop_mac) != 6:
         raise WireError(
             f"perf_query: MAC addresses must be 6 bytes each "
             f"(got pi={len(pi_mac)}, laptop={len(laptop_mac)})"
         )
-    if reset and dump_regs:
+
+    # Legacy `dump_regs=True` overrides the block kwarg.
+    if dump_regs:
+        block = "regs"
+
+    if block not in ("l2", "l3", "regs"):
         raise WireError(
-            "perf_query: reset=True and dump_regs=True are mutually "
-            "exclusive (DUMP_RESET operates on perf_counters; "
-            "DUMP_REGS dumps a different struct)"
+            f"perf_query: unknown block={block!r}, "
+            f"expected one of: l2, l3, regs"
+        )
+    if reset and block == "regs":
+        raise WireError(
+            "perf_query: reset=True is not valid with block='regs' "
+            "(the register snapshot is stateless on the Pi side)"
         )
 
-    if dump_regs:
+    if block == "regs":
         cmd = PERF_CMD_DUMP_REGS
-    elif reset:
-        cmd = PERF_CMD_DUMP_RESET
-    else:
-        cmd = PERF_CMD_DUMP
+    elif block == "l3":
+        cmd = PERF_CMD_DUMP_L3_RESET if reset else PERF_CMD_DUMP_L3
+    else:  # block == "l2"
+        cmd = PERF_CMD_DUMP_RESET if reset else PERF_CMD_DUMP
 
     # 14 B eth header (dst=pi, src=laptop, etype=0x88B6) +
     # 1 B cmd + 45 B zero pad = 60 B.
@@ -511,7 +532,8 @@ def perf_query(
     if reply is None:
         raise WireError(
             f"perf_query timeout — no 0x{PERF_ETHERTYPE:04x} reply within "
-            f"{timeout_ms} ms. Is the Pi running a PERF build?"
+            f"{timeout_ms} ms. Is the Pi running a PERF"
+            f"{'=l3' if block == 'l3' else ''} build?"
         )
 
     # Reply frame = 14 B eth + 64 B payload = 78 B min.
@@ -522,8 +544,10 @@ def perf_query(
             f"(expected at least {expected_min})"
         )
     payload = reply[14:14 + 64]
-    if dump_regs:
+    if block == "regs":
         return _parse_genet_regs(payload)
+    if block == "l3":
+        return _parse_perf_counters2(payload)
     return _parse_perf_counters(payload)
 
 
@@ -583,6 +607,64 @@ def _parse_perf_counters(payload: bytes) -> dict:
 def perf_ticks_to_ns(ticks: int) -> float:
     """Convert Pi 4 CNTVCT_EL0 ticks to nanoseconds."""
     return ticks * 1e9 / PI4_CNTVCT_FREQ_HZ
+
+
+# perf_counters2 layout — second cache line used by PERF_L3 builds.
+# MUST stay in sync with include/perf.inc's PERF_L3_* offsets.
+#
+#   off  size  name              type
+#   0    8     ip_ticks          u64
+#   8    4     ip_count          u32
+#   12   4     ip_drops          u32
+#   16   8     icmp_ticks        u64
+#   24   4     icmp_count        u32
+#   28   4     icmp_err_gen      u32
+#   32   8     frag_ticks        u64
+#   40   4     frag_reassembled  u32
+#   44   4     frag_drops        u32
+#   48   4     frag_active       u32  (live, populated by dump handler)
+#   52   4     rsvd1             u32
+#   56   4     rsvd2             u32
+#   60   4     magic             u32  (0xDEADBEE1)
+_PERF_L3_STRUCT = struct.Struct("<QIIQIIQIIIIII")
+assert _PERF_L3_STRUCT.size == 64
+
+
+def _parse_perf_counters2(payload: bytes) -> dict:
+    """Parse the 64-byte perf_counters2 struct into a named dict.
+
+    Raises WireError if the magic tag doesn't match — either the Pi
+    isn't a PERF=l3 build, or the struct layout has drifted out of
+    sync with include/perf.inc.
+    """
+    if len(payload) != 64:
+        raise WireError(
+            f"_parse_perf_counters2: expected 64 bytes, got {len(payload)}"
+        )
+    f = _PERF_L3_STRUCT.unpack(payload)
+    result = {
+        "ip_ticks":         f[0],
+        "ip_count":         f[1],
+        "ip_drops":         f[2],
+        "icmp_ticks":       f[3],
+        "icmp_count":       f[4],
+        "icmp_err_gen":     f[5],
+        "frag_ticks":       f[6],
+        "frag_reassembled": f[7],
+        "frag_drops":       f[8],
+        "frag_active":      f[9],
+        "rsvd1":            f[10],
+        "rsvd2":            f[11],
+        "magic":            f[12],
+    }
+    if result["magic"] != PERF_L3_MAGIC_VALUE:
+        raise WireError(
+            f"perf_counters2 magic mismatch: got {result['magic']:#010x}, "
+            f"expected {PERF_L3_MAGIC_VALUE:#010x}. The Pi may not be a "
+            f"PERF=l3 build, or include/perf.inc has drifted from "
+            f"hw_test/wire.py."
+        )
+    return result
 
 
 # GENET register + driver state snapshot layout.

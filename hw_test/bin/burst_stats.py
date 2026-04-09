@@ -1,22 +1,45 @@
 #!/usr/bin/env python3
-"""Run test_l2_ring burst test N times and report stats.
+"""Burst statistics for the Pi 4 hw_test harness.
 
-Computes mean, stddev, excess kurtosis, skewness, and Sarle's
-bimodality coefficient on the reply counts. Flags likely bimodality.
+Two modes:
 
-Usage:
-    hw_test/bin/burst_stats.py <burst_size> <runs>
+  L2 ARP burst (default):
+      burst_stats.py <burst_size> <runs>
 
-Example:
-    hw_test/bin/burst_stats.py 1024 10
+    Runs test_l2_ring.py's burst test N times, parses BURST_STATS /
+    PERF_STATS output, and reports mean/stddev/kurtosis/Sarle's b for
+    reply counts and send times. Used during the GENET bringup to
+    quantify ARP burst loss at large N.
+
+  L3 ICMP burst:
+      burst_stats.py --icmp-burst N [--size B] [--runs R] [--iface IF]
+
+    Sends N ICMP echo requests at payload size B (default 64) directly
+    to the Pi, counts replies, and reports:
+      * delivered count, send time
+      * per-frame cost derived from the Pi's PERF_L3_ICMP_TICKS /
+        PERF_L3_ICMP_COUNT counters (requires a PERF=l3 Pi build)
+      * a snapshot of the PERF_L3 counter deltas across the burst
+
+    The L3 mode bypasses pytest and talks to the Pi directly via
+    wire.send_frame + wire.WireCapture. The tool takes a DUMP_L3_RESET
+    before the burst so the delta is exactly this burst's work.
 """
+import argparse
 import math
 import os
 import re
 import statistics
 import subprocess
 import sys
+import time
 
+
+# Allow imports of hw_test modules when run from repo root.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+# --- L2 burst parsing ---
 
 BURST_RE = re.compile(
     r"BURST_STATS: n=(\d+) replies=(\d+) send_ms=([\d.]+) "
@@ -37,12 +60,10 @@ PERF_RE = re.compile(
 
 
 def run_once(n: int) -> dict:
-    """Run one pytest invocation, return a dict with all parsed stats.
-
-    Always populates: replies, send_ms.
-    Populated only when the Pi has perf instrumentation:
-    recv_count, recv_none, dispatch_count, send_count, send_fail,
-    max_burst, rx_discards, recv_ns, dispatch_ns, send_ns.
+    """Run one pytest invocation of the L2 burst test, return a
+    dict with all parsed stats. Always populates: replies, send_ms.
+    Populated only when the Pi has perf instrumentation: recv_count,
+    ..., recv_ns, dispatch_ns, send_ns.
     """
     env = os.environ.copy()
     env["HW_TEST"] = "1"
@@ -91,6 +112,8 @@ def run_once(n: int) -> dict:
 
     return out
 
+
+# --- Statistics helpers ---
 
 def central_moment(xs: list[float], k: int) -> float:
     """k-th central moment = E[(X - mean)^k]."""
@@ -148,16 +171,12 @@ def _summarize(name: str, xs: list[float], unit: str = "") -> None:
     )
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        print(__doc__, file=sys.stderr)
-        return 2
+# --- L2 mode ---
 
-    burst_size = int(sys.argv[1])
-    runs = int(sys.argv[2])
-
+def run_l2_mode(burst_size: int, runs: int) -> int:
     if runs < 4:
-        print("Need at least 4 runs for kurtosis to be meaningful.", file=sys.stderr)
+        print("Need at least 4 runs for kurtosis to be meaningful.",
+              file=sys.stderr)
         return 2
 
     print(f"Running test_l2_ring[{burst_size}] {runs} times...", flush=True)
@@ -253,6 +272,222 @@ def main() -> int:
         )
 
     return 0
+
+
+# --- L3 ICMP burst mode ---
+
+def run_l3_icmp_burst(n_echoes: int, payload_size: int, runs: int,
+                       iface_override: str | None) -> int:
+    """Send n_echoes ICMP echo requests to the Pi, count replies,
+    and report the L3 perf counter deltas.
+
+    Repeats `runs` times so jitter and per-call overhead are
+    averaged out. Each run resets the L3 counters via DUMP_L3_RESET
+    before the burst so the delta captures exactly that burst's work.
+    """
+    # Deferred imports — modules only needed in L3 mode.
+    import eth_frames
+    import ip_frames
+    import wire
+    from conftest import PI4_IP, LAPTOP_IP, HW_TEST_IFACE
+    from icmp_helpers import (
+        icmp_bpf_from_pi,
+        is_any_echo_reply_from_pi,
+        parse_reply,
+    )
+
+    iface = iface_override or HW_TEST_IFACE
+    laptop_mac_b = eth_frames.mac_str_to_bytes(
+        open(f"/sys/class/net/{iface}/address").read().strip()
+    )
+
+    # Resolve the Pi's MAC via one ARP probe. Gives a clear error
+    # message if the Pi is down.
+    arp_req = eth_frames.build_arp_request(laptop_mac_b, LAPTOP_IP, PI4_IP)
+    with wire.RawL2Socket(iface) as sock:
+        sock.drain()
+        sock.send(arp_req)
+        arp_reply = sock.recv(
+            timeout_ms=1000,
+            predicate=lambda d: (
+                len(d) >= 42 and d[12:14] == b"\x08\x06"
+            ),
+        )
+    if arp_reply is None:
+        print(f"ERROR: Pi at {PI4_IP} did not reply to ARP on {iface}",
+              file=sys.stderr)
+        return 2
+    pi_mac_b = eth_frames.parse_arp(arp_reply)["sha"]
+
+    # Verify the Pi is a PERF=l3 build up front.
+    try:
+        snap = wire.perf_query(iface, pi_mac_b, laptop_mac_b, block="l3")
+    except wire.WireError as e:
+        print(f"ERROR: perf_query(block='l3') failed — is the Pi a "
+              f"PERF=l3 build?\n  {e}", file=sys.stderr)
+        return 2
+    print(f"pi_mac={eth_frames.mac_bytes_to_str(pi_mac_b)}  "
+          f"magic={snap['magic']:#010x}")
+    print(f"burst={n_echoes} echo(s) @ {payload_size}B payload, runs={runs}")
+    print()
+
+    bpf = icmp_bpf_from_pi(pi_mac_b, laptop_mac_b)
+    payload = bytes((i & 0xFF) for i in range(payload_size))
+    ident_base = 0xC000
+
+    trial_stats: list[dict] = []
+    for run in range(runs):
+        # Reset counters so the delta = exactly this run's work.
+        wire.perf_query(iface, pi_mac_b, laptop_mac_b, block="l3", reset=True)
+
+        # Build the frames.
+        frames = [
+            ip_frames.build_icmp_echo_frame(
+                laptop_mac_b, pi_mac_b, LAPTOP_IP, PI4_IP,
+                ident=ident_base + i, seq=run, payload=payload,
+            )
+            for i in range(n_echoes)
+        ]
+
+        # Send + capture replies.
+        expected_idents = set(range(ident_base, ident_base + n_echoes))
+        def is_ours(data: bytes, _expected=expected_idents,
+                    _pi=pi_mac_b, _lap=laptop_mac_b) -> bool:
+            if not is_any_echo_reply_from_pi(
+                data,
+                pi_mac=_pi, laptop_mac=_lap,
+                pi_ip=PI4_IP, laptop_ip=LAPTOP_IP,
+            ):
+                return False
+            return parse_reply(data)["icmp"]["ident"] in _expected
+
+        # Deadline: allow ~1ms per frame plus 500ms baseline.
+        deadline_ms = 500 + int(1.0 * n_echoes)
+        t0 = time.monotonic()
+        with wire.WireCapture(iface, bpf=bpf) as cap:
+            for f in frames:
+                wire.send_frame(iface, f)
+            send_ms = (time.monotonic() - t0) * 1000.0
+            replies = wire.wait_for_frames(
+                cap, is_ours,
+                count=n_echoes,
+                deadline_ms=deadline_ms,
+            )
+        total_ms = (time.monotonic() - t0) * 1000.0
+
+        # Query L3 counters (no reset — we'll reset on the next run).
+        post = wire.perf_query(iface, pi_mac_b, laptop_mac_b, block="l3")
+
+        delivered = len(replies)
+        icmp_ticks = post["icmp_ticks"]
+        icmp_count = post["icmp_count"]
+        ip_ticks   = post["ip_ticks"]
+        ip_count   = post["ip_count"]
+
+        per_frame_icmp_ns = (
+            wire.perf_ticks_to_ns(icmp_ticks) / icmp_count
+            if icmp_count else 0.0
+        )
+        per_frame_ip_ns = (
+            wire.perf_ticks_to_ns(ip_ticks) / ip_count
+            if ip_count else 0.0
+        )
+
+        trial = {
+            "delivered":          delivered,
+            "send_ms":            send_ms,
+            "total_ms":           total_ms,
+            "ip_count":           ip_count,
+            "ip_ticks":           ip_ticks,
+            "icmp_count":         icmp_count,
+            "icmp_ticks":         icmp_ticks,
+            "per_frame_icmp_ns":  per_frame_icmp_ns,
+            "per_frame_ip_ns":    per_frame_ip_ns,
+            "frag_reassembled":   post["frag_reassembled"],
+            "frag_drops":         post["frag_drops"],
+        }
+        trial_stats.append(trial)
+        print(
+            f"  run {run+1:>2}/{runs}: {delivered:>4}/{n_echoes} delivered, "
+            f"send_ms={send_ms:6.1f}  total_ms={total_ms:6.1f}  "
+            f"ip_ns={per_frame_ip_ns:7.0f}  icmp_ns={per_frame_icmp_ns:7.0f}",
+            flush=True,
+        )
+
+    print()
+    print("=== L3 ICMP burst summary ===")
+    delivered_s  = [t["delivered"] for t in trial_stats]
+    send_ms_s    = [t["send_ms"] for t in trial_stats]
+    ip_ns_s      = [t["per_frame_ip_ns"] for t in trial_stats if t["ip_count"]]
+    icmp_ns_s    = [t["per_frame_icmp_ns"] for t in trial_stats if t["icmp_count"]]
+
+    _summarize("delivered",       [float(x) for x in delivered_s],
+               f"/{n_echoes}")
+    _summarize("send_ms",         send_ms_s, "ms")
+    _summarize("per_frame_ip_ns", ip_ns_s, "ns")
+    _summarize("per_frame_icmp_ns", icmp_ns_s, "ns")
+
+    total_delivered = sum(delivered_s)
+    total_expected  = n_echoes * runs
+    loss_pct = 100.0 * (1.0 - total_delivered / total_expected)
+    print()
+    print(f"  total delivered : {total_delivered}/{total_expected} "
+          f"({loss_pct:.2f}% loss)")
+    return 0
+
+
+# --- Main ---
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--icmp-burst", type=int, metavar="N",
+        help="Send N ICMP echo requests and dump L3 perf counters "
+             "(requires PERF=l3 Pi build). Overrides the default "
+             "L2 ARP burst mode.",
+    )
+    parser.add_argument(
+        "--size", type=int, default=64, metavar="B",
+        help="L3 mode only: ICMP payload size in bytes (default 64)",
+    )
+    parser.add_argument(
+        "--runs", type=int, default=4, metavar="R",
+        help="Number of trials (default 4 in L3 mode; required >=4 "
+             "for L2 mode — see positional usage)",
+    )
+    parser.add_argument(
+        "--iface", type=str, default=None, metavar="IFACE",
+        help="Interface to use (default: HW_TEST_IFACE env or "
+             "conftest.HW_TEST_IFACE)",
+    )
+    parser.add_argument(
+        "positional", nargs="*",
+        help="L2 mode (default): <burst_size> <runs>",
+    )
+    args = parser.parse_args()
+
+    if args.icmp_burst is not None:
+        return run_l3_icmp_burst(
+            n_echoes=args.icmp_burst,
+            payload_size=args.size,
+            runs=args.runs,
+            iface_override=args.iface,
+        )
+
+    # L2 mode (positional args)
+    if len(args.positional) != 2:
+        parser.print_help(sys.stderr)
+        return 2
+    try:
+        burst_size = int(args.positional[0])
+        runs = int(args.positional[1])
+    except ValueError:
+        parser.print_help(sys.stderr)
+        return 2
+    return run_l2_mode(burst_size, runs)
 
 
 if __name__ == "__main__":
