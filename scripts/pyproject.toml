@@ -1,0 +1,17 @@
+# Mutmut config — run `mutmut run` from this directory so that
+# the mutation's mangled module name ("intel_hex.x_...") matches
+# the test file's import path (`from intel_hex import ...`). See
+# the root pyproject.toml for the full explanation.
+#
+# pytest_add_cli_args_test_selection narrows collection during
+# the stats + mutation phases to just test_intel_hex.py. Without
+# it mutmut copies every top-level test*.py (default also_copy
+# glob) and pytest trips on stale/unrelated files in scripts/.
+[tool.mutmut]
+paths_to_mutate = ["intel_hex.py"]
+# tests_dir omitted: mutmut 3.x concatenates it onto
+# pytest_add_cli_args_test_selection, so including "." here would
+# re-widen pytest's discovery to every test*.py in the sandbox.
+also_copy = ["test_intel_hex.py"]
+pytest_add_cli_args_test_selection = ["test_intel_hex.py"]
+runner = "/home/ed/ws_pi5/.venv/bin/python -m pytest -x -q test_intel_hex.py"

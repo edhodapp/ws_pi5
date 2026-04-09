@@ -120,7 +120,7 @@ FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
     $(BUILD)/test_uart.o $(BUILD)/tcp.o $(BUILD)/ip.o $(BUILD)/ip_reasm.o \
     $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/icmp.o $(BUILD)/udp.o \
     $(BUILD)/net_cfg.o $(BUILD)/net.o $(BUILD)/timer_hw.o \
-    $(BUILD)/timer_pool.o $(BUILD)/ntp.o $(BUILD)/md5.o
+    $(BUILD)/timer_pool.o $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
 
 FUZZ_ASM_OBJS = \
     $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o \
