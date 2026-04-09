@@ -37,7 +37,7 @@
 # Project: Bare-Metal AArch64 Web Server
 
 ## Overview
-Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). Complete network stack from Ethernet to HTTP in assembly. No OS, no C runtime, no abstraction layers.
+Bare-metal HTTP web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). Complete network stack from Ethernet to HTTP in assembly. No OS, no C runtime, no abstraction layers.
 
 ## Toolchain
 - Assembler: `aarch64-linux-gnu-as`
@@ -106,8 +106,10 @@ Bare-metal HTTPS web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). C
 - 10-state FSA, OOO buffering, persist timer, idle reaper, RST rate limiting
 
 ## Next Steps
-1. Pi 4 hardware bringup (serial adapter arriving): GENET Ethernet, UART3, fan control
-2. TLS 1.3 / HTTPS (~3000-5000 lines): ARMv8 crypto extensions for AES-GCM, SHA-256
+Pi 4 hardware bringup is complete — GENET RX+TX, PHY renegotiation,
+DSB barrier integrity, HW error drop path, and the L2 hardening
+integration suite are all done. Further stages are tracked in the
+private memory, not in this file.
 
 ## Git
 - user.name: edhodapp

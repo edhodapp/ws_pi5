@@ -9,7 +9,7 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** Pi 4 hardware bringup complete for L2 — UART chainloader, GENET Gigabit Ethernet RX+TX, PHY speed renegotiation, and a 141-test L2 hardening integration suite (reachability, ring wraparound, link-flap, malformed-frame drop, speed renegotiation) driving the Pi from a host laptop. L3+ rehardening on top of the new framework is the next stage.
+**Current stage:** Pi 4 hardware bringup complete. The full stack runs on real hardware: UART chainloader, GENET Gigabit Ethernet RX+TX, live PHY speed renegotiation, DSB-barrier ordering guarantees, a hardware-error descriptor drop path, and an in-kernel register/driver-state snapshot for live forensics. A 49-test L2 hardening integration suite drives the Pi from a host laptop (reachability, 256-entry ring wraparound through 1024-frame bursts, link-flap recovery, malformed-frame survival, 100M/1G speed renegotiation, DSB integrity, dump-state consistency) with forensic pcap capture on any failure. Head-to-head on identical hardware, ws_pi5 measured ~1.48x faster per-frame burst-drain cost than the Raspberry Pi OS reference kernel.
 
 ## The Experiment
 
@@ -18,7 +18,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration with 379 assembly tests + 34 Python tests + 153 functional tests, zero fuzz crashes, and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration. The suite has grown to 385 assembly unit tests + 141 Python unit tests + 153 functional tests + 49 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -41,8 +41,8 @@ Boots on a Raspberry Pi 4, brings up Ethernet, and serves HTTP on port 80. The f
 
 ```
 boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
-  main.S        uart_init → dwc2_init → cdc_ecm_init (QEMU/Pi 3)
-                uart_init → genet_init (Pi 4)
+  main.S        uart_init → genet_init (Pi 4 hardware)
+                uart_init → dwc2_init → cdc_ecm_init (QEMU raspi3b test harness)
                   → timer_pool_init → ip_reasm_init → icmp_init
                   → tcp_init → tcp_listen(80) → tcp_set_timer_pool
                   → tcp_start_reaper → tcp_set_send_ctx
@@ -58,7 +58,7 @@ boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
       http_poll          Parse requests, send responses (cooperative, non-blocking)
 ```
 
-Kernel image: 27 KB. Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP send buffers).
+Kernel image: 27.2 KB (27,848 bytes). Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP send buffers).
 
 ## Project Structure
 
@@ -90,7 +90,7 @@ include/            Shared constants and macros (.inc files)
   vmio.inc            VMIO engine constants
 platform/pi/        Raspberry Pi 4 (BCM2711)
   boot.S              Entry point — EL2→EL1 drop, MMU setup, park cores 1-3, stack, BSS
-  main.S              uart_init, GENET (Pi 4) or DWC2 USB → CDC-ECM (Pi 3), net_loop, http_poll
+  main.S              uart_init, GENET (Pi 4 hardware) or DWC2 USB → CDC-ECM (QEMU test harness), net_loop, http_poll
   include/            Pi-specific constants
     platform.inc        PERIPH_BASE (0xFE for Pi 4, 0x3F for QEMU testing)
     dwc2.inc            DWC2 USB host register map
@@ -159,8 +159,8 @@ cp /tmp/pict-build/build/cli/pict $HOME/.local/bin/
 
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
-| **Pi 4** (QEMU testing) | `make` | `make test` | Default. Uses QEMU raspi3b with Pi 3 peripheral addresses |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | Real hardware via chainloader | Pi 4 peripheral addresses, UART0 on GPIO 14/15 |
+| **Pi 4** (QEMU test harness) | `make` | `make test` | Default. Runs the shared protocol-stack tests on QEMU raspi3b (BCM2837 peripheral base at 0x3F000000). Tests the platform-independent `lib/` code without needing real hardware. |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware via chainloader. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. |
 
 Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on QEMU 7.2, 8.2, and 11.0-rc0.
 
@@ -218,9 +218,9 @@ The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-indepe
 
 ### Unit Tests
 
-379 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, and Intel HEX parsing. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+385 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, Intel HEX parsing, and the GENET RX drop-path bookkeeping. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
-34 Python unit tests cover the Intel HEX library (intel_hex.py) with 100% branch coverage and 100% mutation score.
+141 Python unit tests run off-hardware: the Intel HEX library (34 tests, 100% mutation score under mutmut), the `hw_send.py` chainloader host tool (12 tests, covering ioctl DTR toggle and termios line-read deadline shaping), and the L2 hardening framework (95 tests covering `eth_frames`, `link`, and `wire` — the testable pieces of the `hw_test/` integration suite).
 
 The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
 
@@ -450,20 +450,21 @@ fcntl.ioctl(fd, TIOCMBIC, bits)   # DTR low → GLOBAL_EN HIGH → Pi boots
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
 | **Chainloader** | Production ready | Intel HEX over UART0, 2-byte ACK/NAK, DTR reset, 27 KB in 12s |
-| **GENET Ethernet** | Working | UMAC reset, RGMII, PHY auto-negotiation, RX+TX, live-speed renegotiation via periodic PHY poll. 256-slot RX ring is the current burst-handling bottleneck (tracked; bigger ring is the next fix). |
+| **GENET Ethernet** | Production ready | UMAC reset, RGMII with ID_MODE_DIS skew, PHY auto-negotiation, RX+TX with `ldp/stp` 16-byte vectorized copy loop, live speed renegotiation via periodic PHY poll, DSB-barrier ordering guarantees on both recv and send hot paths, hardware-error descriptor drop path (OV/CRC/RXER/NO/LG), and an in-kernel register/driver-state snapshot for live forensics via the 0x88B6 query protocol. |
 | **Pi 4 drivers** | Hardware integration | DWC2 USB, CDC-ECM, GPIO, UART0, mailbox, MMU |
-| **L2 hardening framework** | Production ready | `hw_test/` pytest suite: eth_frames, link (netlink up/down + ethtool), wire (tcpdump WireCapture + AF_PACKET RawL2Socket), conftest fixtures (RTT baseline, failure-pcap forensics, session link guard). 94 off-hardware unit tests + 39 live L2 tests (reachability, 256-entry ring wraparound, link-flap recovery, malformed-frame drop, 100M/1G speed renegotiation) driven from the laptop against the Pi. |
+| **L2 hardening framework** | Production ready | `hw_test/` pytest suite: eth_frames, link (netlink up/down + ethtool), wire (tcpdump WireCapture + AF_PACKET RawL2Socket), conftest fixtures (RTT baseline measurement, failure-pcap forensics, session link guard). 95 off-hardware unit tests cover the framework itself; 49 live L2 integration tests (reachability, 256-entry ring wraparound through 1024-frame bursts, link-flap recovery, malformed-frame survival, 100M/1G speed renegotiation, DSB ordering integrity, dump-state consistency, HW RX drop counter) drive the Pi from the laptop. |
+| **Perf instrumentation** | Production ready | Opt-in per-stage probe macros (`PERF=recv` / `send` / `dispatch` / `all`) around `genet_recv`, `genet_send`, and `net_recv_one`; 64-byte cache-line `perf_counters` struct; over-the-wire 0x88B6 query protocol for reset/dump/dump-regs; `hw_test/bin/burst_stats.py` per-stage breakdown and `perf_grind.sh` one-command per-commit validation loop. Production builds (no `PERF=`) pay zero overhead — probes compile out. |
 
-**Kernel image:** 27.8 KB (text + rodata + data; BSS: 32.6 MB runtime, includes 512 KB GENET RX pool)
+**Kernel image:** 27.2 KB (27,848 bytes — text + rodata + data; BSS: 32.6 MB runtime, includes 512 KB GENET RX pool)
 
 **Test coverage:**
-- 379 assembly tests + 34 Python tests + 153 functional tests + 39 fuzz seeds
-- **94 off-hardware L2 framework unit tests + 39 live L2 hardware tests (hw_test/)** — total **738+**
-- All assembly and Python unit tests pass on QEMU 7.2, 8.2, and 11.0-rc0
-- 100% branch coverage, every test has explicit assertions
-- 100% mutation score on Intel HEX library (mutmut)
+- 385 assembly unit tests (QEMU raspi3b) + 153 TCP functional tests (PICT + handcrafted, QEMU) + 141 off-hardware Python unit tests (intel_hex, hw_send, L2 framework) + 49 live L2 integration tests (hw_test/, real Pi 4) + 39 fuzz seeds — **total 767 tests + 39 fuzz seeds**
+- All QEMU unit tests pass on QEMU 7.2, 8.2, and 11.0-rc0
+- All 49 L2 integration tests pass end-to-end against live Pi 4 hardware (2 additional tests skipped because the laptop's r8152 USB NIC cannot inject FCS errors; not a regression)
+- 100% branch coverage on tracked code, every test has explicit assertions
+- 100% mutation score on the Intel HEX library (108/108 mutants killed via mutmut)
 
-**Known open bug:** `test_l2_ring[1024]` is red — the Pi's 256-slot GENET RX descriptor ring overflows under a sustained 1024-frame ARP burst (drain rate ~1.84 μs/frame vs. laptop effective arrival ~3.2 μs/frame; empirical lossless burst ceiling ~600 frames). Root cause fully characterized; fix is to bump `DMA_DESC_COUNT` to the hardware maximum (likely 512). Tracked in `memory/project_genet_arp_burst_loss.md`.
+**Measured performance vs. reference kernel:** Under a 1024-frame wire-rate ARP burst on identical hardware (Pi 4 Model B, 8 GB, same cable, same laptop harness, same 256-entry RX descriptor ring), ws_pi5 drains 1020/1024 frames (~99.6%) while Raspberry Pi OS drains 689/1024 frames (~67%) — a ~1.48x per-frame drain-cost advantage. Full conditions and measurement methodology in `hw_test/perf_history.md`.
 
 ### MMU and Caches
 
@@ -473,7 +474,12 @@ The kernel enables the MMU with identity-mapped page tables immediately after BS
 - **Instruction cache** — reduces fetch latency for the net_loop hot path
 - **Correct alignment semantics** — Normal memory allows unaligned accesses; Device memory requires natural alignment (enforced by QEMU 9+ and real hardware)
 
-## Work in Progress
+## Pi 4 Hardware Bringup Notes
+
+Pi 4 hardware bringup is complete. This section documents the
+non-obvious findings from getting the stack running on real
+hardware — the chainloader, the firmware 0x80000 conflict, and
+the GENET driver.
 
 ### UART Chainloader
 
@@ -502,18 +508,20 @@ This is not documented in the BCM2711 datasheet or Raspberry Pi firmware documen
 
 ### GENET Gigabit Ethernet
 
-Native GENET v5 driver for the BCM2711's built-in Gigabit MAC, replacing the USB CDC-ECM path.
+Native GENET v5 driver for the BCM2711's built-in Gigabit MAC, replacing the USB CDC-ECM path used on the QEMU test harness.
 
 | Item | Status | Notes |
 |------|--------|-------|
 | **UMAC reset + RGMII** | Done | Reset sequence, ID_MODE_DIS bit for RGMII skew, MAC0/MAC1 programming |
 | **PHY auto-negotiation** | Done | Gigabit link established, AUX_STS polled for negotiated speed |
-| **RX path** | Working | RBUF_ALIGN_2B enabled (earlier 2-byte pad mismatch fixed); ARP, ICMP, full protocol stack |
-| **TX path** | Working | Synchronous send, cache flush + DSB + descriptor write + PROD_INDEX bump; vectorized rx_copy (ldp/stp 16-byte chunks) |
-| **PHY speed renegotiation** | Working | `genet_phy_check` on the `net_loop` idle path reads PHY_AUX_STS and updates `UMAC_CMD` SPEED bits. Catches 1G → 100M transitions at runtime. Earlier bug: `genet_init` configured the speed once and never refreshed, breaking every test_l2_speed case. |
-| **L2 hardening tests** | 36/39 passing | `test_l2_ring[1024]` open — the 256-slot RX ring is the bottleneck under wire-rate bursts; next-session fix is to bump `DMA_DESC_COUNT` to the hardware maximum |
+| **RX path** | Done | 256-entry descriptor ring on ring 16; RBUF_ALIGN_2B enabled; vectorized copy loop (ldp/stp 16-byte chunks); DSB-barrier ordering after `dc civac` invalidate before the copy |
+| **TX path** | Done | Synchronous send, cache flush via `dc civac` loop + DSB + descriptor publish + PROD_INDEX kick; DSB-barrier ordering between flush and descriptor write |
+| **PHY speed renegotiation** | Done | `genet_phy_check` on the `net_loop` idle path reads PHY_AUX_STS and updates `UMAC_CMD` SPEED bits; catches 1G → 100M transitions at runtime |
+| **HW error descriptor drop** | Done | Hardware `DMA_RX_FI_MASK` bits (OV, CRC_ERROR, RXER, NO, LG) checked at dequeue; corrupted descriptors are consumed silently, `PERF_DROP_COUNT` is bumped, and the drop path is unit-tested via the `genet_rx_drop_bookkeeping` leaf helper (6 tests covering fresh state, 16-bit CIDX wrap, 8-bit RIDX wrap, perf pointer null, field preservation, and `FI_MASK` coverage) |
+| **Register/state forensics** | Done | `perf_query(dump_regs=True)` over the 0x88B6 protocol returns a 64-byte snapshot: `UMAC_CMD`, FIFO status, RDMA/TDMA indices and control, XON/XOFF threshold, and the driver's own software copy of the ring indices. The driver's software state is verified to track the hardware indices exactly. |
+| **L2 hardening tests** | 49 passing (2 skipped) | All tests in `hw_test/test_l2_*.py` pass against live hardware: reachability, ring wraparound through `N=1024`, link-flap recovery, malformed-frame survival, speed renegotiation, DSB ordering integrity, and dump-state consistency. The 2 skips are the r8152 USB NIC's inability to inject FCS errors for a negative-path CRC test — a host-side hardware limitation, not a Pi regression. |
 
-The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi4 → scripts/hw_send.py → HW_TEST=1 pytest hw_test/` takes about 30 seconds end to end. The L2 hardening framework at `hw_test/` is how every GENET behaviour claim in this README gets verified.
+The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi4 → scripts/hw_send.py → HW_TEST=1 pytest hw_test/` takes about 60 seconds end to end. The L2 hardening framework at `hw_test/` is how every GENET behaviour claim in this README gets verified.
 
 ### Design Decisions
 
