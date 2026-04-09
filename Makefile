@@ -109,7 +109,8 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_ip.o $(BUILD)/test_icmp.o $(BUILD)/test_udp.o \
     $(BUILD)/test_tcp.o $(BUILD)/test_net.o $(BUILD)/test_timer.o \
     $(BUILD)/test_ntp.o $(BUILD)/test_md5.o $(BUILD)/test_http.o \
-    $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o
+    $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
+    $(BUILD)/test_genet_rx_err.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
@@ -341,6 +342,9 @@ $(BUILD)/test_http.o: tests/test_http.S include/http.inc include/tcp.inc include
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_hex_parse.o: tests/test_hex_parse.S | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_genet_rx_err.o: tests/test_genet_rx_err.S $(PI_INC)/genet.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/hex_parse.o: chainload/hex_parse.S | $(BUILD)

@@ -15,6 +15,7 @@
 .global genet_init
 .global genet_send
 .global genet_recv
+.global genet_rx_drop_bookkeeping
 .ifdef PLATFORM_PI4
 .global genet_dump_state
 .endif
@@ -699,37 +700,24 @@ genet_recv:
 
 .Lrx_err:
     /* Hardware RX error path. The descriptor at w2 = current RIDX
-     * contains a damaged frame. Consume the descriptor (advance
-     * CIDX and RIDX past it, publish CIDX to HW) so the next
-     * recv call moves on. Bump PERF_DROP_COUNT under PERF_COUNTERS
-     * so the test harness can query the running error total.
-     * Return "no frame" so net_loop runs its idle path and comes
-     * back for the next descriptor on the next iteration.
-     *
-     * Note w2 still holds the current RIDX (loaded earlier and
-     * never clobbered up to the tst/b.ne above). x20 still holds
-     * the genet_state pointer. x19 still holds the GENET base. */
-    ldr     w0, [x20, #GENET_STATE_RX_CIDX]
-    add     w0, w0, #1
-    and     w0, w0, #0xFFFF
-    str     w0, [x20, #GENET_STATE_RX_CIDX]
-    str     w0, [x19, #RDMA_CONS_INDEX]
-
-    ldr     w0, [x20, #GENET_STATE_RX_RIDX]
-    add     w0, w0, #1
-    and     w0, w0, #0xFF
-    str     w0, [x20, #GENET_STATE_RX_RIDX]
-
+     * contains a damaged frame. The state-bookkeeping side of the
+     * drop (advance CIDX+RIDX, optionally bump PERF_DROP_COUNT) is
+     * extracted into genet_rx_drop_bookkeeping so it can be
+     * unit-tested off-hardware. We only keep the one MMIO operation
+     * (publish the new CIDX to RDMA_CONS_INDEX) here, because the
+     * helper is deliberately pure software. The MMIO publish is
+     * mandatory — without it the hardware won't free the descriptor
+     * slot and the ring stalls on the next wrap. */
+    mov     x0, x20                 /* state pointer */
 .ifdef PERF_COUNTERS
-    /* Bump PERF_DROP_COUNT (u32 at offset 28). x3 is caller-saved
-     * and free here; w2 is also free because we've finished
-     * consuming the current-RIDX value (it was already used above).
-     * Note the w-register for the counter — 4-byte access. */
-    ldr     x3, =perf_counters
-    ldr     w2, [x3, #PERF_DROP_COUNT]
-    add     w2, w2, #1
-    str     w2, [x3, #PERF_DROP_COUNT]
+    ldr     x1, =perf_counters
+.else
+    mov     x1, xzr                 /* NULL → helper skips perf bump */
 .endif
+    bl      genet_rx_drop_bookkeeping
+    /* Helper returned w0 = new CIDX value; publish to HW so the
+     * hardware sees the descriptor as consumed. */
+    str     w0, [x19, #RDMA_CONS_INDEX]
 
     mov     w0, #1
     mov     w1, #0
@@ -768,6 +756,53 @@ genet_recv:
     ldp     x21, x22, [sp, #16]
     ldp     x19, x20, [sp], #48
 .endif
+    ret
+
+/*
+ * genet_rx_drop_bookkeeping — software state update for a dropped
+ * RX descriptor.
+ *
+ * Called from genet_recv's .Lrx_err path. Extracted into its own
+ * leaf function so the drop-path state mutation (advance CIDX+RIDX,
+ * bump PERF_DROP_COUNT) can be unit-tested off-hardware by
+ * tests/test_genet_rx_err.S without touching any MMIO. The caller
+ * is still responsible for publishing the returned CIDX to the
+ * hardware RDMA_CONS_INDEX register.
+ *
+ * The perf-counter bump is controlled by passing a pointer (or
+ * NULL) rather than by an assemble-time .ifdef, so one build of
+ * this function serves both the PERF_COUNTERS and default paths.
+ * That also lets the test directly cover the "no perf counters"
+ * branch by passing xzr.
+ *
+ * Inputs:
+ *   x0 = pointer to genet_state struct (writable; bytes 0..7 touched)
+ *   x1 = pointer to perf_counters struct, or 0 (NULL) to skip bump
+ *
+ * Outputs:
+ *   w0 = new RX CIDX value (caller publishes to RDMA_CONS_INDEX)
+ *
+ * Clobbers: w0, w2, w3. Leaf (no stack frame).
+ *
+ * Pure software: no MMIO, no reference to perf_counters symbol.
+ */
+genet_rx_drop_bookkeeping:
+    ldr     w2, [x0, #GENET_STATE_RX_CIDX]
+    add     w2, w2, #1
+    and     w2, w2, #0xFFFF
+    str     w2, [x0, #GENET_STATE_RX_CIDX]
+
+    ldr     w3, [x0, #GENET_STATE_RX_RIDX]
+    add     w3, w3, #1
+    and     w3, w3, #0xFF
+    str     w3, [x0, #GENET_STATE_RX_RIDX]
+
+    cbz     x1, .Lgrdb_done
+    ldr     w3, [x1, #PERF_DROP_COUNT]
+    add     w3, w3, #1
+    str     w3, [x1, #PERF_DROP_COUNT]
+.Lgrdb_done:
+    mov     w0, w2                  /* return new CIDX */
     ret
 
 /*

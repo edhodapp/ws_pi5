@@ -178,6 +178,12 @@ _start:
     bl      test_tcp
     bl      test_http
     bl      test_hex_parse
+    bl      test_rx_err_basic
+    bl      test_rx_err_null_perf
+    bl      test_rx_err_cidx_wrap
+    bl      test_rx_err_ridx_wrap
+    bl      test_rx_err_preserves_other
+    bl      test_rx_err_fi_mask_covers
 
     /* === Print summary === */
     ldr     x0, =fail_count
