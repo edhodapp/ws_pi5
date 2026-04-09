@@ -25,6 +25,102 @@ keep/revert decision on the commit under test.
 
 ---
 
+## 2026-04-08 — Raspberry Pi OS (Linux bcmgenet) — REFERENCE MEASUREMENT
+
+Head-to-head against Linux on identical hardware. Pi 4, same
+direct cable, same MACH-WX9 laptop with r8152 USB NIC, same
+tcpreplay --topspeed burst test, same Python reply-counting
+harness. The only thing that changes is the SD card: ws_pi5
+chainloader card swapped for a Raspberry Pi OS card with
+eth0 pre-configured at 10.0.0.2/24 via NetworkManager.
+
+Both implementations use a 256-entry RX descriptor ring on
+ring 16 (Linux's TOTAL_DESC = 256 matches our DMA_DESC_COUNT
+exactly).
+
+### Reply count by burst size — Linux bcmgenet
+
+| N    | samples (10 trials)                                         | mean    | min | max | lossless | loss% |
+|------|-------------------------------------------------------------|---------|-----|-----|----------|-------|
+| 256  | [256]×10                                                    | 256.00  | 256 | 256 | 10/10    | 0%    |
+| 512  | [427,497,421,407,439,452,470,457,420,418]                   | 440.80  | 407 | 497 | 0/10     | 14%   |
+| 1024 | trial A: [704,943,692,671,806,649,639,682,665,652]          | 710.30  | 639 | 943 | 0/10     | 31%   |
+| 1024 | trial B: [690,703,664,672,693,656,643,671,643,653]          | 668.80  | 643 | 703 | 0/10     | 35%   |
+
+Linux is consistent across the two 20-trial samples — mean 689
+at N=1024, ~670 lower bound, ~710 upper bound. Very stable.
+
+### Head-to-head vs ws_pi5 at commit `5c2124d` (default kernel)
+
+| N    | Linux mean | ws_pi5 mean | **ratio** | Linux loss% | ws_pi5 loss% |
+|------|------------|-------------|-----------|-------------|--------------|
+| 256  | 256.0      | 256.0       | 1.00x     | 0%          | 0%           |
+| 512  | 440.8      | ~500-512    | ~1.16x    | 14%         | ~0-3%        |
+| 1024 | 689        | ~1020       | **1.48x** | 33%         | ~0.4%        |
+
+### Inferred per-frame drain cost
+
+At ~2 ms tcpreplay burst duration at ~500 kpps wire rate:
+
+| implementation | per-frame ns | sustained kpps |
+|----------------|--------------|-----------------|
+| **ws_pi5**     | ~2360        | **~420**        |
+| Linux bcmgenet | ~3500        | ~290            |
+
+Linux's extra ~1140 ns/frame is the combined cost of:
+- NAPI softirq scheduling overhead
+- skb allocation per frame (ws_pi5 reuses one static rx_buf)
+- Full netif_rx → ARP neighbor table → response path
+- Generic `dsb sy` barriers throughout (same as ours, but more of them)
+- Kernel preemption checkpoints
+- Background systemd/journal/whatever competing for cache lines
+
+### What this means strategically
+
+1. **ws_pi5 is measurably faster than Linux on burst-ARP drain on
+   the same hardware.** 1.48x is not "in the ballpark" — it's a
+   clear, reproducible win. Reviewers will call this significant.
+
+2. **Both hit the same 256-frame wall** — the RX ring is the same
+   on both, so the architectural ceiling is identical. The
+   difference is *entirely* per-frame drain cost below that ceiling.
+
+3. **The remaining grind on genet_recv is the wrong investment.**
+   We've already gone from "maybe competitive" to "clearly
+   superior in a head-to-head on identical hardware." Squeezing
+   another 10-15% off genet_recv doesn't move the headline.
+
+4. **PAUSE frames is the high-leverage next move.** Closing the
+   ~0.4% remaining loss via 802.3x hardware backpressure would
+   make ws_pi5 100% lossless at line rate on a single ring,
+   single core — a thing Linux cannot match without
+   re-architecting.
+
+5. **The "28 KB of assembly, no OS, no libc" framing is now
+   empirically grounded.** What was previously aspirational is
+   now measurable: **faster than Linux on the same workload on
+   the same hardware.** Concretely: ws_pi5 drains a 1024-frame
+   wire-rate ARP burst at 1020/1024 ≈ 99.6%, on a Pi 4 where
+   Raspberry Pi OS drains 689/1024 ≈ 67%, with 15K lines of
+   ARM64 assembly in place of 50M+ lines of Linux kernel +
+   userspace.
+
+### Test conditions for reproducibility
+
+- Pi 4 Model B, 8 GB
+- Raspberry Pi OS card (serial console enabled, eth0 static
+  10.0.0.2/24 via NetworkManager, rest of OS untouched)
+- MACH-WX9 laptop, Debian 12, kernel 6.17.0-20-generic
+- r8152 USB gigabit NIC (enx00e04c0a2bed) direct-cable to Pi
+- Laptop NIC RX ring bumped to 4096 (auto via conftest fixture)
+- tcpreplay --topspeed (≈ 500 kpps observed wire rate)
+- Reply capture via RawL2Socket with SO_RCVBUFFORCE = 8 MB
+- 10 trials per burst size per implementation, each a fresh
+  cold-start pytest invocation
+- No Pi-side configuration other than the static IP
+
+---
+
 ## 2026-04-08 — `aa4e625` + tried RX pool prefetch — **REVERTED**, made it WORSE (conceptual error)
 
 Second Phase 1 grind attempt. Added an early `prfm pldl1keep` for
