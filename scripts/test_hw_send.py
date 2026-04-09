@@ -1,395 +1,233 @@
 #!/usr/bin/env python3
-"""Unit tests for hw_send.py with mocked serial port."""
+"""Unit tests for scripts/hw_send.py.
 
-import sys
-from unittest.mock import MagicMock
+hw_send.py was rewritten on 2026-04-04 (commit 2878c79) to drop
+pyserial in favour of raw os + termios. The protocol changed from a
+single '+' ACK byte to a 2-byte (line_length, checksum) ACK, and all
+the previous helper functions (sync_chainloader, _send_one_record,
+_read_output_byte, etc.) were inlined into main(). That made the
+previous test file's references stale.
+
+This rewrite drops the dead tests and covers what the new module
+actually exposes:
+
+    set_dtr(fd, state)       — ioctl-based DTR toggle
+    read_line(fd, timeout)   — bounded line read with VTIME shaping
+
+Everything else in hw_send.py is inside main(), which is a long
+imperative sequence tied to os.open / termios / os.read / os.write
+on a real tty fd. A meaningful unit test of main() would require
+refactoring the module first, which is out of scope here.
+"""
+
+from unittest.mock import MagicMock, patch
 
 import hw_send
-from intel_hex import kernel_to_hex_records
 
 
-def make_port(**kwargs):
-    """Create a mock serial port with sensible defaults."""
-    port = MagicMock()
-    port.timeout = 3
-    port.readline.return_value = b''
-    port.read.return_value = b''
-    for key, val in kwargs.items():
-        setattr(port, key, val)
-    return port
-
-
-# ── sync_chainloader ─────────────────────────────────────────
-
-
-class TestSyncChainloader:
-
-    def test_ready_on_first_attempt(self):
-        port = make_port()
-        port.readline.return_value = b'READY\r\n'
-        assert hw_send.sync_chainloader(port) is True
-        port.write.assert_called_with(b'\xff')
-
-    def test_ready_after_empty_lines(self):
-        port = make_port()
-        port.readline.side_effect = [b'', b'READY\r\n']
-        assert hw_send.sync_chainloader(port) is True
-
-    def test_no_ready(self):
-        port = make_port()
-        port.readline.return_value = b''
-        assert hw_send.sync_chainloader(port) is False
-
-    def test_garbage_before_ready(self):
-        port = make_port()
-        port.readline.side_effect = [b'junk\r\n', b'READY\r\n']
-        assert hw_send.sync_chainloader(port) is True
-
-
-# ── _wait_for_ready ──────────────────────────────────────────
-
-
-class TestWaitForReady:
-
-    def test_found(self, mocker):
-        mocker.patch('hw_send.time.time', side_effect=[0, 1])
-        port = make_port()
-        port.readline.return_value = b'READY\r\n'
-        assert hw_send._wait_for_ready(port) is True
-
-    def test_timeout(self, mocker):
-        mocker.patch('hw_send.time.time', side_effect=[0, 10])
-        port = make_port()
-        assert hw_send._wait_for_ready(port) is False
-
-    def test_empty_line_skipped(self, mocker):
-        mocker.patch('hw_send.time.time', side_effect=[0, 1, 2])
-        port = make_port()
-        port.readline.side_effect = [b'\r\n', b'READY\r\n']
-        assert hw_send._wait_for_ready(port) is True
-
-
-# ── _send_one_record ─────────────────────────────────────────
-
-
-class TestSendOneRecord:
-
-    def test_ack(self):
-        port = make_port()
-        port.read.return_value = b'+'
-        result = hw_send._send_one_record(port, ':00000001FF', 0)
-        assert result is True
-
-    def test_nak_then_ack(self):
-        port = make_port()
-        port.read.side_effect = [b'-', b'+']
-        result = hw_send._send_one_record(port, ':00000001FF', 0)
-        assert result is True
-        assert port.write.call_count == 2
-
-    def test_nak_exhausted(self):
-        port = make_port()
-        port.read.return_value = b'-'
-        result = hw_send._send_one_record(port, ':00000001FF', 0)
-        assert result is False
-
-    def test_timeout(self):
-        port = make_port()
-        port.read.return_value = b''
-        result = hw_send._send_one_record(port, ':00000001FF', 0)
-        assert result is False
-
-    def test_unexpected_byte(self):
-        port = make_port()
-        port.read.return_value = b'?'
-        result = hw_send._send_one_record(port, ':00000001FF', 0)
-        assert result is False
-
-
-# ── send_hex_records ─────────────────────────────────────────
-
-
-class TestSendHexRecords:
-
-    def test_all_acked(self):
-        port = make_port()
-        port.read.return_value = b'+'
-        records = [':020000040008F2', ':0100000055AA', ':00000001FF']
-        assert hw_send.send_hex_records(port, records, 1)
-
-    def test_failure_aborts(self):
-        port = make_port()
-        port.read.return_value = b''
-        records = [':020000040008F2', ':0100000055AA']
-        assert not hw_send.send_hex_records(port, records, 1)
-
-    def test_progress_prints(self, capsys):
-        port = make_port()
-        port.read.return_value = b'+'
-        # Need 100+ data records for rec_idx % 100 == 0 branch
-        records = kernel_to_hex_records(b'\x00' * 1616)
-        result = hw_send.send_hex_records(port, records, 1616)
-        assert result is True
-        out = capsys.readouterr().out
-        assert '/' in out
-
-
-# ── wait_for_boot ────────────────────────────────────────────
-
-
-class TestWaitForBoot:
-
-    def test_boot_received(self):
-        port = make_port()
-        port.read.return_value = b'BOOT\r\n'
-        assert hw_send.wait_for_boot(port) is True
-
-    def test_boot_with_prefix(self):
-        port = make_port()
-        port.read.return_value = b'+BOOT\r\n'
-        assert hw_send.wait_for_boot(port) is True
-
-    def test_no_boot(self):
-        port = make_port()
-        port.read.return_value = b''
-        assert hw_send.wait_for_boot(port) is False
-
-    def test_wrong_response(self):
-        port = make_port()
-        port.read.return_value = b'GARBAGE\r\n'
-        assert hw_send.wait_for_boot(port) is False
-
-
-# ── _read_output_byte ────────────────────────────────────────
-
-
-class TestReadOutputByte:
-
-    def test_no_data(self):
-        port = make_port()
-        port.read.return_value = b''
-        result, buf = hw_send._read_output_byte(port, "")
-        assert result is None
-        assert buf == ""
-
-    def test_normal_char(self):
-        port = make_port()
-        port.read.return_value = b'A'
-        result, buf = hw_send._read_output_byte(port, "")
-        assert result is None
-        assert buf == "A"
-
-    def test_accumulate(self):
-        port = make_port()
-        port.read.return_value = b'B'
-        result, buf = hw_send._read_output_byte(port, "A")
-        assert result is None
-        assert buf == "AB"
-
-    def test_newline_resets(self):
-        port = make_port()
-        port.read.return_value = b'\n'
-        result, buf = hw_send._read_output_byte(port, "hello")
-        assert result is None
-        assert buf == ""
-
-    def test_done_detected(self):
-        port = make_port()
-        port.read.return_value = b'\n'
-        result, buf = hw_send._read_output_byte(port, "DONE")
-        assert result is True
-        assert buf == ""
-
-    def test_wait_sends_ff(self):
-        port = make_port()
-        port.read.return_value = b'\n'
-        result, buf = hw_send._read_output_byte(port, "WAIT")
-        port.write.assert_called_with(b'\xff')
-        assert result is None
-        assert buf == ""
-
-    def test_cr_resets(self):
-        port = make_port()
-        port.read.return_value = b'\r'
-        result, buf = hw_send._read_output_byte(port, "stuff")
-        assert result is None
-        assert buf == ""
-
-
-# ── collect_output ───────────────────────────────────────────
-
-
-class TestCollectOutput:
-
-    def test_done(self, mocker):
-        times = [0, 1, 1, 1, 1, 1]
-        mocker.patch('hw_send.time.time', side_effect=times)
-        port = make_port()
-        port.read.side_effect = [b'D', b'O', b'N', b'E', b'\n']
-        assert hw_send.collect_output(port, 10) is True
-
-    def test_timeout(self, mocker):
-        mocker.patch('hw_send.time.time', side_effect=[0, 100])
-        port = make_port()
-        assert hw_send.collect_output(port, 1) is False
-
-    def test_keyboard_interrupt(self, mocker):
-        mocker.patch('hw_send.time.time', side_effect=[0, 1])
-        port = make_port()
-        port.read.side_effect = KeyboardInterrupt
-        assert hw_send.collect_output(port, 10) is False
-
-
-# ── _log_nak / _log_bad_ack ─────────────────────────────────
-
-
-class TestLogHelpers:
-
-    def test_log_nak_retryable(self, capsys):
-        hw_send._log_nak(5, 0)
-        assert "retry 1" in capsys.readouterr().out
-
-    def test_log_nak_last(self, capsys):
-        hw_send._log_nak(5, hw_send.MAX_RETRIES - 1)
-        assert capsys.readouterr().out == ""
-
-    def test_log_bad_ack_data(self, capsys):
-        hw_send._log_bad_ack(3, b'\x99')
-        assert "99" in capsys.readouterr().out
-
-    def test_log_bad_ack_timeout(self, capsys):
-        hw_send._log_bad_ack(3, b'')
-        assert "Timeout" in capsys.readouterr().out
-
-
-# ── _parse_args ──────────────────────────────────────────────
-
-
-class TestParseArgs:
-
-    def test_no_args(self, mocker):
-        mocker.patch.object(sys, 'argv', ['hw_send.py'])
-        assert hw_send._parse_args() is None
-
-    def test_kernel_only(self, mocker):
-        mocker.patch.object(sys, 'argv', ['hw_send.py', 'k.img'])
-        result = hw_send._parse_args()
-        assert result == ('k.img', '/dev/ttyUSB0', 15)
-
-    def test_all_args(self, mocker):
-        mocker.patch.object(
-            sys, 'argv',
-            ['hw_send.py', 'k.img', '/dev/tty1', '10'],
+# ── set_dtr ──────────────────────────────────────────────────
+
+class TestSetDtr:
+    """Verify DTR toggle calls fcntl.ioctl with the right op codes.
+
+    set_dtr's entire behaviour is the ioctl call, so the test must
+    pin the exact (fd, op, payload) tuple — no "didn't throw"
+    stubs. If the command codes ever drift, this catches it.
+    """
+
+    def test_state_true_sets_dtr(self):
+        with patch("hw_send.fcntl.ioctl") as mock_ioctl:
+            hw_send.set_dtr(42, True)
+            mock_ioctl.assert_called_once()
+            fd, op, payload = mock_ioctl.call_args[0]
+            assert fd == 42
+            assert op == hw_send.TIOCMBIS
+            # payload is a 4-byte little-endian struct holding TIOCM_DTR
+            assert len(payload) == 4
+            assert int.from_bytes(payload, "little") == hw_send.TIOCM_DTR
+
+    def test_state_false_clears_dtr(self):
+        with patch("hw_send.fcntl.ioctl") as mock_ioctl:
+            hw_send.set_dtr(42, False)
+            mock_ioctl.assert_called_once()
+            fd, op, payload = mock_ioctl.call_args[0]
+            assert fd == 42
+            assert op == hw_send.TIOCMBIC
+            assert int.from_bytes(payload, "little") == hw_send.TIOCM_DTR
+
+    def test_bis_and_bic_are_distinct(self):
+        """Regression fence: if someone swaps the two constants, both
+        set_dtr(True) and set_dtr(False) would still look reasonable
+        in isolation. Pin that they're different values."""
+        assert hw_send.TIOCMBIS != hw_send.TIOCMBIC
+
+
+# ── read_line ────────────────────────────────────────────────
+
+class _FakeTerm:
+    """Minimal termios double.
+
+    hw_send.read_line calls tcgetattr -> mutates attrs[6] (the cc
+    array) -> tcsetattr. Our fake captures the final VTIME so tests
+    can assert on the timeout-to-deciseconds conversion.
+    """
+
+    def __init__(self):
+        # attrs shape per termios.tcgetattr: [iflag, oflag, cflag,
+        # lflag, ispeed, ospeed, cc]. cc is a list where we only
+        # touch VMIN (index ~6) and VTIME (index ~5). We just give
+        # a big placeholder list so any index works.
+        self.attrs = [0, 0, 0, 0, 0, 0, [0] * 32]
+        self.set_calls = []
+
+    def tcgetattr(self, fd):
+        # Return a fresh copy so callers can mutate safely.
+        return [0, 0, 0, 0, 0, 0, list(self.attrs[6])]
+
+    def tcsetattr(self, fd, when, attrs):
+        self.set_calls.append((fd, when, attrs))
+        self.attrs = attrs
+
+
+def _mk_read_line_env(bytes_yielded, times):
+    """Build a (termios_mock, os_read_mock, time_mock) patcher bundle.
+
+    bytes_yielded: sequence of 1-byte bytes strings + possibly b''
+                   to signal EOF
+    times: sequence of time.time() return values
+    """
+    fake = _FakeTerm()
+    # os.read returns one byte at a time
+    read_mock = MagicMock(side_effect=list(bytes_yielded))
+    time_mock = MagicMock(side_effect=list(times))
+    return fake, read_mock, time_mock
+
+
+class TestReadLine:
+
+    def test_returns_line_without_trailing_newline(self):
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"R", b"E", b"A", b"D", b"Y", b"\r", b"\n"],
+            times=[0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07],
         )
-        result = hw_send._parse_args()
-        assert result == ('k.img', '/dev/tty1', 10)
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            result = hw_send.read_line(fd=10, timeout=1)
+        assert result == "READY"
 
-    def test_timeout_too_high(self, mocker):
-        mocker.patch.object(
-            sys, 'argv',
-            ['hw_send.py', 'k.img', '/dev/tty1', '256'],
+    def test_returns_empty_on_eof(self):
+        """os.read returning b'' (no bytes) should break the loop
+        and return whatever has accumulated so far."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"R", b"E", b""],
+            times=[0.0, 0.01, 0.02, 0.03],
         )
-        assert hw_send._parse_args() is None
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            result = hw_send.read_line(fd=10, timeout=1)
+        assert result == "RE"
 
-    def test_timeout_negative(self, mocker):
-        mocker.patch.object(
-            sys, 'argv',
-            ['hw_send.py', 'k.img', '/dev/tty1', '-1'],
+    def test_returns_empty_string_when_deadline_hit_immediately(self):
+        """time.time()'s very first call places the deadline in the
+        past. read_line's loop condition is strict (<), so it never
+        executes — os.read is not called, and the decoded buffer
+        is ''."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[],
+            # First call sets deadline = 0.0 + 1 = 1.0; second call
+            # returns 2.0 so the while check fails immediately.
+            times=[0.0, 2.0],
         )
-        assert hw_send._parse_args() is None
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            result = hw_send.read_line(fd=10, timeout=1)
+        assert result == ""
+        assert read_mock.call_count == 0
 
-
-# ── _print_banner ────────────────────────────────────────────
-
-
-class TestPrintBanner:
-
-    def test_with_watchdog(self, capsys):
-        recs = [':020000040008F2', ':0100000055AA', ':00000001FF']
-        hw_send._print_banner('k.img', '/dev/tty0', 10, b'\x00', recs)
-        out = capsys.readouterr().out
-        assert 'k.img' in out
-        assert '10s' in out
-
-    def test_no_watchdog(self, capsys):
-        recs = [':020000040008F2', ':00000001FF']
-        hw_send._print_banner('k.img', '/dev/tty0', 0, b'', recs)
-        out = capsys.readouterr().out
-        assert '(no watchdog)' in out
-
-
-# ── main ─────────────────────────────────────────────────────
-
-
-class TestMain:
-
-    def test_no_args_returns_1(self, mocker):
-        mocker.patch.object(sys, 'argv', ['hw_send.py'])
-        assert hw_send.main() == 1
-
-    def test_happy_path(self, mocker, tmp_path):
-        kernel_file = tmp_path / "test.img"
-        kernel_file.write_bytes(b'\x00' * 16)
-        mocker.patch.object(
-            sys, 'argv', ['hw_send.py', str(kernel_file)],
+    def test_vtime_set_to_timeout_in_deciseconds(self):
+        """The driver converts timeout seconds to VTIME deciseconds
+        and clamps to [1, 255]. A 3.0-second timeout must land as
+        30 (3.0 * 10). This pins the conversion formula."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
         )
-        mocker.patch('hw_send.serial.Serial')
-        mock_sync = mocker.patch(
-            'hw_send.sync_chainloader', return_value=True,
-        )
-        mock_send = mocker.patch(
-            'hw_send.send_hex_records', return_value=True,
-        )
-        mock_boot = mocker.patch(
-            'hw_send.wait_for_boot', return_value=True,
-        )
-        mocker.patch('hw_send.collect_output')
-        assert hw_send.main() == 0
-        mock_sync.assert_called_once()
-        mock_send.assert_called_once()
-        mock_boot.assert_called_once()
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=3.0)
+        # VTIME is index 5 in the cc array per termios.
+        import termios as _t
+        assert fake.attrs[6][_t.VTIME] == 30
 
-    def test_sync_fail(self, mocker, tmp_path):
-        kernel_file = tmp_path / "test.img"
-        kernel_file.write_bytes(b'\x00')
-        mocker.patch.object(
-            sys, 'argv', ['hw_send.py', str(kernel_file)],
+    def test_vtime_clamped_to_upper_bound(self):
+        """Timeout large enough to overflow a uint8 VTIME field
+        must clamp to 255 (25.5 seconds), not wrap."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
         )
-        mocker.patch('hw_send.serial.Serial')
-        mocker.patch(
-            'hw_send.sync_chainloader', return_value=False,
-        )
-        assert hw_send.main() == 1
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=9999)
+        import termios as _t
+        assert fake.attrs[6][_t.VTIME] == 255
 
-    def test_send_fail(self, mocker, tmp_path):
-        kernel_file = tmp_path / "test.img"
-        kernel_file.write_bytes(b'\x00')
-        mocker.patch.object(
-            sys, 'argv', ['hw_send.py', str(kernel_file)],
+    def test_vtime_clamped_to_lower_bound(self):
+        """Tiny (sub-decisecond) timeouts must round up to 1, not
+        collapse to 0 (which would disable the inter-byte timeout
+        and block forever on a slow stream)."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
         )
-        mocker.patch('hw_send.serial.Serial')
-        mocker.patch(
-            'hw_send.sync_chainloader', return_value=True,
-        )
-        mocker.patch(
-            'hw_send.send_hex_records', return_value=False,
-        )
-        assert hw_send.main() == 1
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=0.01)
+        import termios as _t
+        assert fake.attrs[6][_t.VTIME] == 1
 
-    def test_boot_fail(self, mocker, tmp_path):
-        kernel_file = tmp_path / "test.img"
-        kernel_file.write_bytes(b'\x00')
-        mocker.patch.object(
-            sys, 'argv', ['hw_send.py', str(kernel_file)],
+    def test_non_ascii_bytes_ignored_in_decode(self):
+        """The decode uses errors='ignore', so a stray high-bit
+        byte in the middle of a line must be dropped from the
+        returned string instead of raising UnicodeDecodeError."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"B", b"\xff", b"O", b"O", b"T", b"\n"],
+            times=[0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
         )
-        mocker.patch('hw_send.serial.Serial')
-        mocker.patch(
-            'hw_send.sync_chainloader', return_value=True,
-        )
-        mocker.patch(
-            'hw_send.send_hex_records', return_value=True,
-        )
-        mocker.patch(
-            'hw_send.wait_for_boot', return_value=False,
-        )
-        assert hw_send.main() == 1
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            result = hw_send.read_line(fd=10, timeout=1)
+        assert result == "BOOT"
+
+
+# ── constants ────────────────────────────────────────────────
+
+class TestConstants:
+    """Pin the ioctl command constants so a future termios import
+    re-shuffle can't silently invalidate set_dtr."""
+
+    def test_tiocm_dtr_value(self):
+        # Linux TIOCM_DTR bit is 0x002 — part of the stable kernel
+        # ABI, not a derived constant.
+        assert hw_send.TIOCM_DTR == 0x002
+
+    def test_tiocmbis_and_tiocmbic_values(self):
+        # Linux _IOW('T', 22, int) / _IOW('T', 23, int). These are
+        # ABI-stable and the only reason to hardcode them here is
+        # that Python's termios module doesn't expose them.
+        assert hw_send.TIOCMBIS == 0x5416
+        assert hw_send.TIOCMBIC == 0x5417

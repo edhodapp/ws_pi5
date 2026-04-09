@@ -1,23 +1,4 @@
 [tool.mutmut]
-# Mutmut 3.x expects lists (previous 2.x took a single string).
-#
-# The source file and test file both live under scripts/, and
-# scripts/ is not a Python package (no __init__.py) — pytest adds
-# it to sys.path via rootdir discovery, so the test imports with
-# `from intel_hex import ...`. Mutmut derives a mangled function
-# name from the mutation path. If we point paths_to_mutate at
-# "scripts/intel_hex.py" from the project root, the mangled name
-# becomes "scripts.intel_hex.x_make_hex_record", but the test
-# hits the function as plain "intel_hex.x_make_hex_record" (since
-# that's how it imports). Those two strings don't match, so every
-# mutant reports "no tests".
-#
-# Fix: run mutmut from scripts/ as the cwd so the mutation path
-# and the test's import path both resolve to "intel_hex". We keep
-# the project-level pyproject.toml pointing at scripts/ purely as
-# documentation; the scripts/pyproject.toml is the active config
-# the mutmut runner uses (invoke from scripts/).
-paths_to_mutate = ["scripts/intel_hex.py"]
-tests_dir = ["scripts/"]
-also_copy = ["scripts/test_intel_hex.py"]
+paths_to_mutate = "scripts/intel_hex.py"
+tests_dir = "scripts/"
 runner = ".venv/bin/python -m pytest -x -q scripts/test_intel_hex.py"
