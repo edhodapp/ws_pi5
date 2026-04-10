@@ -15,6 +15,7 @@
 .global net_ntp_ip
 .global net_gw_mac
 .global net_gw_mac_valid
+.global net_hw_csum_tx
 
 .section .rodata
 
@@ -60,4 +61,24 @@ net_gw_mac:
     .space  6                           /* filled by ARP passive learning */
     .balign 4
 net_gw_mac_valid:
+    .word   0
+
+/* Hardware TX checksum offload flag.
+ *
+ * 0 (default) = software L4 checksum in lib/icmp.S, lib/udp.S, lib/tcp.S
+ * 1           = hardware L4 checksum insertion by the NIC
+ *
+ * When set to 1, protocol handlers skip the L4 checksum computation
+ * and write 0 (or the pseudo-header sum for TCP/UDP) into the
+ * checksum field. The platform driver (e.g. genet_send) fills in
+ * the correct value via DMA-time checksum offload.
+ *
+ * IP header checksum (20 bytes) is always computed in software
+ * regardless of this flag — it's ~50 ns and no NIC we target
+ * offloads it on the TX side.
+ *
+ * Set by platform init code (e.g. main.S after genet_init succeeds
+ * and TBUF_64B_EN is enabled). QEMU builds leave this at 0. */
+.balign 4
+net_hw_csum_tx:
     .word   0

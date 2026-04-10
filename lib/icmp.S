@@ -226,11 +226,16 @@ icmp_send_error:
     b       .Lise_copy
 .Lise_copy_done:
 
-    /* Compute ICMP checksum over 36 bytes (8 hdr + 28 payload) */
+    /* Compute ICMP checksum over 36 bytes (8 hdr + 28 payload),
+     * or leave zeroed for HW offload. */
+    ldr     x0, =net_hw_csum_tx
+    ldr     w0, [x0]
+    cbnz    w0, .Lise_skip_l4_csum
     add     x0, x24, #(ETH_PAYLOAD + IP_HDR_MIN)
     mov     w1, #36
     bl      ip_checksum
     strh    w0, [x24, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+.Lise_skip_l4_csum:
 
     /* Send: send_fn(dwc2_base, ecm_state, tx_buf, 70) */
     ldr     x5, [x23, #ICMPC_SEND_FN]
@@ -321,12 +326,16 @@ icmp_handle:
     /* 4. Set ICMP type = echo reply (0) */
     strb    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
 
-    /* 5. Recompute ICMP checksum */
+    /* 5. Recompute ICMP checksum (or zero for HW offload) */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+    ldr     x0, =net_hw_csum_tx
+    ldr     w0, [x0]
+    cbnz    w0, .Licmp_skip_l4_csum
     add     x0, x19, #(ETH_PAYLOAD + IP_HDR_MIN)
     mov     w1, w21
     bl      ip_checksum
     strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CHECKSUM)]
+.Licmp_skip_l4_csum:
 
     /* 6. Recompute IP checksum */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]

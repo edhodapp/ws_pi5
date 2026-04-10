@@ -177,8 +177,15 @@ udp_handle:
     strh    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_SPORT)]
     strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_DPORT)]
 
-    /* 5. Recompute UDP checksum */
+    /* 5. Recompute UDP checksum (or leave zeroed for HW offload).
+     *    For HW offload: the GENET computes the pseudo-header +
+     *    payload checksum in hardware. We write 0 ("not computed")
+     *    which is RFC 768-legal for IPv4 UDP, and the HW replaces
+     *    it with the correct value during DMA. */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_CHECKSUM)]
+    ldr     x0, =net_hw_csum_tx
+    ldr     w0, [x0]
+    cbnz    w0, .Ludp_skip_l4_csum
     mov     x0, x19
     mov     w1, w21
     bl      udp_checksum
@@ -187,6 +194,7 @@ udp_handle:
     csinv   w0, w0, wzr, ne
     uxth    w0, w0
     strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_CHECKSUM)]
+.Ludp_skip_l4_csum:
 
     /* 6. Recompute IP checksum */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
