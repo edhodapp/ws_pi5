@@ -529,6 +529,7 @@ The chainload + test cycle is fast enough for tight iteration: `make PLATFORM=pi
 |------|-----------|
 | No Nagle algorithm | HTTP servers disable Nagle anyway |
 | No IP options parsing | Deliberately rejected (VER_IHL == 0x45 only) |
+| Martian source filter — partial | Three checks (zero, 127/8, self); remaining RFC 6890 ranges deliberately omitted — see below |
 | 4-slot reassembly limit | Intentional resource constraint for bare-metal |
 | Reassembly ceiling = 1480 B, not 2048 | In-place rebuild into the 1514 B frame buffer — see below |
 | Single-entry ARP cache | We only talk to the gateway |
@@ -589,6 +590,47 @@ in the final `test_l3_frag.py`. The fix also lives as a
 multi-page DESIGN NOTE at the top of the reassembly constant
 block in `include/net.inc` so future work can't be surprised
 by it the way the L3 cycle was.
+
+### Martian source filter: partial coverage by design
+
+`lib/ip.S::ip_handle` filters three classes of "never valid on
+the wire" source IP addresses:
+
+| Check | What it catches |
+|---|---|
+| `src == 0.0.0.0` | Zero-source spoofing (DHCP DISCOVER is the only legitimate zero-source; ws_pi5 doesn't do DHCP) |
+| `src in 127.0.0.0/8` | Loopback (first-octet mask, covers the full /8 — verified by unit tests at both 127.0.0.1 and 127.255.255.254) |
+| `src == net_our_ip` | Self-spoof (forged frame claiming to be from us) |
+
+These three cover the **most common attack vectors** for a
+single-host direct-cable deployment: zero-source SYN floods,
+loopback spoofing, and self-spoof reflection.
+
+**Deliberately not filtered** (scope decision, not oversight):
+
+| Range | Why omitted |
+|---|---|
+| `0.0.0.0/8` (beyond `.0.0.0`) | Only the exact zero address is checked. The rest of `0/8` ("this network") is theoretically invalid as source but never appears in practice. |
+| `169.254.0.0/16` | Link-local. Only shows up if the laptop loses its static IP config. Not a realistic vector on the demo rig. |
+| `224.0.0.0/4` | Multicast as source (RFC 1112 forbids). Would require a malicious or broken sender. |
+| `240.0.0.0/4` | Reserved / "Class E". Never assigned, never valid. |
+| `255.255.255.255` | Broadcast as source. Nonsense on the wire. |
+
+Each additional check costs ~2 instructions (~4 ns per frame
+on the A72). The full RFC 6890 filter would be 7–8 checks
+instead of 3. On a production internet-facing deployment that
+extra coverage is worthwhile; on the demo Pi 4 direct-cable
+setup, the omitted ranges are noise that would never appear in
+legitimate traffic and would require a deliberately malicious
+sender to exercise.
+
+**For derivatives:** if you fork ws_pi5 to face the open
+internet, expand the filter to cover the full RFC 6890 list.
+The existing test infrastructure (`test_ip_handle_martian_src_*`
+in `tests/test_ip.S` plus `TestMartianSourceDropped` in
+`hw_test/test_l3_malformed_ip.py`) provides the pattern — add
+a data frame, add a test, flip the assertion from "accepted" to
+"dropped."
 
 ### Cache-line alignment: considered, rejected
 

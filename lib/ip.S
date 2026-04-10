@@ -124,6 +124,20 @@ ip_handle:
      *      7b. src in 127.0.0.0/8      (loopback)
      *      7c. src == net_our_ip       (self-spoof)
      *
+     *    DELIBERATELY NOT FILTERED (scope decision, not oversight):
+     *      * 0.0.0.0/8 (we only check the exact zero address, not
+     *        0.1.2.3 etc. — the rest of 0/8 is theoretical)
+     *      * 169.254.0.0/16 (link-local)
+     *      * 224.0.0.0/4 (multicast as source — RFC 1112 forbids)
+     *      * 240.0.0.0/4 (reserved / "Class E")
+     *      * 255.255.255.255 (broadcast as source)
+     *    The three checks above cover the most common attack
+     *    vectors on a single-host direct-cable deployment. The
+     *    remaining RFC 6890 ranges are increasingly exotic and
+     *    each would add ~2 instructions. Derivatives targeting
+     *    internet-facing deployments should expand the filter.
+     *    See README "Design Decisions" for rationale.
+     *
      *    w2 = src IP in wire (NBO) order, kept for the three tests.
      *    All comparisons are wire-format against NBO literals, no
      *    byte-swap required.
