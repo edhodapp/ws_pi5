@@ -104,6 +104,7 @@ _start:
 
     bl      test_tcp_functional
     bl      test_tcp_func_handcrafted
+    bl      test_reasm_functional
 
     /* Print summary */
     ldr     x0, =fail_count

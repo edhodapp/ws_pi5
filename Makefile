@@ -122,7 +122,7 @@ TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
 
 FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
-    $(BUILD)/test_tcp_func_hand.o \
+    $(BUILD)/test_tcp_func_hand.o $(BUILD)/test_reasm_func.o \
     $(BUILD)/test_uart.o $(BUILD)/tcp.o $(BUILD)/ip.o $(BUILD)/ip_reasm.o \
     $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/icmp.o $(BUILD)/udp.o \
     $(BUILD)/net_cfg.o $(BUILD)/net.o $(BUILD)/timer_hw.o \
@@ -408,4 +408,13 @@ $(BUILD)/test_tcp_func.o: tests/test_tcp_func.S $(BUILD)/tcp_vectors.bin include
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_tcp_func_hand.o: tests/test_tcp_func_hand.S include/tcp.inc include/net.inc include/timer.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/reasm_vectors.tsv: tests/func/reasm_func.pict | $(BUILD)
+	timeout 120 pict $< /o:max > $@
+
+$(BUILD)/reasm_vectors.bin: $(BUILD)/reasm_vectors.tsv scripts/reasm_oracle.py
+	python3 scripts/reasm_oracle.py < $< > $@
+
+$(BUILD)/test_reasm_func.o: tests/test_reasm_func.S $(BUILD)/reasm_vectors.bin include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@

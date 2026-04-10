@@ -1,0 +1,46 @@
+slot_state:  empty, first_half, second_half, near_complete
+frag_offset: 0, 200, 400
+payload_len: 8, 100, 200
+mf_flag:     0, 1
+pool_free:   yes, no
+
+# ---------------------------------------------------------------
+# Parameters for ip_reasm_input state-machine testing.
+#
+# slot_state: pre-seeded condition of the matching reassembly slot.
+#   empty         — no active slot for this flow (key unmatched)
+#   first_half    — bits 0..49 set (bytes 0-399), no have_last
+#   second_half   — bits 50..99 set (bytes 400-799), have_last=1,
+#                   total_len=800
+#   near_complete — bits 0..49 + 75..99 set, gap at 50..74
+#                   (bytes 400-599), have_last=1, total_len=800
+#
+# frag_offset: byte offset of the incoming fragment (multiple of 8).
+#
+# payload_len: fragment payload length in bytes.
+#   8, 200, 400 are multiples of 8 (valid for MF=1).
+#   100 is NOT a multiple of 8 — triggers the non-alignment
+#   drop when MF=1.
+#
+# mf_flag: 0 = last fragment, 1 = more fragments.
+#
+# pool_free: whether at least one reasm slot is available.
+#   yes — at least one free slot (for new-flow allocation)
+#   no  — all 4 slots occupied with different keys
+#
+# The oracle (scripts/reasm_oracle.py) computes the expected
+# outcome for each combination: drop reason, post-slot state,
+# post-bitmap, whether completion triggers.
+# ---------------------------------------------------------------
+
+# Constraints:
+#
+# Non-aligned (MF=1 + len=100) is a well-defined drop reason on
+# its own. Pin other params to a canonical case so PICT doesn't
+# over-generate redundant non-aligned combos.
+IF [mf_flag] = 1 AND [payload_len] = 100 THEN [slot_state] = "empty" AND [frag_offset] = 0 AND [pool_free] = "yes";
+
+# pool_free=no only matters for empty slots (slot search fails).
+# For non-empty slots the matching slot is always found regardless
+# of pool pressure. Pin to avoid redundant combos.
+IF [pool_free] = "no" AND [slot_state] = "empty" THEN [frag_offset] = 0 AND [payload_len] = 8 AND [mf_flag] = 1;
