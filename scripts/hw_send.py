@@ -84,14 +84,13 @@ def open_serial(path):
 def read_line(fd, timeout=10):
     """Read until \\n with timeout. Returns decoded stripped string.
 
-    Uses VMIN=0 + VTIME=timeout: the read(2) call returns either
-    when at least one byte is available, or when the inter-byte
-    timer expires — which also fires as the initial-byte timeout
-    because VMIN is zero. Earlier versions of this function set
-    VMIN=1, which makes read(2) block indefinitely waiting for the
-    first byte regardless of VTIME, so a silent chainloader would
-    hang forever instead of returning an empty string. That bug
-    was caught in the Gemini review of commit 2a2b6cf (HIGH).
+    Uses VMIN=0 + VTIME=timeout. With VMIN=0, read(2) returns
+    either when at least one byte is available, or when VTIME
+    deciseconds have elapsed — which gives VTIME its "initial-
+    byte timeout" meaning and lets the deadline loop below fire
+    correctly on a quiet port. Do NOT set VMIN=1: that forces
+    read(2) to block for the first byte regardless of VTIME, so
+    a silent chainloader hangs this function forever.
 
     TCSANOW (not TCSADRAIN) because we are about to read, not
     write — waiting for the TX buffer to drain before applying
@@ -100,11 +99,10 @@ def read_line(fd, timeout=10):
     The VMIN/VTIME change is scoped to the body of this function:
     we snapshot the existing attrs at entry and restore them in a
     `finally` block. Without the restore, callers that read from
-    the same fd after read_line returns inherit VMIN=0 and any
-    subsequent os.read returns b'' immediately on a quiet port,
-    causing the kernel-output display loop in main() to busy-spin
-    at 100% CPU. Gemini flagged this in the review of commit
-    4e49b9c (MEDIUM); the fix is local to this function.
+    the same fd after read_line returns inherit VMIN=0, and their
+    os.read returns b'' immediately on a quiet port — which in
+    main()'s kernel-output display loop means busy-spinning at
+    100% CPU. Keep the save/restore local to this function.
     """
     saved = termios.tcgetattr(fd)
     # Build a new attrs list with our transient VMIN/VTIME, leaving
@@ -314,7 +312,21 @@ def main():
     print(f"HEX: {len(records)} records", flush=True)
 
     fd = open_serial(port_path)
+    try:
+        return _flash_and_monitor(fd, records)
+    finally:
+        os.close(fd)
 
+
+def _flash_and_monitor(fd, records):
+    """Body of main() after the serial port is open.
+
+    Split out so main() can wrap this in a try/finally that
+    guarantees os.close(fd) on every exit path — including
+    KeyboardInterrupt mid-loop and any unexpected exception.
+    Prior versions scattered `os.close(fd); return 1` across
+    every error branch and leaked the fd on KeyboardInterrupt.
+    """
     # DTR reset
     print("DTR reset...", flush=True)
     set_dtr(fd, True)
@@ -322,16 +334,23 @@ def main():
     set_dtr(fd, False)
     termios.tcflush(fd, termios.TCIFLUSH)
 
-    # Wait for READY
-    while True:
-        line = read_line(fd, timeout=10)
+    # Wait for READY with a TOTAL deadline rather than per-line
+    # timeout. The Pi emits stray `\r\n` pairs during early boot
+    # before the chainloader prints its banner, and read_line
+    # returns "" for both empty lines and true silence — so an
+    # `if not line: abort` check cannot distinguish them and used
+    # to trip on the first blank line. Looping until we see
+    # "READY" (or run out of total time) skips blank lines
+    # naturally and aborts only on genuine silence.
+    ready_deadline = time.time() + 15
+    while time.time() < ready_deadline:
+        line = read_line(fd, timeout=3)
         if "READY" in line:
             print("READY", flush=True)
             break
-        if not line:
-            print("Timeout waiting for READY", flush=True)
-            os.close(fd)
-            return 1
+    else:
+        print("Timeout waiting for READY", flush=True)
+        return 1
 
     # Send records — 2-byte ACK: line length + checksum byte
     attrs = termios.tcgetattr(fd)
@@ -343,11 +362,10 @@ def main():
     for i, record in enumerate(records):
         expected = int(record[-2:], 16)
         os.write(fd, (record + '\r\n').encode('ascii'))
-        # NOTE: no termios.tcdrain(fd) here — the protocol is
-        # synchronous (we block on the 2-byte ACK below before the
-        # next os.write), so draining the TX buffer explicitly is
-        # dead weight. Removed in the Gemini-review follow-up;
-        # the ACK-wait provides all the back-pressure we need.
+        # The protocol is synchronous — we block on the 2-byte ACK
+        # below before the next os.write — so the ACK round-trip
+        # provides all the back-pressure we need. An explicit
+        # termios.tcdrain() here would be dead weight.
         ack = b''
         deadline = time.time() + 5
         while len(ack) < 2 and time.time() < deadline:
@@ -356,7 +374,6 @@ def main():
                 ack += chunk
         if len(ack) != 2:
             print(f"\n  Timeout on record {i}", flush=True)
-            os.close(fd)
             return 1
         line_len, cksum = ack[0], ack[1]
         if cksum == expected:
@@ -364,13 +381,11 @@ def main():
         elif cksum == (expected ^ 0xFF):
             print(f"\n  NAK on record {i} (len={line_len})",
                   flush=True)
-            os.close(fd)
             return 1
         else:
             print(f"\n  MISMATCH at record {i}: "
                   f"exp=0x{expected:02X} got=0x{cksum:02X} "
                   f"len={line_len}", flush=True)
-            os.close(fd)
             return 1
         if i % 200 == 0:
             print(f"\r  {i}/{len(records)}", end='', flush=True)
@@ -384,7 +399,6 @@ def main():
     print(f"  {line}", flush=True)
     if not line.startswith("BOOT"):
         print("No BOOT", flush=True)
-        os.close(fd)
         return 1
 
     # Kernel output — explicitly re-enter blocking single-byte mode.
@@ -392,11 +406,9 @@ def main():
     # VMIN=1 + VTIME=0 means read(2) blocks until at least one byte
     # arrives (no initial timeout, no inter-byte timer). This is the
     # canonical "live console display" mode. We set it explicitly
-    # instead of inheriting from whatever read_line or the record-
-    # send loop left on the port — read_line restores its own state
-    # now, but the record-send loop still leaves VMIN=0/VTIME=50,
-    # which would make the display loop busy-spin on empty reads.
-    # Gemini flagged this in commit 4e49b9c (MEDIUM).
+    # because the record-send loop above leaves VMIN=0/VTIME=50 on
+    # the port; without this reset the display loop would return
+    # b'' immediately on any empty buffer and busy-spin at 100% CPU.
     attrs = termios.tcgetattr(fd)
     attrs[6][termios.VMIN] = 1
     attrs[6][termios.VTIME] = 0
@@ -420,7 +432,6 @@ def main():
     except KeyboardInterrupt:
         print("\n--- Done ---", flush=True)
 
-    os.close(fd)
     return 0
 
 
