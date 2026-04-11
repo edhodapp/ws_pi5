@@ -42,6 +42,21 @@ from intel_hex import kernel_to_hex_records  # noqa: E402
 # generous.
 _STALE_QUIESCE_SECONDS = 0.3
 
+# Hard cap on read_line's accumulator, in bytes. The chainloader's
+# cl_getline caps its own buffer at 78 characters, so any reasonable
+# line fits comfortably in 1 KiB; anything longer is protocol abuse
+# or hostile input. Capping prevents a runaway stream of bytes
+# without a newline from growing read_line's buffer unboundedly.
+_READ_LINE_MAX_BYTES = 1024
+
+# Kernel-output display chunk size. VMIN=1 guarantees os.read
+# returns as soon as at least one byte is available, so reading up
+# to 4 KiB per syscall still preserves live-feel but drains any
+# burst the UART driver has buffered in one go (cp210x FIFOs hold
+# up to 64 bytes, xHCI URBs deliver multi-byte chunks), trading
+# ~11 kHz syscall rate at 115200 baud for ~few hundred Hz.
+_KERNEL_READ_CHUNK = 4096
+
 TIOCM_DTR = 0x002
 TIOCMBIS = 0x5416
 TIOCMBIC = 0x5417
@@ -118,6 +133,20 @@ def read_line(fd, timeout=10):
     os.read returns b'' immediately on a quiet port — which in
     main()'s kernel-output display loop means busy-spinning at
     100% CPU. Keep the save/restore local to this function.
+
+    Buffer cap: reads stop at `_READ_LINE_MAX_BYTES` even without
+    a newline, to prevent runaway byte streams (a misbehaving or
+    malicious chainloader) from growing `buf` without bound.
+
+    Timeout vs VTIME caveat: VTIME is a uint8 of deciseconds and
+    clamps to 255 (25.5 s). If the caller passes a `timeout`
+    larger than 25.5 s, a single read(2) call can return b'' after
+    VTIME expires even though wall-clock time is less than
+    `deadline` — and because `if not b: break` treats that as an
+    end-of-stream signal, read_line actually returns after ~25.5 s.
+    All current callers use ≤10 s timeouts, so this is dead code
+    in practice; fix it by replacing `break` with deadline-aware
+    retry if a future caller needs longer timeouts.
     """
     saved = termios.tcgetattr(fd)
     # Build a new attrs list with our transient VMIN/VTIME, leaving
@@ -139,6 +168,10 @@ def read_line(fd, timeout=10):
                 break
             buf += b
             if b == b'\n':
+                break
+            if len(buf) >= _READ_LINE_MAX_BYTES:
+                # Runaway stream without a newline — return what
+                # we have rather than grow the buffer indefinitely.
                 break
         return buf.decode('ascii', errors='ignore').strip()
     finally:
@@ -418,6 +451,19 @@ def _flash_and_monitor(fd, records):
                 return 1
             ack += chunk
         line_len, cksum = ack[0], ack[1]
+        # Validate line_len. The chainloader's cl_getline counts
+        # bytes *excluding* \r and \n and tops out at 78 (see
+        # chainload/boot.S); our `record` string likewise excludes
+        # CRLF (we append \r\n at os.write time), so the two must
+        # match exactly for an undamaged ACK. A mismatch here
+        # catches framing errors the checksum alone would miss,
+        # e.g. a dropped byte that shifts the remainder of the
+        # record but happens to sum to the same checksum.
+        if line_len != len(record):
+            print(f"\n  LEN MISMATCH at record {i}: "
+                  f"sent {len(record)}, chainloader echoed "
+                  f"{line_len}", flush=True)
+            return 1
         if cksum == expected:
             pass  # ACK
         elif cksum == (expected ^ 0xFF):
@@ -466,11 +512,18 @@ def _flash_and_monitor(fd, records):
     try:
         while True:
             try:
-                b = os.read(fd, 1)
+                # VMIN=1 guarantees read(2) returns as soon as ≥1
+                # byte arrives, so asking for up to 4 KiB does not
+                # delay the live-feel of the console display — it
+                # just drains whatever burst the UART driver has
+                # buffered in a single syscall. At 115200 baud
+                # that trades ~11 kHz syscall rate (1-byte reads)
+                # for ~few hundred Hz.
+                chunk = os.read(fd, _KERNEL_READ_CHUNK)
             except OSError as exc:
                 print(f"\n--- Serial error: {exc} ---", flush=True)
                 break
-            if not b:
+            if not chunk:
                 # With VMIN=1 this should only happen on EOF
                 # (e.g. cp210x unplugged); treat as clean exit.
                 print("\n--- EOF on serial port ---", flush=True)
@@ -478,11 +531,11 @@ def _flash_and_monitor(fd, records):
             # Write raw bytes straight to stdout's underlying
             # buffer so the host terminal emulator decides the
             # encoding. Earlier revisions used
-            # b.decode('ascii', errors='replace') which turned
+            # chunk.decode('ascii', errors='replace') which turned
             # every non-ASCII byte into '?' — fine for our
             # assembly kernel today but hostile to any future
             # UTF-8 log output or TUI escape sequences.
-            sys.stdout.buffer.write(b)
+            sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
     except KeyboardInterrupt:
         print("\n--- Done ---", flush=True)

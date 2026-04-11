@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # pylint: disable=missing-class-docstring,import-outside-toplevel
-# pylint: disable=unused-argument
+# pylint: disable=unused-argument,protected-access
 # mypy: ignore-errors
 #
 # Test-file pylint exemptions: pytest test methods and helpers
@@ -339,6 +339,43 @@ class TestReadLine:
         assert when == _t.TCSANOW, (
             f"read_line must use TCSANOW, not {when}"
         )
+
+    def test_read_line_caps_buffer_at_max_bytes(self):
+        """A runaway stream of non-newline bytes must stop at
+        _READ_LINE_MAX_BYTES instead of growing indefinitely.
+
+        This is a defensive check against a misbehaving or
+        hostile chainloader that emits an unbounded stream of
+        non-newline characters. Without a cap, buf grows by one
+        byte per os.read until wall-clock deadline or memory
+        pressure — neither is a clean failure mode.
+        """
+        cap = hw_send._READ_LINE_MAX_BYTES
+        # Generate cap + 50 filler bytes, none a newline. The
+        # cap-th byte is where read_line should bail; everything
+        # after it must not be appended.
+        filler = [bytes([0x41 + (j % 26)]) for j in range(cap + 50)]
+        # Time sequence: 1 for initial deadline + N for each loop
+        # iteration's `time.time() < deadline` check. Keep the
+        # clock well under `deadline` so the cap is the only
+        # thing that can terminate the loop.
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=filler,
+            times=[0.0] + [0.01] * (cap + 50),
+        )
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            result = hw_send.read_line(fd=10, timeout=1.0)
+        # We should have seen exactly `cap` bytes consumed from
+        # os.read — no more. Any further draining of the mock
+        # would indicate the cap did not fire.
+        assert read_mock.call_count == cap, (
+            f"read_line consumed {read_mock.call_count} bytes; "
+            f"expected exactly {cap} (the cap)"
+        )
+        assert len(result) == cap
 
     def test_non_ascii_bytes_ignored_in_decode(self):
         """The decode uses errors='ignore', so a stray high-bit
