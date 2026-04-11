@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
+# pylint: disable=inconsistent-quotes,wrong-import-position
+# mypy: ignore-errors
+#
+# - inconsistent-quotes: original code uses single-quoted byte literals
+#   (b'\\n') and small strings; newer additions use double quotes. This
+#   is a style mismatch, not a correctness issue, and is not worth a
+#   mechanical rewrite of the whole file.
+# - wrong-import-position: `from intel_hex import ...` must come after
+#   sys.path.insert so a bare `python3 scripts/hw_send.py` can find it.
+# - mypy: ignore-errors: this module pre-dates the type-annotation push
+#   (existing helpers like set_dtr/open_serial/read_line have no
+#   annotations); a dedicated typing commit will migrate the whole
+#   scripts/ tree at once rather than piecemeal here.
 """Send a kernel to the Pi 4 chainloader using Intel HEX over UART0.
 
 Protocol:
   1. Chainloader prints "READY\\r\\n" when initialized
   2. Host sends Intel HEX records (\\r\\n terminated)
-  3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK (line_len + cksum^0xFF)
+  3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK
+     (line_len + cksum^0xFF)
   4. After EOF ACK: chainloader sends BOOT:NNNN\\r\\n, jumps to kernel
   5. Host resets Pi via DTR (GLOBAL_EN) when needed
 
@@ -13,6 +27,7 @@ Usage: python3 hw_send.py <kernel.img> [serial_port]
 
 import fcntl
 import os
+import signal
 import struct
 import sys
 import termios
@@ -20,6 +35,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from intel_hex import kernel_to_hex_records  # noqa: E402
+
+# Wait time after SIGKILL before returning — lets the kernel release
+# held file descriptors (/dev/ttyUSB*, /proc state) so the next open()
+# sees a clean port. Measured empirically: 0.2s is reliable, 0.3s is
+# generous.
+_STALE_QUIESCE_SECONDS = 0.3
 
 TIOCM_DTR = 0x002
 TIOCMBIS = 0x5416
@@ -81,6 +102,168 @@ def read_line(fd, timeout=10):
     return buf.decode('ascii', errors='ignore').strip()
 
 
+def _read_proc_text(pid, name):
+    """Read /proc/<pid>/<name> as text, or return None if unreadable.
+
+    Returns an empty string for files that exist but are zero-length,
+    so callers can distinguish "file gone" (None) from "file empty".
+    """
+    try:
+        with open(f"/proc/{pid}/{name}", "rb") as fobj:
+            return fobj.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _proc_ancestors(pid):
+    """Return the set {pid, parent_pid, grandparent_pid, ...}.
+
+    Walks `/proc/<current>/status` up the PPid chain until PID 1
+    (init) or a cycle. This is how we avoid killing any process that
+    owns our current execution — including grandparent shells whose
+    `eval` strings happen to contain the cmdline needle we're
+    sweeping for. Only excluding `os.getppid()` is not enough: a
+    `bash -c '… python scripts/hw_send.py …'` wrapper is typically
+    our parent's parent, not our parent.
+    """
+    chain = set()
+    current = pid
+    while current > 1 and current not in chain:
+        chain.add(current)
+        status = _read_proc_text(current, "status")
+        if status is None:
+            break
+        next_ppid = 0
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                try:
+                    next_ppid = int(line.split(maxsplit=1)[1])
+                except (IndexError, ValueError):
+                    next_ppid = 0
+                break
+        if next_ppid <= 0:
+            break
+        current = next_ppid
+    return chain
+
+
+def _proc_matches(pid, matchers):
+    """True iff this pid's (comm, cmdline) matches any (comm_prefix, needle).
+
+    Two-part match is deliberate: `/proc/<pid>/comm` holds the
+    executable basename (truncated to 15 chars by the kernel), so
+    checking `comm.startswith("python")` distinguishes a real
+    python interpreter from `vim scripts/hw_send.py` (comm="vim")
+    or `grep hw_send.py …` (comm="grep"). The cmdline needle then
+    narrows to the script we actually care about. `pgrep -f` does
+    only the cmdline half and over-matches badly.
+    """
+    comm_raw = _read_proc_text(pid, "comm")
+    if comm_raw is None:
+        return False
+    comm = comm_raw.rstrip("\n")
+    cmdline_raw = _read_proc_text(pid, "cmdline")
+    if cmdline_raw is None:
+        return False
+    # /proc/<pid>/cmdline separates argv elements with NUL; join with
+    # spaces for human-readable substring matching.
+    cmdline = cmdline_raw.replace("\0", " ")
+    for comm_prefix, cmdline_needle in matchers:
+        if comm.startswith(comm_prefix) and cmdline_needle in cmdline:
+            return True
+    return False
+
+
+def kill_stale_by_matchers(matchers, quiet=False):
+    """Sweep /proc and SIGKILL processes matching (comm_prefix, needle).
+
+    Returns the count killed.
+
+    **Why this exists:** hw_send.py enters a "Kernel output" console
+    mode after flashing and holds `/dev/ttyUSB*` open indefinitely.
+    A backgrounded or disowned prior invocation steals the ACK bytes
+    from the next flash and makes a working kernel look broken. QEMU
+    instances from prior `make test` runs also linger and chew CPU.
+    Ed's standing rule is to sweep at both ends of every hw run —
+    this helper is the single source of truth for *how* to sweep.
+
+    **Robustness properties:**
+
+    1. **Enumerates via /proc directly**, not via `pgrep -f`. No
+       shell-out, no pgrep flags to get wrong, no race between
+       pgrep's snapshot and our iteration.
+    2. **Two-part match** (comm prefix + cmdline substring). A
+       matcher of `("python", "hw_send.py")` only kills real python
+       interpreters running hw_send.py — it never touches
+       `vim scripts/hw_send.py` or `less hw_send.py`.
+    3. **Full ancestor-chain exclusion.** Walks PPid up /proc so any
+       grandparent (wrapping shell, pytest session, make invocation)
+       is safe even if its cmdline contains the needle.
+    4. **TOCTOU re-verification.** Between the initial match and the
+       SIGKILL, a target can exit and Linux can recycle the PID to
+       an unrelated process. We re-read /proc/<pid>/{comm,cmdline}
+       immediately before the kill and skip if the match no longer
+       holds. Closes (most of) the window; the residual race is
+       microseconds.
+    5. **Best-effort PermissionError handling.** If the process is
+       not ours to kill, we warn but do not fail; the caller's next
+       open_serial() will surface the contention if it matters.
+    """
+    excluded = _proc_ancestors(os.getpid())
+    killed = 0
+    try:
+        pid_entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    for entry in pid_entries:
+        try:
+            pid = int(entry)
+        except ValueError:
+            continue
+        if pid in excluded:
+            continue
+        if not _proc_matches(pid, matchers):
+            continue
+        # Re-verify immediately before the kill — TOCTOU protection.
+        # If the PID has been recycled into a non-matching process,
+        # this second check skips it.
+        if not _proc_matches(pid, matchers):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except ProcessLookupError:
+            pass  # already gone — fine
+        except PermissionError:
+            if not quiet:
+                print(
+                    f"  kill_stale: cannot kill pid {pid} "
+                    "(not owned by us)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    if killed and not quiet:
+        # Let the kernel release held file descriptors (/dev/ttyUSB*,
+        # listen sockets, etc.) before the caller's next open().
+        time.sleep(_STALE_QUIESCE_SECONDS)
+        print(
+            f"  kill_stale: terminated {killed} stale process(es)",
+            flush=True,
+        )
+    return killed
+
+
+# Matcher for our own flasher — used by main() below and by callers
+# (hw_test/conftest.py) who want to sweep for stale hw_send.py
+# instances specifically.
+HW_SEND_MATCHERS = (("python", "hw_send.py"),)
+
+
+def kill_stale_hw_send():
+    """Convenience wrapper: sweep for stale hw_send.py instances only."""
+    return kill_stale_by_matchers(HW_SEND_MATCHERS)
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port] [base_addr]")
@@ -89,6 +272,9 @@ def main():
     kernel_path = sys.argv[1]
     port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
     base_addr = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x200000
+
+    # Always clear stale hw_send processes before touching the port.
+    kill_stale_hw_send()
 
     with open(kernel_path, "rb") as fobj:
         kernel = fobj.read()

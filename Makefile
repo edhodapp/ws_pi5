@@ -137,7 +137,7 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4
 
 all: kernel8.img
 
@@ -147,8 +147,30 @@ kernel8.img: $(BUILD)/kernel8.elf
 $(BUILD)/kernel8.elf: $(KERNEL_OBJS) $(LINKER_SCRIPT)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
 
-# Test kernel
-test: $(BUILD)/test_kernel8.img scripts/run_tests.sh
+# ---------------------------------------------------------------------------
+# Test kernel — ALWAYS clean rebuild
+#
+# Make's timestamp-based dependency logic does NOT detect PLATFORM
+# flag changes. If a prior run built with `make PLATFORM=pi4`, every
+# .o in build/ was assembled with PLATFORM_PI4=1, and a subsequent
+# `make test` would happily reuse those Pi-4-addressed objects to
+# link a test kernel that crashes silently on raspi3b QEMU. We have
+# been burned by this trap repeatedly — enough that the standing
+# rule is: always clean first. The few seconds of a clean rebuild is
+# cheap insurance against a class of bugs that look exactly like
+# real failures.
+#
+# Why three recipe lines instead of `test: clean $(BUILD)/...`:
+# Make does not guarantee prerequisite evaluation order without
+# --serial; declaring `clean` as a prerequisite can let the image
+# link race against the clean under `-j`. Calling `$(MAKE) clean`
+# and `$(MAKE) build/test_kernel8.img` as sequential recipe lines
+# forces strict ordering within this target regardless of -j.
+# (Top-level parallelism across unrelated targets is unaffected.)
+# ---------------------------------------------------------------------------
+test:
+	$(MAKE) clean
+	$(MAKE) $(BUILD)/test_kernel8.img
 	bash scripts/run_tests.sh
 
 $(BUILD)/test_kernel8.img: $(BUILD)/test_kernel8.elf
@@ -157,9 +179,35 @@ $(BUILD)/test_kernel8.img: $(BUILD)/test_kernel8.elf
 $(BUILD)/test_kernel8.elf: $(TEST_OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(TEST_OBJS) -o $@
 
-# Functional test kernel
-test-functional: $(BUILD)/func_kernel8.img scripts/run_func_tests.sh
+# Functional test kernel — ALWAYS clean rebuild (see `test` above)
+test-functional:
+	$(MAKE) clean
+	$(MAKE) $(BUILD)/func_kernel8.img
 	bash scripts/run_func_tests.sh
+
+# ---------------------------------------------------------------------------
+# flash-pi4 — atomic "clean, build for Pi 4, flash" entry point.
+#
+# The only supported way to get a fresh kernel onto the hardware.
+# Running `make PLATFORM=pi4` by hand and then flashing manually is
+# fine when you know what you're doing, but this target exists so
+# the happy path never forgets `make clean`. Uses the project venv
+# so hw_send.py gets the correct pyserial/termios behavior.
+#
+# The `.venv` guard runs FIRST so a missing venv fails fast, before
+# we've wiped build/ with `make clean`. Otherwise a first-time user
+# with no venv would lose their existing build artifacts to the
+# clean and then hit a cryptic "not found" error.
+# ---------------------------------------------------------------------------
+flash-pi4:
+	@test -x .venv/bin/python || { \
+	  echo "flash-pi4: .venv/bin/python not found — create the project venv first"; \
+	  echo "  (python3 -m venv .venv && .venv/bin/pip install -r requirements.txt)"; \
+	  exit 1; \
+	}
+	$(MAKE) clean
+	$(MAKE) PLATFORM=pi4
+	.venv/bin/python scripts/hw_send.py kernel8.img
 
 $(BUILD)/func_kernel8.img: $(BUILD)/func_kernel8.elf
 	$(OBJCOPY) -O binary $< $@

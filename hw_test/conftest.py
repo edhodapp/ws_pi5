@@ -10,11 +10,30 @@ Provides fixtures for:
   - Skip markers when hardware is not connected
 """
 
+# pylint: disable=redefined-outer-name,unused-argument,invalid-name
+# pylint: disable=import-outside-toplevel,unnecessary-dunder-call
+# pylint: disable=wrong-import-position
+# mypy: ignore-errors
+#
+# Pytest fixtures legitimately "redefine" outer-scope names (fixture
+# dependency injection), accept unused request/call/eth_iface args
+# (fixture dependencies), and sometimes import lazily to avoid hard
+# dependencies (pyserial is optional). ALL_CAPS local constants
+# inside a fixture body are idiomatic for "configuration knob that
+# isn't part of the public API". The `__enter__` / `__exit__` calls
+# in `wire_capture` are deliberate because the context manager is
+# split across a yield boundary. These are all pytest patterns that
+# Google pylintrc flags but we accept; they are not bugs. The
+# `mypy: ignore-errors` marker acknowledges that this file (and the
+# hw_test/ Python helpers it imports) pre-dates the type-annotation
+# push and will be migrated incrementally in a dedicated commit.
+
 import os
 import shutil
 import socket
 import statistics
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -23,6 +42,13 @@ import pytest
 import eth_frames
 import link
 import wire
+
+# scripts/ is not on the default pytest path; extend sys.path so we
+# can import the shared kill_stale_by_matchers helper from there.
+# Must appear after the other top-level imports or flake8/pylint
+# complain about the ordering relative to sys.path.insert.
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+from hw_send import kill_stale_by_matchers  # noqa: E402
 
 # --- Configuration (override via environment) ---
 
@@ -36,8 +62,8 @@ TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "5"))
 # --- L2 framework configuration ---
 
 HW_TEST_IFACE = os.environ.get("HW_TEST_IFACE", "enx00e04c0a2bed")
-LAPTOP_IP     = os.environ.get("LAPTOP_IP", "10.0.0.1")
-PI4_MAC_HINT  = os.environ.get("PI4_MAC", "")  # optional override
+LAPTOP_IP = os.environ.get("LAPTOP_IP", "10.0.0.1")
+PI4_MAC_HINT = os.environ.get("PI4_MAC", "")  # optional override
 
 # 5.3s observed first-output after DTR release + 1.7s margin for
 # kernel init through GENET-up. Bound for boot-then-ARP-reachable.
@@ -80,7 +106,7 @@ def is_pi4_pingable():
     try:
         result = subprocess.run(
             ["ping", "-c", "1", "-W", "2", PI4_IP],
-            capture_output=True, timeout=5
+            capture_output=True, timeout=5, check=False,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -229,7 +255,7 @@ def _ensure_rx_ring_max(iface: str) -> None:
     try:
         out = subprocess.run(
             ["ethtool", "-g", iface],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, check=False,
         ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         print(f"\n[L2] WARNING: cannot read RX ring on {iface} via ethtool")
@@ -337,7 +363,8 @@ def rtt_p99_ms(eth_iface, laptop_mac, laptop_ip) -> float:
 
     with wire.RawL2Socket(eth_iface) as sock:
         deadline = time.monotonic() + 20.0  # 20s budget total
-        while len(samples_ms) < RTT_SAMPLE_COUNT and time.monotonic() < deadline:
+        while (len(samples_ms) < RTT_SAMPLE_COUNT
+               and time.monotonic() < deadline):
             sock.drain()  # discard any straggler frames between probes
             t0 = time.monotonic()
             sock.send(request)
@@ -415,7 +442,8 @@ def wire_capture(request, eth_iface):
                 f"{int(time.monotonic_ns() // 1_000_000)}.pcap"
             )
             # Sanitize: replace path separators and brackets in nodeid
-            unique = unique.replace("/", "_").replace("[", "_").replace("]", "")
+            unique = (unique.replace("/", "_")
+                      .replace("[", "_").replace("]", ""))
             dst = ARTIFACTS_DIR / unique
             try:
                 shutil.copy2(cap.pcap_path, dst)
@@ -515,6 +543,56 @@ def link_session_finalizer(request):
         )
 
 
+# ============================================================
+# Stale hardware-process sweep — runs before AND after every session
+# ============================================================
+#
+# Ed's standing rule: every hw run must check for stale processes on
+# BOTH ends. Stale hw_send.py holds /dev/ttyUSB* and steals ACK bytes
+# from the next flash; stale QEMU instances chew CPU in the
+# background. The sweep at session start catches leakage from prior
+# aborted runs; the sweep at session end catches leakage from this
+# run's fixtures.
+#
+# The matcher tuples are (comm_prefix, cmdline_needle) — see
+# hw_send.kill_stale_by_matchers() for the matching semantics.
+# /proc/<pid>/comm is truncated to 15 chars by the kernel, so
+# "qemu-system-aarch64" becomes "qemu-system-aar" in comm. The
+# cmdline needle is "" (empty string is always contained) because
+# the comm prefix is already specific enough.
+
+_HW_SWEEP_MATCHERS = (
+    ("python", "hw_send.py"),   # flasher console holding /dev/ttyUSB*
+    ("qemu-system-aar", ""),    # leftover QEMU from prior `make test`
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hw_stale_process_sweep():
+    """Guard rail: sweep stale hardware processes at session boundaries.
+
+    Autouse + session-scoped so it runs even when a single test is
+    selected with `-k` or node-id. Delegates to
+    `hw_send.kill_stale_by_matchers`, which handles the
+    /proc-enumeration, full ancestor-chain exclusion, and TOCTOU
+    re-verification in one place.
+    """
+    pre = kill_stale_by_matchers(_HW_SWEEP_MATCHERS)
+    if pre:
+        print(
+            f"\n[hw-sweep] pre-session: killed {pre} stale "
+            f"hardware process(es) — a prior run leaked them"
+        )
+    yield
+    post = kill_stale_by_matchers(_HW_SWEEP_MATCHERS)
+    if post:
+        print(
+            f"\n[hw-sweep] post-session: killed {post} stale "
+            f"hardware process(es) — a test fixture skipped its "
+            f"teardown path"
+        )
+
+
 # --- DUT reset (marker-triggered, opt-in) ---
 
 @pytest.fixture
@@ -528,9 +606,9 @@ def dut_reset(request, eth_iface, laptop_mac, laptop_ip):
     if request.node.get_closest_marker("dut_reset") is None:
         yield
         return
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-    from hw_send import open_serial, set_dtr  # type: ignore  # noqa: E402
+    # sys is already imported at module top; sys.path.insert was done
+    # there too, so the hw_send import here is a cheap re-import.
+    from hw_send import open_serial, set_dtr  # noqa: E402
 
     fd = open_serial(PI4_SERIAL)
     try:
