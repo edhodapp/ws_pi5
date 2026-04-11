@@ -299,6 +299,20 @@ def kill_stale_by_matchers(matchers, quiet=False):
 # Matcher for our own flasher — used by main() below and by callers
 # (hw_test/conftest.py) who want to sweep for stale hw_send.py
 # instances specifically.
+#
+# Design note (deliberate scope decision): this matches ANY python
+# process running hw_send.py system-wide, regardless of which
+# serial port it is targeting. That is intentional for the
+# single-Pi development setup Ed runs today: if any hw_send.py is
+# still alive when a new flash starts, it is either stale (port
+# holder from an aborted run) or about to contend for the same
+# port, and killing it unconditionally is always safe because
+# there is exactly one target device. For a future multi-Pi
+# setup the matcher would need to narrow to processes that hold
+# the specific port_path open (walk /proc/<pid>/fd/ and readlink
+# to the target device path) — revisit then. Code reviewers
+# have flagged this as "too broad" multiple times; it is not a
+# bug, it is a documented scope choice.
 HW_SEND_MATCHERS = (("python", "hw_send.py"),)
 
 
@@ -372,6 +386,16 @@ def _flash_and_monitor(fd, records):
     attrs[6][termios.VMIN] = 0
     attrs[6][termios.VTIME] = 50    # 5 second pure timeout
     termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+
+    # Flush any bytes the chainloader may have emitted after the
+    # READY banner but before we enter the synchronous record
+    # protocol. If the chainloader ever starts printing a second
+    # line (e.g. a version string or "ready to receive") that
+    # lands after we matched READY, those stale bytes would be
+    # misread as the ACK for the first record and the protocol
+    # would desync. Cheap insurance — TCIFLUSH only touches the
+    # input queue, not anything we care about.
+    termios.tcflush(fd, termios.TCIFLUSH)
 
     t_start = time.time()
     for i, record in enumerate(records):
@@ -451,8 +475,15 @@ def _flash_and_monitor(fd, records):
                 # (e.g. cp210x unplugged); treat as clean exit.
                 print("\n--- EOF on serial port ---", flush=True)
                 break
-            sys.stdout.write(b.decode('ascii', errors='replace'))
-            sys.stdout.flush()
+            # Write raw bytes straight to stdout's underlying
+            # buffer so the host terminal emulator decides the
+            # encoding. Earlier revisions used
+            # b.decode('ascii', errors='replace') which turned
+            # every non-ASCII byte into '?' — fine for our
+            # assembly kernel today but hostile to any future
+            # UTF-8 log output or TUI escape sequences.
+            sys.stdout.buffer.write(b)
+            sys.stdout.buffer.flush()
     except KeyboardInterrupt:
         print("\n--- Done ---", flush=True)
 
