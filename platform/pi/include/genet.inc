@@ -98,14 +98,75 @@
 .equ RX_BUF_LENGTH,           2048
 /* GENET DMA uses CPU physical addresses directly (no bus offset needed) */
 .equ DMA_BURST_SIZE,          8
-.equ DMA_RING_CFG_EN,         0x00010000   /* ring 16 */
+.equ DMA_RING_CFG_EN,         0x00010000   /* ring 16 only (non-checksum builds) */
 .equ DMA_CTRL_EN,             0x00020001   /* ring 16 enable | DMA_EN */
+/* Linux bcmgenet enables TX priority queues 0-3 alongside ring 16
+ * in BOTH DMA_RING_CFG and DMA_CTRL. The queues are unused by
+ * ws_pi5 but enabling them appears necessary for DMA_TX_DO_CSUM
+ * to function — the checksum engine may route through queue
+ * descriptors internally.
+ *
+ * DMA_RING_CFG: bits 0-3 = queue enables, bit 16 = ring 16
+ * DMA_CTRL:     bits 1-4 = queue enables (shifted by 1), bit 0 = DMA_EN, bit 17 = ring 16 */
+.equ DMA_RING_CFG_EN_CSUM,   0x0001000F   /* ring 16 + queues 0-3 */
+.equ DMA_CTRL_EN_CSUM,       0x0002001F   /* ring 16 + queues 0-3 + DMA_EN */
+
+/* TBUF registers (offset from GENET_BASE + 0x0600) */
+.equ GENET_TBUF_CTRL,         0x600
+.equ TBUF_64B_EN,             (1 << 0)  /* enable 64-byte TX status block */
 
 /* TX descriptor length_status flags */
 .equ TX_SOP,                  (1 << 13)
 .equ TX_EOP,                  (1 << 14)
 .equ TX_APPEND_CRC,           (1 << 6)
-.equ TX_LEN_STATUS_FLAGS,     0x7FC0   /* SOP|EOP|QTAG|APPEND_CRC */
+.equ TX_DO_CSUM,              (1 << 4)  /* request HW checksum insertion */
+.equ TX_LEN_STATUS_FLAGS,     0x7FC0    /* SOP|EOP|QTAG(0x3F)|APPEND_CRC */
+.equ TX_LEN_STATUS_FLAGS_CSUM, 0x7FD0  /* same + TX_DO_CSUM */
+
+/* TX Status Block (TSB) — 64-byte prefix prepended to frame data
+ * when TBUF_64B_EN is set. The GENET reads the TSB for checksum
+ * control and does NOT transmit it on the wire.
+ *
+ * Only the tx_csum_info field at offset 0x30 is used; the rest
+ * is reserved / zero. */
+.equ TSB_SIZE,                64
+.equ TSB_TX_CSUM_INFO,        0x30
+
+/* tx_csum_info bit layout:
+ *   [31]     STATUS_TX_CSUM_LV         — checksum valid (enable)
+ *   [30:16]  STATUS_TX_CSUM_START      — byte offset from DMA buf start
+ *                                        to L4 header (= TSB + ETH + IP)
+ *   [15]     STATUS_TX_CSUM_PROTO_UDP  — set for UDP, clear for TCP/ICMP
+ *   [14:0]   csum_offset               — byte offset from csum_start
+ *                                        to the L4 checksum field
+ *
+ * The GENET computes ones' complement sum over [csum_start, end),
+ * SKIPPING the 2-byte checksum field at csum_start + csum_offset,
+ * adds the result to the existing field value, and writes back.
+ * For TCP/UDP the field must contain the pseudo-header checksum;
+ * for ICMP it must be 0. */
+.equ TX_CSUM_LV,              0x80000000
+.equ TX_CSUM_PROTO_UDP,       0x00008000
+
+/* Pre-computed tx_csum_info values for ws_pi5's fixed IHL=5 layout.
+ *
+ * From Linux bcmgenet_add_tsb():
+ *   offset = skb_checksum_start_offset(skb) - sizeof(status_64);
+ *   tx_csum_info = (offset << 16) | (offset + skb->csum_offset) | LV;
+ *
+ * bits [30:16] = csum_start = ETH(14) + IP(20) = 34  (from frame start)
+ * bits [14:0]  = csum_start + csum_offset = ABSOLUTE position of the
+ *                checksum field from the frame start (NOT relative!)
+ * bit  [31]    = LV (valid)
+ * bit  [15]    = proto_udp (UDP only)
+ *
+ *   ICMP: checksum at L4+2 → absolute = 34+2 = 36
+ *   TCP:  checksum at L4+16 → absolute = 34+16 = 50
+ *   UDP:  checksum at L4+6  → absolute = 34+6 = 40
+ */
+.equ TX_CSUM_INFO_ICMP, 0x80220024  /* LV | start=34 | abs=36 */
+.equ TX_CSUM_INFO_TCP,  0x80220032  /* LV | start=34 | abs=50 */
+.equ TX_CSUM_INFO_UDP,  0x80228028  /* LV | start=34 | proto_udp | abs=40 */
 
 /* RX descriptor length_status */
 .equ RX_DMA_OWN,              0x8000

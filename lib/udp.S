@@ -48,6 +48,12 @@ udp_checksum:
     ldrh    w3, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_LENGTH)]
     add     w2, w2, w3
 
+    /* If HW TX checksum offload, return pseudo-header sum only.
+     * Same rationale as tcp_checksum (see lib/tcp.S). */
+    ldr     x3, =net_hw_csum_tx
+    ldr     w3, [x3]
+    cbnz    w3, .Ludp_cksum_fold
+
     /* Point to UDP section for linear sum */
     add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
 

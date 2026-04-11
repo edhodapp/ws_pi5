@@ -82,6 +82,16 @@ tcp_checksum:
     uxth    w3, w3
     add     w2, w2, w3
 
+    /* If HW TX checksum offload is enabled, return the pseudo-header
+     * sum ONLY (skip the TCP segment scan). The GENET's TX checksum
+     * engine adds the segment checksum to whatever value is in the
+     * checksum field, so the field must contain the pseudo-header
+     * sum — not 0 (that would miss the pseudo-header) and not the
+     * full checksum (that would double-count the segment). */
+    ldr     x3, =net_hw_csum_tx
+    ldr     w3, [x3]
+    cbnz    w3, .Ltcp_cksum_fold
+
     /* Point to TCP section for linear sum */
     add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
 

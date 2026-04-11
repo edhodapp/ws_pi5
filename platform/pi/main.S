@@ -55,6 +55,12 @@ main:
     ldr     x1, =genet_mac
     bl      genet_set_mac
 
+    /* Enable HW TX checksum offload — software writes 0 in the L4
+     * checksum field, GENET fills it from the TSB's tx_csum_info. */
+    ldr     x0, =net_hw_csum_tx
+    mov     w1, #1
+    str     w1, [x0]
+
     ldr     x0, =msg_genet_ok
     bl      uart_puts
 .else

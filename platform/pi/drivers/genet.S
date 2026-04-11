@@ -9,6 +9,7 @@
  */
 
 .include "genet.inc"
+.include "net.inc"
 .include "mailbox.inc"
 .include "perf.inc"
 
@@ -276,13 +277,34 @@ genet_init:
     b.ne    1b
     str     wzr, [x19, #GENET_UMAC_TX_FLUSH]
 
-    /* RBUF_CTRL: enable 2-byte alignment pad (RX frames prepended with 2 bytes
-     * so IP header lands on 4-byte boundary). genet_recv skips these 2 bytes. */
-    ldr     w0, [x19, #0x300]      /* RBUF_CTRL */
-    orr     w0, w0, #2              /* RBUF_ALIGN_2B */
-    str     w0, [x19, #0x300]
+    /* --- Configure RBUF/TBUF BEFORE ring setup (matches Linux) ---
+     *
+     * Linux's bcmgenet_set_hw_params sets RBUF_64B_EN and RBUF_CHK_CTRL
+     * BEFORE bcmgenet_init_dma configures the rings. The 64B mode
+     * changes how the DMA interprets descriptors, so it must be
+     * enabled before any descriptors are written. */
 
-    /* RBUF_TBUF_SIZE_CTRL: must be set to 1 for TX to work (allocates TBUF space) */
+    /* RBUF_CTRL: 64B status + 2-byte alignment pad */
+    ldr     w0, [x19, #GENET_RBUF_CTRL]
+    orr     w0, w0, #1              /* RBUF_64B_EN */
+    orr     w0, w0, #2              /* RBUF_ALIGN_2B */
+    orr     w0, w0, #(1 << 6)      /* match Linux 0xC043 */
+    orr     w0, w0, #(1 << 14)
+    orr     w0, w0, #(1 << 15)
+    str     w0, [x19, #GENET_RBUF_CTRL]
+
+    /* RBUF_CHK_CTRL: enable checksum engine + disable L3 parser */
+    ldr     w0, [x19, #0x314]
+    orr     w0, w0, #1              /* RXCHK_EN */
+    orr     w0, w0, #(1 << 5)      /* L3_PARSE_DIS */
+    str     w0, [x19, #0x314]
+
+    /* TBUF_CTRL: 64B TX status block */
+    ldr     w0, [x19, #GENET_TBUF_CTRL]
+    orr     w0, w0, #TBUF_64B_EN
+    str     w0, [x19, #GENET_TBUF_CTRL]
+
+    /* RBUF_TBUF_SIZE_CTRL: allocate TBUF space for TX. */
     mov     w0, #1
     str     w0, [x19, #0x3B4]
 
@@ -341,12 +363,17 @@ genet_init:
 
     ldr     w0, =DMA_RING_CFG_EN
     str     w0, [x19, #RDMA_DMA_RING_CFG]
+    /* TDMA ring config: enable queues 0-3 alongside ring 16 —
+     * matches Linux bcmgenet. Required for DO_CSUM. */
+    ldr     w0, =DMA_RING_CFG_EN_CSUM
     str     w0, [x22, #TDMA_DMA_RING_CFG_OFS]
 
     ldr     w0, =DMA_CTRL_EN
     str     w0, [x19, #RDMA_DMA_CTRL]
-    /* TDMA: ring 16 + DMA_EN only (U-Boot: 0x00020001) */
-    ldr     w0, =DMA_CTRL_EN
+    /* TDMA: match Linux's 0x0002001F — enables TX priority queues
+     * 0-3 alongside ring 16. Without the queue enables (bits 1-4),
+     * DMA_TX_DO_CSUM in the descriptor silently drops frames. */
+    ldr     w0, =DMA_CTRL_EN_CSUM
     str     w0, [x22, #TDMA_DMA_CTRL_OFS]
 
     /* --- Set speed (U-Boot writes speed alone, clearing all other bits) --- */
@@ -435,14 +462,80 @@ genet_send:
 
     mov     x19, x0                 /* GENET base */
     mov     x20, x1                 /* state */
-    mov     x21, x2                 /* buf */
-    mov     w22, w3                 /* len */
+    mov     x21, x2                 /* buf (original frame) */
+    mov     w22, w3                 /* len (frame only) */
 
-    /* Flush TX buffer from D-cache to RAM.
-     * Buffer may not be cache-line aligned — align start down
-     * so we cover every line the buffer touches. */
+    /* === Build combined TSB + frame in genet_tsb_buf ===
+     *
+     * TBUF_64B_EN is set in genet_init, so every DMA must start
+     * with a 64-byte TSB. The GENET strips the TSB and transmits
+     * only the frame portion on the wire. For IP frames whose L4
+     * checksum field is zeroed / pseudo-header-only, tx_csum_info
+     * tells the GENET to insert the correct checksum during DMA.
+     * For non-IP frames the TSB is all-zero (LV=0 → HW ignores). */
+
+    ldr     x0, =genet_tsb_buf
+
+    /* Zero the 64-byte TSB (4 stp pairs) */
+    stp     xzr, xzr, [x0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #32]
+    stp     xzr, xzr, [x0, #48]
+
+    /* Default: no checksum offload (non-IP frames or unknown proto) */
+    mov     w4, #0                  /* w4 = 0: no DO_CSUM flag */
+
+    /* Detect IPv4 (ethertype 0x0800 at buf[12..13], big-endian) */
+    ldrb    w1, [x21, #12]
+    cmp     w1, #0x08
+    b.ne    .Ltsb_copy
+    ldrb    w1, [x21, #13]
+    cbnz    w1, .Ltsb_copy
+
+    /* IPv4 — read IP.protocol at buf[23] */
+    ldrb    w1, [x21, #23]         /* ETH_PAYLOAD(14) + IP_PROTO(9) */
+    cmp     w1, #1                  /* ICMP */
+    b.eq    .Ltsb_icmp
+    cmp     w1, #6                  /* TCP */
+    b.eq    .Ltsb_tcp
+    cmp     w1, #17                 /* UDP */
+    b.eq    .Ltsb_udp
+    b       .Ltsb_copy              /* other IP proto: no checksum */
+
+.Ltsb_icmp:
+    ldr     w1, =TX_CSUM_INFO_ICMP
+    b       .Ltsb_store
+.Ltsb_tcp:
+    ldr     w1, =TX_CSUM_INFO_TCP
+    b       .Ltsb_store
+.Ltsb_udp:
+    ldr     w1, =TX_CSUM_INFO_UDP
+.Ltsb_store:
+    str     w1, [x0, #TSB_TX_CSUM_INFO]
+    mov     w4, #TX_DO_CSUM         /* bit 4 only — no OW_CRC */
+
+.Ltsb_copy:
+    /* Copy frame data after the TSB (byte loop — simple, correct,
+     * ~200 ns for a 1500 B frame; the L4 checksum savings of
+     * ~3500+ ns dwarf the copy cost). */
+    add     x1, x0, #TSB_SIZE      /* dst = tsb_buf + 64 */
+    mov     x2, x21                 /* src = original buf */
+    mov     w3, w22                 /* count */
+.Ltsb_copy_loop:
+    cbz     w3, .Ltsb_copy_done
+    sub     w3, w3, #1
+    ldrb    w6, [x2, x3]
+    strb    w6, [x1, x3]
+    cbnz    w3, .Ltsb_copy_loop
+.Ltsb_copy_done:
+
+    /* Switch buf/len to the combined buffer */
+    ldr     x21, =genet_tsb_buf
+    add     w22, w22, #TSB_SIZE     /* DMA len includes the TSB */
+
+    /* Flush combined buffer from D-cache to RAM */
     bic     x0, x21, #63            /* align down to cache line */
-    add     x1, x21, x22           /* end = buf + len */
+    add     x1, x21, x22           /* end = tsb_buf + 64 + frame_len */
 .Ltx_flush:
     dc      civac, x0
     add     x0, x0, #64
@@ -452,24 +545,26 @@ genet_send:
 
     /* Get current TX indices from state */
     ldr     w3, [x20, #GENET_STATE_TX_PIDX]
-    ldr     w4, [x20, #GENET_STATE_TX_RIDX]
+    ldr     w6, [x20, #GENET_STATE_TX_RIDX]
 
     /* Compute descriptor address: GENET + 0x4000 + ridx * 12 */
     add     x5, x19, #4, lsl #12
     mov     w0, #DMA_DESC_SIZE
-    mul     w1, w4, w0
+    mul     w1, w6, w0
     add     x5, x5, x1
 
     /* CPU physical address (GENET DMA uses physical directly) */
     mov     w0, w21
 
-    /* Write descriptor: addr first, length_status last */
-    str     w0, [x5, #4]
-    str     wzr, [x5, #8]
-    lsl     w0, w22, #16
+    /* Write descriptor: addr_lo, addr_hi (must be 0 for 32-bit
+     * addresses — GENET v5 uses 40-bit DMA), length_status last. */
+    str     w0, [x5, #4]            /* address_lo */
+    str     wzr, [x5, #8]           /* address_hi = 0 (32-bit addr) */
+    lsl     w0, w22, #16            /* length (TSB + frame) in upper 16 */
     ldr     w1, =TX_LEN_STATUS_FLAGS
     orr     w0, w0, w1
-    str     w0, [x5, #0]
+    orr     w0, w0, w4              /* w4 = TX_DO_CSUM or 0 */
+    str     w0, [x5, #0]            /* length_status */
 
     /* Increment and write PROD_INDEX */
     add     w3, w3, #1
@@ -479,9 +574,9 @@ genet_send:
 
     /* Update state */
     str     w3, [x20, #GENET_STATE_TX_PIDX]
-    add     w4, w4, #1
-    and     w4, w4, #0xFF
-    str     w4, [x20, #GENET_STATE_TX_RIDX]
+    add     w6, w6, #1
+    and     w6, w6, #0xFF
+    str     w6, [x20, #GENET_STATE_TX_RIDX]
 
     /* Poll CONS_INDEX for completion (x5 = TDMA base, preserved) */
     ldr     w4, =100000
@@ -627,8 +722,11 @@ genet_recv:
     b.lt    .Lrx_inv
     dsb     sy
 
-    add     x0, x0, #2             /* skip 2-byte RBUF pad */
-    sub     w5, w5, #2             /* actual frame length */
+    /* Skip 64-byte RSB (from RBUF_64B_EN) + 2-byte alignment pad.
+     * The descriptor's raw length includes both; subtracting 66
+     * yields the actual Ethernet frame length. */
+    add     x0, x0, #66            /* skip RSB(64) + pad(2) */
+    sub     w5, w5, #66            /* actual frame length */
 
     /* Clamp to max buffer */
     cmp     w5, w22
@@ -973,3 +1071,9 @@ genet_phy_check:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
+
+/* --- BSS: combined TSB + frame buffer for TX checksum offload --- */
+.section .bss
+.balign 64
+genet_tsb_buf:
+    .space  TSB_SIZE + ETH_FRAME_MAX   /* 64 + 1514 = 1578 bytes */
