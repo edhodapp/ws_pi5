@@ -56,6 +56,16 @@ def set_dtr(fd, state):
 def open_serial(path):
     """Open serial port: 115200 8N1, raw, no flow control.
 
+    Opens with O_NONBLOCK so the open(2) call cannot hang waiting
+    for DCD — a real TTY driver will block open() indefinitely
+    until carrier-detect is asserted if the port isn't marked
+    CLOCAL, and we haven't set CLOCAL yet (tcsetattr runs after
+    open). USB-serial adapters like the cp210x rarely honor DCD,
+    but the guard is cheap and makes this function safe against
+    driver bugs and real UARTs. After tcsetattr installs the
+    CLOCAL cflag, we clear O_NONBLOCK so subsequent reads are
+    blocking as the read_line / ACK-wait loops expect.
+
     NOTE: must set ispeed/ospeed (attrs[4], attrs[5]) explicitly in
     addition to the CBAUD bits in cflag. On modern Linux the kernel
     keeps the legacy CBAUD bits in sync with the separate c_ispeed /
@@ -66,7 +76,7 @@ def open_serial(path):
     output comes back as garbage. Setting both is the only reliable
     way.
     """
-    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     attrs = termios.tcgetattr(fd)
     attrs[0] = 0                    # iflag: raw
     attrs[1] = 0                    # oflag: raw
@@ -78,6 +88,11 @@ def open_serial(path):
     attrs[6][termios.VMIN] = 1      # blocking read, 1 byte min
     attrs[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    # Now that CLOCAL is set, swap back to blocking mode so
+    # os.read() in read_line and the ACK-wait loop can rely on
+    # VMIN/VTIME semantics instead of returning EAGAIN.
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
     return fd
 
 
@@ -366,15 +381,18 @@ def _flash_and_monitor(fd, records):
         # below before the next os.write — so the ACK round-trip
         # provides all the back-pressure we need. An explicit
         # termios.tcdrain() here would be dead weight.
+        #
+        # ACK is 2 bytes: line_len + checksum. VTIME=50 (set above)
+        # caps each os.read at 5 seconds; an empty return means the
+        # Pi went silent. We don't need a separate wall-clock
+        # deadline — the kernel's VTIME timer is the timeout.
         ack = b''
-        deadline = time.time() + 5
-        while len(ack) < 2 and time.time() < deadline:
+        while len(ack) < 2:
             chunk = os.read(fd, 2 - len(ack))
-            if chunk:
-                ack += chunk
-        if len(ack) != 2:
-            print(f"\n  Timeout on record {i}", flush=True)
-            return 1
+            if not chunk:
+                print(f"\n  Timeout on record {i}", flush=True)
+                return 1
+            ack += chunk
         line_len, cksum = ack[0], ack[1]
         if cksum == expected:
             pass  # ACK
@@ -394,10 +412,16 @@ def _flash_and_monitor(fd, records):
     print(f"\r  {len(records)}/{len(records)} in {elapsed:.1f}s",
           flush=True)
 
-    # Read BOOT line
-    line = read_line(fd, timeout=10)
-    print(f"  {line}", flush=True)
-    if not line.startswith("BOOT"):
+    # Read BOOT line with the same total-deadline pattern as the
+    # READY wait above: a single read_line would abort on a stray
+    # blank line between the last record ACK and the BOOT banner.
+    boot_deadline = time.time() + 15
+    while time.time() < boot_deadline:
+        line = read_line(fd, timeout=3)
+        if line.startswith("BOOT"):
+            print(f"  {line}", flush=True)
+            break
+    else:
         print("No BOOT", flush=True)
         return 1
 
