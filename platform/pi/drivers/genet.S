@@ -284,13 +284,14 @@ genet_init:
      * changes how the DMA interprets descriptors, so it must be
      * enabled before any descriptors are written. */
 
-    /* RBUF_CTRL: 64B status + 2-byte alignment pad */
+    /* RBUF_CTRL: 64B status + 2-byte alignment pad.
+     * Only set the bits we understand — bits 6/14/15 from Linux's
+     * 0xC043 value caused PAUSE frame flooding on the bare-metal
+     * driver (those bits may be flow-control-related and require
+     * matching RBUF/TBUF threshold configuration we don't have). */
     ldr     w0, [x19, #GENET_RBUF_CTRL]
     orr     w0, w0, #1              /* RBUF_64B_EN */
     orr     w0, w0, #2              /* RBUF_ALIGN_2B */
-    orr     w0, w0, #(1 << 6)      /* match Linux 0xC043 */
-    orr     w0, w0, #(1 << 14)
-    orr     w0, w0, #(1 << 15)
     str     w0, [x19, #GENET_RBUF_CTRL]
 
     /* RBUF_CHK_CTRL: enable checksum engine + disable L3 parser */
@@ -498,8 +499,20 @@ genet_send:
     b.eq    .Ltsb_icmp
     cmp     w1, #6                  /* TCP */
     b.eq    .Ltsb_tcp
-    cmp     w1, #17                 /* UDP */
-    b.eq    .Ltsb_udp
+    /* UDP TX is intentionally NOT offloaded. The GENET's TX
+     * checksum engine does not implement the RFC 768 special
+     * case where a computed UDP checksum of 0x0000 must be
+     * transmitted as 0xFFFF (because on the wire, 0x0000 in the
+     * UDP checksum field means "checksum not computed"). The
+     * GENET would emit a raw 0x0000 roughly 1 in 65536 packets,
+     * which receivers would silently accept as unchecksummed.
+     * Falling through to .Ltsb_copy here leaves w4=0, so the
+     * descriptor has no DO_CSUM bit and the software checksum
+     * (which correctly handles the 0→0xFFFF rewrite — see
+     * lib/udp.S) rides on the wire unchanged. UDP echo is the
+     * only UDP TX path in the stack today, and the SW cost is
+     * negligible for its tiny packets.
+     */
     b       .Ltsb_copy              /* other IP proto: no checksum */
 
 .Ltsb_icmp:
@@ -507,9 +520,6 @@ genet_send:
     b       .Ltsb_store
 .Ltsb_tcp:
     ldr     w1, =TX_CSUM_INFO_TCP
-    b       .Ltsb_store
-.Ltsb_udp:
-    ldr     w1, =TX_CSUM_INFO_UDP
 .Ltsb_store:
     str     w1, [x0, #TSB_TX_CSUM_INFO]
     mov     w4, #TX_DO_CSUM         /* bit 4 only — no OW_CRC */

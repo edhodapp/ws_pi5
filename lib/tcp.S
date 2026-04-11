@@ -99,8 +99,12 @@ tcp_checksum:
     uxth    w3, w3
     add     w2, w2, w3
 
-    /* Pseudo-header-only mode? Skip the segment scan. */
-    cbnz    w4, .Ltcp_cksum_fold
+    /* Pseudo-header-only mode? Skip the segment scan AND the
+     * ones' complement — the GENET adds the segment sum to the
+     * raw field value and does the final complement itself.
+     * Returning ~pseudo would produce ~(~pseudo + segment)
+     * instead of the correct ~(pseudo + segment). */
+    cbnz    w4, .Ltcp_cksum_fold_raw
 
     /* Point to TCP section for linear sum */
     add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
@@ -119,16 +123,28 @@ tcp_checksum:
     add     w2, w2, w3
 
 .Ltcp_cksum_fold:
-    /* Two-pass carry fold (32→16) */
+    /* Two-pass carry fold (32→16) + ones' complement.
+     * This is the normal path — reached by fall-through from
+     * the odd-byte tail and by cbz from the scan loop exit. */
     lsr     w3, w2, #16
     uxth    w2, w2
     add     w2, w2, w3
     lsr     w3, w2, #16
     add     w2, w2, w3
-
-    /* Ones' complement */
     mvn     w0, w2
     uxth    w0, w0
+    ret
+
+.Ltcp_cksum_fold_raw:
+    /* Fold only — NO complement. Used by tcp_pseudo_csum.
+     * The GENET adds the segment sum and does the final complement
+     * itself. Must NOT be reachable by fall-through. */
+    lsr     w3, w2, #16
+    uxth    w2, w2
+    add     w2, w2, w3
+    lsr     w3, w2, #16
+    add     w2, w2, w3
+    uxth    w0, w2
     ret
 
 /*
@@ -1028,12 +1044,17 @@ tcp_build_reply:
     bl      ip_checksum
     strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
 
-    /* TCP checksum over 32 bytes */
+    /* TCP checksum over 32 bytes (or pseudo-header for HW offload) */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x19
     mov     w1, #32
+    ldr     x2, =net_hw_csum_tx
+    ldr     w2, [x2]
+    cbnz    w2, 1f
     bl      tcp_checksum
-    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    b       2f
+1:  bl      tcp_pseudo_csum
+2:  strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
     mov     w0, #TCP_TS_FRAME_LEN   /* 66 */
     b       .Lbr_done
@@ -1056,12 +1077,17 @@ tcp_build_reply:
     bl      ip_checksum
     strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
 
-    /* TCP checksum over 20 bytes */
+    /* TCP checksum over 20 bytes (or pseudo-header for HW offload) */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x19
     mov     w1, #TCP_HDR_MIN
+    ldr     x2, =net_hw_csum_tx
+    ldr     w2, [x2]
+    cbnz    w2, 1f
     bl      tcp_checksum
-    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    b       2f
+1:  bl      tcp_pseudo_csum
+2:  strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
     mov     w0, #TCP_RST_FRAME_LEN  /* 54 */
 
@@ -2230,14 +2256,19 @@ tcp_build_frame:
     b.ne    .Lbf_copy
 
 .Lbf_no_payload:
-    /* TCP checksum over (20 + ts_overhead + mss_overhead + payload_len) bytes */
+    /* TCP checksum (or pseudo-header for HW offload) */
     strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
     mov     x0, x20
     add     w1, w23, #TCP_HDR_MIN
     add     w1, w1, w25
     add     w1, w1, w26
+    ldr     x2, =net_hw_csum_tx
+    ldr     w2, [x2]
+    cbnz    w2, 1f
     bl      tcp_checksum
-    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    b       2f
+1:  bl      tcp_pseudo_csum
+2:  strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
     /* Return 54 + ts_overhead + mss_overhead + payload_len */
     add     w0, w23, #54
