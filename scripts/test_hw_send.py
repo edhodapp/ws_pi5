@@ -393,6 +393,76 @@ class TestReadLine:
         assert result == "BOOT"
 
 
+# ── _write_all ───────────────────────────────────────────────
+
+
+class TestWriteAll:
+    """Partial-write handling fence for the record-send loop.
+
+    os.write on a raw fd may accept fewer bytes than offered; a
+    naive `os.write(fd, data)` would silently drop the tail of a
+    HEX record. _write_all loops until the whole buffer lands or
+    raises on a zero-return (fd went non-blocking behind our
+    back). These tests pin both paths.
+    """
+
+    def test_single_shot_write_full_buffer(self):
+        """Happy path: the kernel accepts everything in one call."""
+        writes = []
+
+        def fake_write(fd, data):
+            writes.append((fd, bytes(data)))
+            return len(data)
+
+        with patch("hw_send.os.write", side_effect=fake_write):
+            hw_send._write_all(fd=7, data=b"ABCDE")
+        assert writes == [(7, b"ABCDE")]
+
+    def test_partial_write_loops_until_done(self):
+        """If os.write accepts only a prefix, _write_all must
+        retry with the remainder until the full buffer lands."""
+        writes = []
+
+        def fake_write(fd, data):
+            # Accept at most 3 bytes per call to force multi-step.
+            chunk = bytes(data[:3])
+            writes.append((fd, chunk))
+            return len(chunk)
+
+        with patch("hw_send.os.write", side_effect=fake_write):
+            hw_send._write_all(fd=7, data=b"ABCDEFGH")
+        # Reassembling the write calls must equal the original.
+        assert b"".join(w[1] for w in writes) == b"ABCDEFGH"
+        # And every call must have targeted the same fd.
+        assert all(w[0] == 7 for w in writes)
+
+    def test_zero_return_raises_blockingioerror(self):
+        """os.write returning 0 with data still to send is a
+        protocol violation on a blocking fd (either the fd was
+        secretly switched to non-blocking, or the kernel is
+        broken). Raise loudly instead of looping forever."""
+        with patch("hw_send.os.write", return_value=0):
+            try:
+                hw_send._write_all(fd=7, data=b"ABC")
+            except BlockingIOError as exc:
+                assert "3 bytes remaining" in str(exc)
+                return
+        assert False, "expected BlockingIOError"
+
+    def test_oserror_propagates(self):
+        """An underlying os.write OSError (e.g. EIO from a dead
+        device) must propagate unchanged — the caller's handler
+        prints a friendly message."""
+        with patch("hw_send.os.write",
+                   side_effect=OSError(5, "Input/output error")):
+            try:
+                hw_send._write_all(fd=7, data=b"ABC")
+            except OSError as exc:
+                assert exc.errno == 5
+                return
+        assert False, "expected OSError"
+
+
 # ── open_serial ──────────────────────────────────────────────
 
 

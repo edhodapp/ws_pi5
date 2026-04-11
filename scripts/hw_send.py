@@ -362,6 +362,32 @@ def kill_stale_hw_send():
     return kill_stale_by_matchers(HW_SEND_MATCHERS)
 
 
+def _write_all(fd, data):
+    """Write `data` fully to `fd`, looping over any partial writes.
+
+    os.write is not guaranteed to write the whole buffer in a
+    single call — on a raw fd it may return early with the count
+    of bytes actually accepted by the kernel. Short writes are
+    exceedingly rare at 115200 baud with ~45-byte HEX records
+    (the TX buffer is larger than the record), but the
+    write_all loop is the right pattern for correctness. Raises
+    OSError on the underlying syscall failure; raises
+    BlockingIOError on a zero-length return with data remaining,
+    which should only happen if the fd was switched to
+    non-blocking mode behind our back.
+    """
+    memview = memoryview(data)
+    total = 0
+    while total < len(memview):
+        n = os.write(fd, memview[total:])
+        if n <= 0:
+            raise BlockingIOError(
+                f"os.write returned {n} with {len(memview) - total} "
+                "bytes remaining — fd may be non-blocking"
+            )
+        total += n
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port] [base_addr]")
@@ -374,25 +400,38 @@ def main():
     # Always clear stale hw_send processes before touching the port.
     kill_stale_hw_send()
 
-    with open(kernel_path, "rb") as fobj:
-        kernel = fobj.read()
+    # Setup phase: read the kernel image and open the serial port.
+    # Any OSError here (kernel file missing, permission denied on
+    # /dev/ttyUSB*, port already held by another process) is a
+    # setup failure, not a flash failure — handled separately so
+    # we don't drop into the fd-cleanup `finally` with an fd that
+    # was never successfully opened.
+    try:
+        with open(kernel_path, "rb") as fobj:
+            kernel = fobj.read()
+        records = kernel_to_hex_records(kernel, base_address=base_addr)
+        print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
+        print(f"HEX: {len(records)} records", flush=True)
+        fd = open_serial(port_path)
+    except OSError as exc:
+        print(f"  Setup error: {exc}", flush=True)
+        return 1
 
-    records = kernel_to_hex_records(kernel, base_address=base_addr)
-    print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
-    print(f"HEX: {len(records)} records", flush=True)
-
-    fd = open_serial(port_path)
+    # Flash phase: fd is open, cleanup is guaranteed by `finally`.
     try:
         return _flash_and_monitor(fd, records)
+    except KeyboardInterrupt:
+        # Ctrl-C during the flash phase (DTR reset / READY wait /
+        # record upload / BOOT wait). The kernel-output display
+        # loop has its own KeyboardInterrupt handler that returns
+        # 0; anything that escapes here interrupted the flash
+        # itself — return the conventional 128+SIGINT exit code.
+        print("\n  Interrupted — flash aborted", flush=True)
+        return 130
     except OSError as exc:
         # Device went away mid-flash (cp210x unplugged, USB hub
-        # reset, kernel-side driver error). The kernel-output loop
-        # inside _flash_and_monitor has its own OSError handler
-        # that returns 0 on clean disconnect during the display
-        # phase, so any OSError that makes it out here came from
-        # the earlier DTR-reset / READY / record-send / BOOT
-        # phases — i.e. the flash itself failed. Print a
-        # user-friendly one-liner instead of a traceback.
+        # reset, kernel-side driver error). Print a user-friendly
+        # one-liner instead of a traceback.
         print(f"\n  Serial error during flash: {exc}", flush=True)
         return 1
     finally:
@@ -452,7 +491,7 @@ def _flash_and_monitor(fd, records):
     t_start = time.time()
     for i, record in enumerate(records):
         expected = int(record[-2:], 16)
-        os.write(fd, (record + '\r\n').encode('ascii'))
+        _write_all(fd, (record + '\r\n').encode('ascii'))
         # The protocol is synchronous — we block on the 2-byte ACK
         # below before the next os.write — so the ACK round-trip
         # provides all the back-pressure we need. An explicit
