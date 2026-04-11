@@ -82,13 +82,26 @@ def open_serial(path):
 
 
 def read_line(fd, timeout=10):
-    """Read until \\n with timeout. Returns decoded stripped string."""
-    # Set VTIME once for the whole read
+    """Read until \\n with timeout. Returns decoded stripped string.
+
+    Uses VMIN=0 + VTIME=timeout: the read(2) call returns either
+    when at least one byte is available, or when the inter-byte
+    timer expires — which also fires as the initial-byte timeout
+    because VMIN is zero. Earlier versions of this function set
+    VMIN=1, which makes read(2) block indefinitely waiting for the
+    first byte regardless of VTIME, so a silent chainloader would
+    hang forever instead of returning an empty string. That bug
+    was caught in the Gemini review of commit 2a2b6cf (HIGH).
+
+    TCSANOW (not TCSADRAIN) because we are about to read, not
+    write — waiting for the TX buffer to drain before applying
+    read-side termios settings is pure latency.
+    """
     attrs = termios.tcgetattr(fd)
     vtime = min(255, max(1, int(timeout * 10)))
-    attrs[6][termios.VMIN] = 1
+    attrs[6][termios.VMIN] = 0
     attrs[6][termios.VTIME] = vtime
-    termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
     buf = b''
     deadline = time.time() + timeout
@@ -313,7 +326,11 @@ def main():
     for i, record in enumerate(records):
         expected = int(record[-2:], 16)
         os.write(fd, (record + '\r\n').encode('ascii'))
-        termios.tcdrain(fd)
+        # NOTE: no termios.tcdrain(fd) here — the protocol is
+        # synchronous (we block on the 2-byte ACK below before the
+        # next os.write), so draining the TX buffer explicitly is
+        # dead weight. Removed in the Gemini-review follow-up;
+        # the ACK-wait provides all the back-pressure we need.
         ack = b''
         deadline = time.time() + 5
         while len(ack) < 2 and time.time() < deadline:

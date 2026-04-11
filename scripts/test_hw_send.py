@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# pylint: disable=missing-class-docstring,import-outside-toplevel
+# pylint: disable=unused-argument
+# mypy: ignore-errors
+#
+# Test-file pylint exemptions: pytest test methods and helpers
+# legitimately accept unused fd/request/mock arguments (for mock
+# dispatch or shared signatures), and test classes don't need
+# docstrings when the method docstrings describe what's tested.
+# Importing termios inside a test keeps the constant scoped.
+# mypy: ignore-errors — tests use mocks and lambdas heavily; type
+# annotations would be pure ceremony for no correctness benefit.
 """Unit tests for scripts/hw_send.py.
 
 hw_send.py was rewritten on 2026-04-04 (commit 2878c79) to drop
@@ -197,6 +208,49 @@ class TestReadLine:
             hw_send.read_line(fd=10, timeout=0.01)
         import termios as _t
         assert fake.attrs[6][_t.VTIME] == 1
+
+    def test_vmin_is_zero_regression_fence(self):
+        """VMIN MUST be 0 so read() does not block indefinitely on
+        an initial-byte wait. An earlier version of this function
+        set VMIN=1, which makes read() ignore VTIME's initial-byte
+        semantics and hang forever if the chainloader never prints.
+        This was caught in the Gemini review of commit 2a2b6cf."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
+        )
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=1.0)
+        import termios as _t
+        assert fake.attrs[6][_t.VMIN] == 0, (
+            "VMIN must be 0 — VMIN=1 makes read() block forever "
+            "waiting for the first byte, which defeats timeout."
+        )
+
+    def test_tcsetattr_uses_tcsanow_not_tcsadrain(self):
+        """read_line is about to read, not write — applying
+        termios settings with TCSADRAIN waits for the TX buffer
+        to drain first, which is latency we never need on a
+        read-only code path. Pin TCSANOW."""
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
+        )
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=1.0)
+        import termios as _t
+        # set_calls[-1] is the final tcsetattr call; [1] is `when`.
+        assert fake.set_calls, "read_line should call tcsetattr"
+        when = fake.set_calls[-1][1]
+        assert when == _t.TCSANOW, (
+            f"read_line must use TCSANOW, not {when}"
+        )
 
     def test_non_ascii_bytes_ignored_in_decode(self):
         """The decode uses errors='ignore', so a stray high-bit
