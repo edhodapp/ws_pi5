@@ -92,22 +92,30 @@ def open_serial(path):
     way.
     """
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    attrs = termios.tcgetattr(fd)
-    attrs[0] = 0                    # iflag: raw
-    attrs[1] = 0                    # oflag: raw
-    attrs[2] = (termios.CS8 | termios.CLOCAL | termios.CREAD
-                | termios.B115200)
-    attrs[3] = 0                    # lflag: raw
-    attrs[4] = termios.B115200      # ispeed — required, not optional
-    attrs[5] = termios.B115200      # ospeed — required, not optional
-    attrs[6][termios.VMIN] = 1      # blocking read, 1 byte min
-    attrs[6][termios.VTIME] = 0
-    termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
-    # Now that CLOCAL is set, swap back to blocking mode so
-    # os.read() in read_line and the ACK-wait loop can rely on
-    # VMIN/VTIME semantics instead of returning EAGAIN.
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    # If any of the termios/fcntl calls below raise (e.g. the port
+    # went away between open and tcgetattr, or the driver rejects
+    # a setting), close fd before propagating so the caller does
+    # not have to track cleanup for a half-configured port.
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[0] = 0                    # iflag: raw
+        attrs[1] = 0                    # oflag: raw
+        attrs[2] = (termios.CS8 | termios.CLOCAL | termios.CREAD
+                    | termios.B115200)
+        attrs[3] = 0                    # lflag: raw
+        attrs[4] = termios.B115200      # ispeed — required, not optional
+        attrs[5] = termios.B115200      # ospeed — required, not optional
+        attrs[6][termios.VMIN] = 1      # blocking read, 1 byte min
+        attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+        # Now that CLOCAL is set, swap back to blocking mode so
+        # os.read() in read_line and the ACK-wait loop can rely on
+        # VMIN/VTIME semantics instead of returning EAGAIN.
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -376,6 +384,17 @@ def main():
     fd = open_serial(port_path)
     try:
         return _flash_and_monitor(fd, records)
+    except OSError as exc:
+        # Device went away mid-flash (cp210x unplugged, USB hub
+        # reset, kernel-side driver error). The kernel-output loop
+        # inside _flash_and_monitor has its own OSError handler
+        # that returns 0 on clean disconnect during the display
+        # phase, so any OSError that makes it out here came from
+        # the earlier DTR-reset / READY / record-send / BOOT
+        # phases — i.e. the flash itself failed. Print a
+        # user-friendly one-liner instead of a traceback.
+        print(f"\n  Serial error during flash: {exc}", flush=True)
+        return 1
     finally:
         os.close(fd)
 

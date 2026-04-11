@@ -393,6 +393,64 @@ class TestReadLine:
         assert result == "BOOT"
 
 
+# ── open_serial ──────────────────────────────────────────────
+
+
+class TestOpenSerial:
+
+    def test_closes_fd_on_tcgetattr_failure(self):
+        """If tcgetattr raises (e.g. the port vanished between
+        open() and the first termios call), open_serial must
+        close the fd before propagating the error — otherwise
+        the caller has no way to recover the fd to clean it up.
+
+        Reproduces the fd-leak Gemini flagged (LOW) in the
+        review of commit 6c1245b.
+        """
+        closed_fds = []
+
+        def tracking_close(fd):
+            closed_fds.append(fd)
+
+        with patch("hw_send.os.open", return_value=42), \
+             patch("hw_send.os.close", side_effect=tracking_close), \
+             patch("hw_send.termios.tcgetattr",
+                   side_effect=OSError("simulated port loss")):
+            try:
+                hw_send.open_serial("/dev/null")
+            except OSError:
+                pass
+        assert closed_fds == [42], (
+            f"expected os.close(42) exactly once; "
+            f"got calls: {closed_fds}"
+        )
+
+    def test_closes_fd_on_tcsetattr_failure(self):
+        """Same guard for the tcsetattr failure path — the fd was
+        opened, tcgetattr succeeded, but the driver rejects the
+        new termios settings. We must not leak the fd.
+        """
+        closed_fds = []
+
+        def tracking_close(fd):
+            closed_fds.append(fd)
+
+        fake_attrs = [0, 0, 0, 0, 0, 0, [0] * 32]
+        with patch("hw_send.os.open", return_value=99), \
+             patch("hw_send.os.close", side_effect=tracking_close), \
+             patch("hw_send.termios.tcgetattr", return_value=fake_attrs), \
+             patch("hw_send.termios.tcsetattr",
+                   side_effect=OSError("EINVAL")):
+            try:
+                hw_send.open_serial("/dev/null")
+            except OSError:
+                pass
+        assert closed_fds == [99], (
+            f"expected os.close(99) exactly once; "
+            f"got calls: {closed_fds}"
+        )
+
+
 # ── constants ────────────────────────────────────────────────
 
 class TestConstants:
