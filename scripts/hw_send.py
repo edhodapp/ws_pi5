@@ -96,23 +96,40 @@ def read_line(fd, timeout=10):
     TCSANOW (not TCSADRAIN) because we are about to read, not
     write — waiting for the TX buffer to drain before applying
     read-side termios settings is pure latency.
-    """
-    attrs = termios.tcgetattr(fd)
-    vtime = min(255, max(1, int(timeout * 10)))
-    attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = vtime
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
-    buf = b''
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        b = os.read(fd, 1)
-        if not b:
-            break
-        buf += b
-        if b == b'\n':
-            break
-    return buf.decode('ascii', errors='ignore').strip()
+    The VMIN/VTIME change is scoped to the body of this function:
+    we snapshot the existing attrs at entry and restore them in a
+    `finally` block. Without the restore, callers that read from
+    the same fd after read_line returns inherit VMIN=0 and any
+    subsequent os.read returns b'' immediately on a quiet port,
+    causing the kernel-output display loop in main() to busy-spin
+    at 100% CPU. Gemini flagged this in the review of commit
+    4e49b9c (MEDIUM); the fix is local to this function.
+    """
+    saved = termios.tcgetattr(fd)
+    # Build a new attrs list with our transient VMIN/VTIME, leaving
+    # `saved` untouched so the finally can restore it cleanly.
+    vtime = min(255, max(1, int(timeout * 10)))
+    new_cc = list(saved[6])
+    new_cc[termios.VMIN] = 0
+    new_cc[termios.VTIME] = vtime
+    new_attrs = [saved[0], saved[1], saved[2], saved[3],
+                 saved[4], saved[5], new_cc]
+    termios.tcsetattr(fd, termios.TCSANOW, new_attrs)
+
+    try:
+        buf = b''
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            b = os.read(fd, 1)
+            if not b:
+                break
+            buf += b
+            if b == b'\n':
+                break
+        return buf.decode('ascii', errors='ignore').strip()
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
 
 
 def _read_proc_text(pid, name):
@@ -370,14 +387,36 @@ def main():
         os.close(fd)
         return 1
 
-    # Kernel output
+    # Kernel output — explicitly re-enter blocking single-byte mode.
+    #
+    # VMIN=1 + VTIME=0 means read(2) blocks until at least one byte
+    # arrives (no initial timeout, no inter-byte timer). This is the
+    # canonical "live console display" mode. We set it explicitly
+    # instead of inheriting from whatever read_line or the record-
+    # send loop left on the port — read_line restores its own state
+    # now, but the record-send loop still leaves VMIN=0/VTIME=50,
+    # which would make the display loop busy-spin on empty reads.
+    # Gemini flagged this in commit 4e49b9c (MEDIUM).
+    attrs = termios.tcgetattr(fd)
+    attrs[6][termios.VMIN] = 1
+    attrs[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
     print("--- Kernel output (Ctrl-C to quit) ---", flush=True)
     try:
         while True:
-            b = os.read(fd, 1)
-            if b:
-                sys.stdout.write(b.decode('ascii', errors='replace'))
-                sys.stdout.flush()
+            try:
+                b = os.read(fd, 1)
+            except OSError as exc:
+                print(f"\n--- Serial error: {exc} ---", flush=True)
+                break
+            if not b:
+                # With VMIN=1 this should only happen on EOF
+                # (e.g. cp210x unplugged); treat as clean exit.
+                print("\n--- EOF on serial port ---", flush=True)
+                break
+            sys.stdout.write(b.decode('ascii', errors='replace'))
+            sys.stdout.flush()
     except KeyboardInterrupt:
         print("\n--- Done ---", flush=True)
 

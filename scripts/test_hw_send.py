@@ -164,7 +164,10 @@ class TestReadLine:
     def test_vtime_set_to_timeout_in_deciseconds(self):
         """The driver converts timeout seconds to VTIME deciseconds
         and clamps to [1, 255]. A 3.0-second timeout must land as
-        30 (3.0 * 10). This pins the conversion formula."""
+        30 (3.0 * 10). This pins the conversion formula.
+
+        Checks set_calls (the read-time config) rather than the
+        final fake.attrs because read_line save/restores state."""
         fake, read_mock, time_mock = _mk_read_line_env(
             bytes_yielded=[b"\n"],
             times=[0.0, 0.01, 0.02],
@@ -174,9 +177,11 @@ class TestReadLine:
              patch("hw_send.os.read", read_mock), \
              patch("hw_send.time.time", time_mock):
             hw_send.read_line(fd=10, timeout=3.0)
-        # VTIME is index 5 in the cc array per termios.
         import termios as _t
-        assert fake.attrs[6][_t.VTIME] == 30
+        vtimes_set = [c[2][6][_t.VTIME] for c in fake.set_calls]
+        assert 30 in vtimes_set, (
+            f"no tcsetattr set VTIME=30; got {vtimes_set}"
+        )
 
     def test_vtime_clamped_to_upper_bound(self):
         """Timeout large enough to overflow a uint8 VTIME field
@@ -191,7 +196,10 @@ class TestReadLine:
              patch("hw_send.time.time", time_mock):
             hw_send.read_line(fd=10, timeout=9999)
         import termios as _t
-        assert fake.attrs[6][_t.VTIME] == 255
+        vtimes_set = [c[2][6][_t.VTIME] for c in fake.set_calls]
+        assert 255 in vtimes_set, (
+            f"no tcsetattr set VTIME=255 (clamp); got {vtimes_set}"
+        )
 
     def test_vtime_clamped_to_lower_bound(self):
         """Tiny (sub-decisecond) timeouts must round up to 1, not
@@ -207,14 +215,23 @@ class TestReadLine:
              patch("hw_send.time.time", time_mock):
             hw_send.read_line(fd=10, timeout=0.01)
         import termios as _t
-        assert fake.attrs[6][_t.VTIME] == 1
+        vtimes_set = [c[2][6][_t.VTIME] for c in fake.set_calls]
+        assert 1 in vtimes_set, (
+            f"no tcsetattr set VTIME=1 (clamp); got {vtimes_set}"
+        )
 
-    def test_vmin_is_zero_regression_fence(self):
-        """VMIN MUST be 0 so read() does not block indefinitely on
-        an initial-byte wait. An earlier version of this function
-        set VMIN=1, which makes read() ignore VTIME's initial-byte
-        semantics and hang forever if the chainloader never prints.
-        This was caught in the Gemini review of commit 2a2b6cf."""
+    def test_vmin_is_zero_during_read_regression_fence(self):
+        """VMIN MUST be 0 during the actual os.read so read() does
+        not block indefinitely on an initial-byte wait. An earlier
+        version of this function set VMIN=1, making read() ignore
+        VTIME's initial-byte semantics and hang forever if the
+        chainloader never prints. Caught in the Gemini review of
+        commit 2a2b6cf.
+
+        Note: we check the tcsetattr calls (not the final fake.attrs)
+        because read_line now save/restores termios state — the
+        final state reflects the restore, not the read-time config.
+        """
         fake, read_mock, time_mock = _mk_read_line_env(
             bytes_yielded=[b"\n"],
             times=[0.0, 0.01, 0.02],
@@ -225,10 +242,81 @@ class TestReadLine:
              patch("hw_send.time.time", time_mock):
             hw_send.read_line(fd=10, timeout=1.0)
         import termios as _t
-        assert fake.attrs[6][_t.VMIN] == 0, (
-            "VMIN must be 0 — VMIN=1 makes read() block forever "
-            "waiting for the first byte, which defeats timeout."
+        # At least one tcsetattr call must have set VMIN=0. The
+        # saved-state snapshot + transient read config + restore
+        # sequence yields at least two tcsetattr calls; the read
+        # config is the one we care about.
+        vmins_during_read = [
+            call_args[2][6][_t.VMIN] for call_args in fake.set_calls
+        ]
+        assert 0 in vmins_during_read, (
+            f"read_line never set VMIN=0; tcsetattr VMIN sequence "
+            f"was {vmins_during_read}. VMIN=1 would make read() "
+            f"block forever on silence."
         )
+
+    def test_read_line_restores_termios_on_return(self):
+        """read_line must not leak VMIN=0 / VTIME=N into subsequent
+        reads on the same fd.
+
+        Bug history: commit 4e49b9c introduced VMIN=0 to fix the
+        hang-on-silence bug, but did not save/restore the original
+        state. The kernel-output display loop in main() then
+        inherited VMIN=0 and busy-waited on quiet/disconnected
+        ports. Gemini flagged it as MEDIUM. This fence pins the
+        restore behavior so a future refactor can't silently drop
+        the finally block.
+        """
+        fake, read_mock, time_mock = _mk_read_line_env(
+            bytes_yielded=[b"\n"],
+            times=[0.0, 0.01, 0.02],
+        )
+        # Pre-populate the fake port with a distinctive initial
+        # state that differs from read_line's transient config.
+        import termios as _t
+        fake.attrs[6][_t.VMIN] = 1
+        fake.attrs[6][_t.VTIME] = 42  # distinctive marker
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            hw_send.read_line(fd=10, timeout=1.0)
+        # After read_line, the port must be restored to VMIN=1 / VTIME=42.
+        assert fake.attrs[6][_t.VMIN] == 1, (
+            f"VMIN not restored: got {fake.attrs[6][_t.VMIN]}, "
+            f"expected 1 (state leaked from read_line)"
+        )
+        assert fake.attrs[6][_t.VTIME] == 42, (
+            f"VTIME not restored: got {fake.attrs[6][_t.VTIME]}, "
+            f"expected 42 (state leaked from read_line)"
+        )
+
+    def test_read_line_restores_termios_even_on_exception(self):
+        """The save/restore is in a `finally` block, so an
+        exception raised by os.read mid-loop must still restore the
+        original state. Without the finally, a failed read would
+        leave the port in VMIN=0 forever and the exception handler
+        in main() would see corrupted termios state."""
+        fake, read_mock, _ = _mk_read_line_env(
+            bytes_yielded=[],  # unused
+            times=[0.0, 0.01],
+        )
+        # Configure os.read to raise instead of returning bytes.
+        read_mock.side_effect = OSError(5, "Input/output error")
+        import termios as _t
+        fake.attrs[6][_t.VMIN] = 1
+        fake.attrs[6][_t.VTIME] = 77
+        time_mock = MagicMock(side_effect=[0.0, 0.01, 0.02])
+        with patch("hw_send.termios.tcgetattr", fake.tcgetattr), \
+             patch("hw_send.termios.tcsetattr", fake.tcsetattr), \
+             patch("hw_send.os.read", read_mock), \
+             patch("hw_send.time.time", time_mock):
+            try:
+                hw_send.read_line(fd=10, timeout=1.0)
+            except OSError:
+                pass  # expected — we're testing the finally fires
+        assert fake.attrs[6][_t.VMIN] == 1
+        assert fake.attrs[6][_t.VTIME] == 77
 
     def test_tcsetattr_uses_tcsanow_not_tcsadrain(self):
         """read_line is about to read, not write — applying
