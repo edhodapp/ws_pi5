@@ -9,6 +9,7 @@
 .include "ntp.inc"
 
 .global udp_checksum
+.global udp_pseudo_csum
 .global udp_handle
 
 .section .text
@@ -25,7 +26,18 @@
  * directly from their frame positions, then sums the UDP segment.
  * No temp buffer needed.
  */
+/*
+ * udp_pseudo_csum — same parameters as udp_checksum, but returns
+ * ONLY the pseudo-header checksum. See tcp_pseudo_csum doc.
+ */
+udp_pseudo_csum:
+    mov     w4, #1                  /* pseudo-header only */
+    b       .Ludp_csum_body
+
 udp_checksum:
+    mov     w4, #0                  /* full checksum */
+
+.Ludp_csum_body:
     mov     w2, #0                  /* accumulator */
 
     /* Pseudo-header: IP src (2 halfwords) */
@@ -48,11 +60,8 @@ udp_checksum:
     ldrh    w3, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_LENGTH)]
     add     w2, w2, w3
 
-    /* If HW TX checksum offload, return pseudo-header sum only.
-     * Same rationale as tcp_checksum (see lib/tcp.S). */
-    ldr     x3, =net_hw_csum_tx
-    ldr     w3, [x3]
-    cbnz    w3, .Ludp_cksum_fold
+    /* Pseudo-header-only mode? Skip the segment scan. */
+    cbnz    w4, .Ludp_cksum_fold
 
     /* Point to UDP section for linear sum */
     add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)
@@ -183,15 +192,13 @@ udp_handle:
     strh    w3, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_SPORT)]
     strh    w2, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_DPORT)]
 
-    /* 5. Recompute UDP checksum (or leave zeroed for HW offload).
-     *    For HW offload: the GENET computes the pseudo-header +
-     *    payload checksum in hardware. We write 0 ("not computed")
-     *    which is RFC 768-legal for IPv4 UDP, and the HW replaces
-     *    it with the correct value during DMA. */
+    /* 5. Recompute UDP checksum.
+     *    For HW offload: store the pseudo-header-only sum so the
+     *    GENET adds the segment sum on top. For SW: full checksum. */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_CHECKSUM)]
     ldr     x0, =net_hw_csum_tx
     ldr     w0, [x0]
-    cbnz    w0, .Ludp_skip_l4_csum
+    cbnz    w0, .Ludp_hw_csum
     mov     x0, x19
     mov     w1, w21
     bl      udp_checksum
@@ -199,8 +206,13 @@ udp_handle:
     cmp     w0, #0
     csinv   w0, w0, wzr, ne
     uxth    w0, w0
+    b       .Ludp_store_csum
+.Ludp_hw_csum:
+    mov     x0, x19
+    mov     w1, w21
+    bl      udp_pseudo_csum
+.Ludp_store_csum:
     strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + UDP_CHECKSUM)]
-.Ludp_skip_l4_csum:
 
     /* 6. Recompute IP checksum */
     strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]

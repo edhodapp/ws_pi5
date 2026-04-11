@@ -24,6 +24,8 @@
 
 /* RBUF */
 .equ GENET_RBUF_CTRL,         0x300
+.equ GENET_RBUF_CHK_CTRL,     0x314
+.equ GENET_RBUF_TBUF_SIZE,    0x3B4
 
 /* UMAC registers (offset from GENET_BASE) */
 .equ GENET_UMAC_CMD,          0x808
@@ -121,7 +123,6 @@
 .equ TX_APPEND_CRC,           (1 << 6)
 .equ TX_DO_CSUM,              (1 << 4)  /* request HW checksum insertion */
 .equ TX_LEN_STATUS_FLAGS,     0x7FC0    /* SOP|EOP|QTAG(0x3F)|APPEND_CRC */
-.equ TX_LEN_STATUS_FLAGS_CSUM, 0x7FD0  /* same + TX_DO_CSUM */
 
 /* TX Status Block (TSB) — 64-byte prefix prepended to frame data
  * when TBUF_64B_EN is set. The GENET reads the TSB for checksum

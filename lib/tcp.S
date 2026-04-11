@@ -15,6 +15,7 @@
 .include "timer.inc"
 
 .global tcp_checksum
+.global tcp_pseudo_csum
 .global tcp_build_reply
 .global tcp_handle
 .global tcp_init
@@ -56,9 +57,25 @@
  * x0: frame buffer pointer (Ethernet + IP + TCP)
  * w1: TCP segment length in bytes (header + data)
  * Returns: w0 = 16-bit checksum (0 when verifying a valid segment)
- * Clobbers: x0-x3
+ * Clobbers: x0-x4
+ *
+ * tcp_pseudo_csum — same parameters, but returns ONLY the
+ * pseudo-header checksum (skips the segment data scan). Used by
+ * TX call sites when hardware checksum offload is enabled: the
+ * GENET adds the HW-computed segment sum to whatever is in the
+ * checksum field, so the field must contain the pseudo-header sum.
+ *
+ * IMPORTANT: tcp_checksum (full) must be used for RX verification.
+ * tcp_pseudo_csum must ONLY be called for TX with HW offload.
  */
+tcp_pseudo_csum:
+    mov     w4, #1                  /* pseudo-header only */
+    b       .Ltcp_csum_body
+
 tcp_checksum:
+    mov     w4, #0                  /* full checksum */
+
+.Ltcp_csum_body:
     mov     w2, #0                  /* accumulator */
 
     /* Pseudo-header: IP src (2 halfwords) */
@@ -82,15 +99,8 @@ tcp_checksum:
     uxth    w3, w3
     add     w2, w2, w3
 
-    /* If HW TX checksum offload is enabled, return the pseudo-header
-     * sum ONLY (skip the TCP segment scan). The GENET's TX checksum
-     * engine adds the segment checksum to whatever value is in the
-     * checksum field, so the field must contain the pseudo-header
-     * sum — not 0 (that would miss the pseudo-header) and not the
-     * full checksum (that would double-count the segment). */
-    ldr     x3, =net_hw_csum_tx
-    ldr     w3, [x3]
-    cbnz    w3, .Ltcp_cksum_fold
+    /* Pseudo-header-only mode? Skip the segment scan. */
+    cbnz    w4, .Ltcp_cksum_fold
 
     /* Point to TCP section for linear sum */
     add     x0, x0, #(ETH_PAYLOAD + IP_HDR_MIN)

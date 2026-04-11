@@ -294,10 +294,10 @@ genet_init:
     str     w0, [x19, #GENET_RBUF_CTRL]
 
     /* RBUF_CHK_CTRL: enable checksum engine + disable L3 parser */
-    ldr     w0, [x19, #0x314]
+    ldr     w0, [x19, #GENET_RBUF_CHK_CTRL]
     orr     w0, w0, #1              /* RXCHK_EN */
     orr     w0, w0, #(1 << 5)      /* L3_PARSE_DIS */
-    str     w0, [x19, #0x314]
+    str     w0, [x19, #GENET_RBUF_CHK_CTRL]
 
     /* TBUF_CTRL: 64B TX status block */
     ldr     w0, [x19, #GENET_TBUF_CTRL]
@@ -306,7 +306,7 @@ genet_init:
 
     /* RBUF_TBUF_SIZE_CTRL: allocate TBUF space for TX. */
     mov     w0, #1
-    str     w0, [x19, #0x3B4]
+    str     w0, [x19, #GENET_RBUF_TBUF_SIZE]
 
     /* --- Init RX descriptors --- */
     mov     x24, x21                /* current buffer addr */
@@ -705,9 +705,9 @@ genet_recv:
     b.ne    .Lrx_err
 
     lsr     w5, w4, #16
-    and     w5, w5, #0xFFF          /* raw length (includes 2-byte pad) */
+    and     w5, w5, #0xFFF          /* raw length (includes 64B RSB + 2B pad) */
 
-    /* Compute source buffer: pool + ridx * 2048 + 2 (skip pad) */
+    /* Compute source buffer: pool + ridx * 2048 */
     ldr     x0, [x20, #GENET_STATE_RX_POOL]
     lsl     w3, w2, #11
     add     x0, x0, x3
@@ -724,7 +724,10 @@ genet_recv:
 
     /* Skip 64-byte RSB (from RBUF_64B_EN) + 2-byte alignment pad.
      * The descriptor's raw length includes both; subtracting 66
-     * yields the actual Ethernet frame length. */
+     * yields the actual Ethernet frame length. Guard against
+     * underflow (raw_len < 66) from corrupt descriptors. */
+    cmp     w5, #66
+    b.lt    .Lrx_err
     add     x0, x0, #66            /* skip RSB(64) + pad(2) */
     sub     w5, w5, #66            /* actual frame length */
 
