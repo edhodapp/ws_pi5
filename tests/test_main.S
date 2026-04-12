@@ -138,6 +138,7 @@ _start:
     bl      test_arp_timer_cb_no_send
     bl      test_arp_bad_htype
     bl      test_arp_bad_hlen
+    bl      test_arp_timer_cb_rearm
     bl      test_ip_checksum
     bl      test_ip_checksum_carry
     bl      test_icmp_echo_reply
@@ -170,6 +171,7 @@ _start:
     bl      test_net_recv_unknown
     bl      test_net_recv_short
     bl      test_net_recv_wrong_mac
+    bl      test_net_recv_perf
     bl      test_udp
     bl      test_timer
     bl      test_ntp

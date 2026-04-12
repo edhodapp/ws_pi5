@@ -60,7 +60,7 @@ else ifneq ($(PERF),)
   $(error Unknown PERF=$(PERF); use recv, send, dispatch, l3, or all)
 endif
 
-ASFLAGS = -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
+ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories
@@ -178,6 +178,15 @@ $(BUILD)/test_kernel8.img: $(BUILD)/test_kernel8.elf
 
 $(BUILD)/test_kernel8.elf: $(TEST_OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(TEST_OBJS) -o $@
+
+# Branch coverage — run tests under QEMU -d exec,nochain tracing,
+# then analyze which conditional branches had both sides executed.
+test-coverage:
+	$(MAKE) clean
+	$(MAKE) $(BUILD)/test_kernel8.img $(BUILD)/test_kernel8.elf
+	bash scripts/run_tests_traced.sh
+	.venv/bin/python scripts/branch_coverage.py \
+		$(BUILD)/test_kernel8.elf $(BUILD)/qemu_trace.log
 
 # Functional test kernel — ALWAYS clean rebuild (see `test` above)
 test-functional:

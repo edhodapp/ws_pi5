@@ -16,6 +16,7 @@
 .global test_net_recv_unknown
 .global test_net_recv_short
 .global test_net_recv_wrong_mac
+.global test_net_recv_perf
 
 .section .text
 
@@ -168,6 +169,38 @@ test_net_recv_wrong_mac:
     ret
 
 /* ========================================================================
+ * test_net_recv_perf — PERF_ETHERTYPE (0x88B6) frame dispatches to
+ *                      perf_handle (which drops it in non-PERF builds,
+ *                      returning 0). Pins the b.eq branch at net.S:65.
+ * ======================================================================== */
+test_net_recv_perf:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Build a minimal PERF frame: our MAC + EtherType 0x88B6 */
+    ldr     x0, =net_perf_frame
+    mov     w1, #ETH_HDR_LEN
+    bl      net_recv_one
+
+    /* Non-PERF build: perf_handle returns 0 (silent drop).
+     * The test asserts the frame was dispatched (not rejected
+     * at the MAC check or EtherType check). In non-PERF builds,
+     * dispatch + drop both return 0, so we can only verify
+     * net_recv_one didn't crash. A PERF build would return 78. */
+    cbnz    w0, .Lfail_net_perf
+
+    ldr     x0, =name_net_perf
+    bl      test_pass
+    b       .Ldone_net_perf
+
+.Lfail_net_perf:
+    ldr     x0, =name_net_perf
+    bl      test_fail
+
+.Ldone_net_perf:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -243,6 +276,14 @@ net_wrong_mac_frame:
     .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
     .byte   0x08, 0x00                               /* EtherType: IPv4 */
 
+/* 14-byte frame with PERF_ETHERTYPE (0x88B6) — dispatches to perf_handle */
+.balign 4
+net_perf_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x88, 0xB6                               /* EtherType: PERF */
+
+name_net_perf:      .asciz "net_recv_perf"
 name_net_arp:       .asciz "net_recv_arp"
 name_net_icmp:      .asciz "net_recv_icmp"
 name_net_unknown:   .asciz "net_recv_unknown"

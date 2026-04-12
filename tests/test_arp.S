@@ -20,6 +20,7 @@
  *  16. test_arp_timer_cb_no_send  — timer with NULL send_fn → skip send
  *  17. test_arp_bad_htype         — HTYPE=2 (not Ethernet) → ignored
  *  18. test_arp_bad_hlen          — HLEN=4 (not 6) → ignored
+ *  19. test_arp_timer_cb_rearm    — timer re-arm with pool → timer_set called
  */
 
 .include "net.inc"
@@ -43,6 +44,7 @@
 .global test_arp_timer_cb_no_send
 .global test_arp_bad_htype
 .global test_arp_bad_hlen
+.global test_arp_timer_cb_rearm
 
 .section .text
 
@@ -743,6 +745,63 @@ test_arp_bad_hlen:
     ret
 
 /* ========================================================================
+ * test_arp_timer_cb_rearm — timer re-arm with real pool
+ *
+ * Sets ARPC_TIMER_POOL to a fake timer pool with 1 free slot.
+ * After arp_timer_cb returns, the slot's CALLBACK should be
+ * non-zero (timer_set wrote to it). This pins the cbz x0 branch
+ * at arp.S:327 (the fall-through path: pool != NULL → call
+ * timer_set).
+ * ======================================================================== */
+test_arp_timer_cb_rearm:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* Zero the fake timer pool: 1 slot, all clear */
+    ldr     x0, =fake_timer_pool
+    stp     xzr, xzr, [x0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #24]
+    /* Set capacity = 1 */
+    mov     w1, #1
+    str     w1, [x0, #TPOOL_CAP]
+
+    /* Set up arp_send_ctx with pool + NULL send_fn (skip send) */
+    ldr     x19, =arp_send_ctx
+    str     xzr, [x19, #ARPC_DWC2_BASE]
+    str     xzr, [x19, #ARPC_ECM_STATE]
+    ldr     x0, =arp_timer_tx_buf
+    str     x0, [x19, #ARPC_TX_BUF]
+    ldr     x0, =fake_timer_pool
+    str     x0, [x19, #ARPC_TIMER_POOL]
+    str     xzr, [x19, #ARPC_SEND_FN]
+    bl      timer_freq
+    str     x0, [x19, #ARPC_TIMER_FREQ]
+
+    /* Call timer callback */
+    ldr     x0, =arp_send_ctx
+    bl      arp_timer_cb
+
+    /* The fake pool's slot 0 should now have a non-zero CALLBACK
+     * (timer_set wrote arp_timer_cb's address there). */
+    ldr     x0, =fake_timer_pool
+    ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
+    cbz     x1, .Lfail_tcb_rearm
+
+    ldr     x0, =name_tcb_rearm
+    bl      test_pass
+    b       .Ldone_tcb_rearm
+
+.Lfail_tcb_rearm:
+    ldr     x0, =name_tcb_rearm
+    bl      test_fail
+
+.Ldone_tcb_rearm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Fake send function — just increments counter
  * x0: dwc2_base, x1: ecm_state, x2: buf, w3: len
  * Returns: w0 = 0 (success)
@@ -933,6 +992,7 @@ name_tcb_send:          .asciz "arp_timer_cb_send"
 name_tcb_nosend:        .asciz "arp_timer_cb_no_send"
 name_bad_htype:         .asciz "arp_bad_htype"
 name_bad_hlen:          .asciz "arp_bad_hlen"
+name_tcb_rearm:         .asciz "arp_timer_cb_rearm"
 
 .section .data
 .balign 4
@@ -946,3 +1006,8 @@ arp_timer_tx_buf:
 .balign 4
 arp_send_count:
     .word   0
+
+/* Fake timer pool: header (8 bytes) + 1 slot (32 bytes) = 40 bytes */
+.balign 8
+fake_timer_pool:
+    .space  40
