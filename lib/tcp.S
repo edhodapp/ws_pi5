@@ -1692,20 +1692,34 @@ tcp_estab_ack_handler:
     sub     w1, w1, w0
     str     w1, [x19, #TCONN_SND_BUF_USED]
 
-    /* RTT measurement (RFC 6298, Karn's algorithm) */
+    /* RTT measurement (RFC 6298, Karn's algorithm).
+     *
+     * Saves x4/x5/x6 around the timer_now + tcp_rtt_update calls.
+     * Uses `stp x6, x16, [sp, #-16]!` (x16 as throwaway pad)
+     * instead of a bare `str x6, [sp, #-8]!` so sp stays
+     * 16-byte aligned across the bl sequence. AArch64's SP
+     * alignment check (SCTLR_EL1.SA) faults on any sp-relative
+     * load/store where sp is not 16-byte aligned, and the
+     * callees here (timer_now, tcp_rtt_update) do
+     * `stp [sp, #-16]!` in their prologues. A bare 8-byte push
+     * would leave sp at 24 off the prolog (not a multiple of 16),
+     * causing a silent SP alignment fault inside the callee
+     * prologue whenever this RTT path was taken — which happens
+     * on every first ACK of a freshly sent segment under
+     * concurrent load. */
     ldrb    w0, [x19, #TCONN_RTXCOUNT]
     cbnz    w0, .Leak_no_rtt            /* retransmitted → skip sample */
     ldr     x0, [x19, #TCONN_SEND_TICK]
     cbz     x0, .Leak_no_rtt            /* no timestamp → skip */
     stp     x4, x5, [sp, #-16]!        /* save seg_ack, SND_UNA */
-    str     x6, [sp, #-8]!             /* save SND_NXT */
+    stp     x6, x16, [sp, #-16]!       /* save SND_NXT (x16 = pad, 16-byte aligned) */
     bl      timer_now
     ldr     x1, [x19, #TCONN_SEND_TICK]
     sub     w0, w0, w1                  /* R = now - send_tick (ticks) */
     mov     x1, x19
     bl      tcp_rtt_update
     str     xzr, [x19, #TCONN_SEND_TICK]
-    ldr     x6, [sp], #8
+    ldp     x6, x16, [sp], #16         /* restore x6 (discard pad into x16) */
     ldp     x4, x5, [sp], #16
 .Leak_no_rtt:
 
@@ -2555,6 +2569,11 @@ tcp_send_ready:
  * Good → return 0 (FSA already wrote CLOSED).
  * Leaf function.
  */
+/* Same partial-ACK tolerance as tcp_finwait1_ack_handler — see
+ * the comment there for the full rationale. Summary:
+ *   SEG.ACK >  SND_NXT  →  bogus → RST
+ *   SEG.ACK == SND_NXT  →  FIN acked → clear rtx, transition CLOSED
+ *   SEG.ACK <  SND_NXT  →  partial → stay in LAST_ACK, no RST */
 tcp_lastack_ack_handler:
     stp     x29, x30, [sp, #-32]!
     stp     x19, x20, [sp, #16]
@@ -2562,29 +2581,60 @@ tcp_lastack_ack_handler:
     mov     x19, x0                 /* conn */
 
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
-    rev     w4, w4
+    rev     w4, w4                  /* w4 = seg_ack (host order) */
     ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
-    b.ne    .Llaa_bad
-    /* FIN ACKed: clear retransmit */
+    b.hi    .Llaa_bogus             /* seg_ack > SND_NXT → RST */
+    b.ne    .Llaa_partial           /* seg_ack < SND_NXT → stay */
+
+    /* seg_ack == SND_NXT: FIN acked, clear rtx, transition to CLOSED */
     mov     x0, x19
     bl      tcp_rtx_clear
     mov     w0, #0
     b       .Llaa_done
-.Llaa_bad:
+
+.Llaa_partial:
+    /* Partial or duplicate ACK: rollback state to LAST_ACK */
+    mov     w0, #TCPS_LAST_ACK
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0
+    b       .Llaa_done
+
+.Llaa_bogus:
     mov     w4, #TCPS_LAST_ACK
     strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1
+
 .Llaa_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
 
 /*
- * tcp_finwait1_ack_handler — FIN_WAIT_1 + ACK → FIN_WAIT_2
+ * tcp_finwait1_ack_handler — FIN_WAIT_1 + ACK
  *
- * Verify SEG.ACK == SND_NXT. Bad → restore FIN_WAIT_1, return -1.
- * Good → return 0 (FSA already wrote FIN_WAIT_2).
+ *   SEG.ACK >  SND_NXT  →  bogus ack of unsent data → restore state, return -1 (RST)
+ *   SEG.ACK == SND_NXT  →  FIN acked → clear rtx, return 0 (transition to FIN_WAIT_2)
+ *   SEG.ACK <  SND_NXT  →  partial / duplicate ack → restore state, return 0 (stay)
+ *
+ * The partial-ack case is crucial for concurrent HTTP closes:
+ * after the server sends (data seg 1)(data seg 2)(FIN), the peer
+ * ACKs each segment in turn. The ACKs of segments 1 and 2 arrive
+ * with SEG.ACK < SND_NXT (because FIN consumes 1 seq past the
+ * last data byte). An earlier version treated those as errors and
+ * returned -1, which fell through to `.Ltcp_no_conn` and emitted
+ * a spurious RST per partial ACK. Under a burst of concurrent
+ * HTTP closes this produced a storm of RSTs to the peer and
+ * wedged the connection faster than the normal close path could
+ * complete.
+ *
+ * This handler does NOT currently advance SND_UNA or slide the
+ * send buffer tail on partial ACK, so retransmission may re-send
+ * already-acked data until the FIN ACK arrives. That is
+ * inefficient but not incorrect (TCP handles duplicate data).
+ * Adding SND_UNA/SND_BUF_TAIL advancement here is a future
+ * optimization — see tcp_estab_ack_handler for the pattern.
+ *
  * Leaf function.
  */
 tcp_finwait1_ack_handler:
@@ -2594,19 +2644,34 @@ tcp_finwait1_ack_handler:
     mov     x19, x0                 /* conn */
 
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
-    rev     w4, w4
+    rev     w4, w4                  /* w4 = seg_ack (host order) */
     ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
-    b.ne    .Lfw1a_bad
-    /* FIN ACKed: clear retransmit */
+    b.hi    .Lfw1a_bogus            /* seg_ack > SND_NXT → RST */
+    b.ne    .Lfw1a_partial          /* seg_ack < SND_NXT → stay */
+
+    /* seg_ack == SND_NXT: FIN acked, clear rtx, transition to FIN_WAIT_2 */
     mov     x0, x19
     bl      tcp_rtx_clear
     mov     w0, #0
     b       .Lfw1a_done
-.Lfw1a_bad:
+
+.Lfw1a_partial:
+    /* Partial or duplicate ACK: rollback state to FIN_WAIT_1 and
+     * return 0. The FSA caller pre-wrote FIN_WAIT_2 at
+     * .Ltcp_fsa_lookup; we undo that so we stay in FIN_WAIT_1. */
+    mov     w0, #TCPS_FIN_WAIT_1
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0
+    b       .Lfw1a_done
+
+.Lfw1a_bogus:
+    /* seg_ack > SND_NXT: acks data we never sent. Roll back
+     * state and return -1 to trigger RST via .Ltcp_no_conn. */
     mov     w4, #TCPS_FIN_WAIT_1
     strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1
+
 .Lfw1a_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
@@ -2716,10 +2781,13 @@ tcp_finwait2_fin_handler:
     ret
 
 /*
- * tcp_closing_ack_handler — CLOSING + ACK → TIME_WAIT
+ * tcp_closing_ack_handler — CLOSING + ACK
  *
- * Verify SEG.ACK == SND_NXT. Bad → restore CLOSING, return -1.
- * Good → arm 2MSL timer, return 0 (FSA already wrote TIME_WAIT).
+ *   SEG.ACK >  SND_NXT  →  bogus → restore CLOSING, return -1 (RST)
+ *   SEG.ACK == SND_NXT  →  FIN acked → arm 2MSL, return 0 (→ TIME_WAIT)
+ *   SEG.ACK <  SND_NXT  →  partial / duplicate → restore CLOSING, return 0
+ *
+ * Same partial-ACK tolerance rationale as tcp_finwait1_ack_handler.
  * Note: non-leaf due to timer_set call.
  */
 tcp_closing_ack_handler:
@@ -2729,11 +2797,13 @@ tcp_closing_ack_handler:
     mov     x19, x0                 /* conn */
 
     ldr     w4, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
-    rev     w4, w4
+    rev     w4, w4                  /* w4 = seg_ack (host order) */
     ldr     w5, [x19, #TCONN_SND_NXT]
     cmp     w4, w5
-    b.ne    .Lcla_bad
+    b.hi    .Lcla_bogus             /* seg_ack > SND_NXT → RST */
+    b.ne    .Lcla_partial           /* seg_ack < SND_NXT → stay */
 
+    /* seg_ack == SND_NXT: FIN acked, transition to TIME_WAIT */
     /* Guard: skip timer if no pool */
     ldr     x0, =tcp_timer_pool_ptr
     ldr     x0, [x0]
@@ -2757,7 +2827,14 @@ tcp_closing_ack_handler:
     mov     w0, #0
     b       .Lcla_done
 
-.Lcla_bad:
+.Lcla_partial:
+    /* Partial or duplicate ACK: rollback state to CLOSING */
+    mov     w0, #TCPS_CLOSING
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0
+    b       .Lcla_done
+
+.Lcla_bogus:
     mov     w4, #TCPS_CLOSING
     strb    w4, [x19, #TCONN_STATE]
     mov     w0, #-1

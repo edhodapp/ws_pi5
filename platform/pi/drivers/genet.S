@@ -576,6 +576,18 @@ genet_send:
     orr     w0, w0, w4              /* w4 = TX_DO_CSUM or 0 */
     str     w0, [x5, #0]            /* length_status */
 
+    /* Barrier between descriptor write and doorbell ring. The
+     * descriptor lives in GENET internal SRAM (MMIO window at
+     * GENET+0x4000) and PROD_INDEX lives at GENET+0x500C. Both
+     * are Device memory so CPU stores are strictly ordered from
+     * the CPU's view, but the GENET's internal DMA fetch engine
+     * is a separate AXI master that may observe memory through a
+     * path not serialized with the CPU's doorbell write. Linux
+     * bcmgenet uses wmb() at the equivalent point in
+     * bcmgenet_xmit; on AArch64 that is `dsb ishst` (inner-
+     * shareable, store-side), which we match here. */
+    dsb     ishst
+
     /* Increment and write PROD_INDEX */
     add     w3, w3, #1
     and     w3, w3, #0xFFFF
