@@ -30,6 +30,8 @@
 .global test_ip_handle_martian_src_loopback
 .global test_ip_handle_martian_src_loopback_high
 .global test_ip_handle_martian_src_self
+.global test_ip_handle_martian_src_bcast
+.global test_ip_handle_martian_src_mcast
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
 .global test_ip_reasm_overlap
@@ -589,6 +591,56 @@ test_ip_handle_martian_src_self:
     ret
 
 /* ========================================================================
+ * test_ip_handle_martian_src_bcast — src=255.255.255.255 → drop
+ * RFC 1122 §3.2.1.3: broadcast source is invalid. Amplification vector.
+ * ======================================================================== */
+test_ip_handle_martian_src_bcast:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_bcast_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_bcast
+
+    ldr     x0, =name_ip_src_bcast
+    bl      test_pass
+    b       .Ldone_ip_src_bcast
+
+.Lfail_ip_src_bcast:
+    ldr     x0, =name_ip_src_bcast
+    bl      test_fail
+
+.Ldone_ip_src_bcast:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_martian_src_mcast — src=224.0.0.1 → drop
+ * RFC 1122 §3.2.1.3 / RFC 1112: multicast source is invalid.
+ * ======================================================================== */
+test_ip_handle_martian_src_mcast:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =ip_src_mcast_frame
+    mov     w1, #42
+    bl      ip_handle
+
+    cbnz    w0, .Lfail_ip_src_mcast
+
+    ldr     x0, =name_ip_src_mcast
+    bl      test_pass
+    b       .Ldone_ip_src_mcast
+
+.Lfail_ip_src_mcast:
+    ldr     x0, =name_ip_src_mcast
+    bl      test_fail
+
+.Ldone_ip_src_mcast:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * test_ip_reasm_overlap — overlapping fragment dropped
  *
  * Frag1: offset=0, MF=1, 16 bytes (sets bitmap bits 0-1)
@@ -968,6 +1020,34 @@ ip_src_self_frame:
     .byte   0x08, 0x00, 0xF7, 0xFD
     .byte   0x00, 0x01, 0x00, 0x01
 
+/* src=255.255.255.255 (broadcast), cksum=0x5C9F — RFC 1122 §3.2.1.3 */
+.balign 4
+ip_src_bcast_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x5C, 0x9F
+    .byte   0xFF, 0xFF, 0xFF, 0xFF                   /* src: broadcast */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
+/* src=224.0.0.1 (multicast), cksum=0x7C9D — RFC 1112 */
+.balign 4
+ip_src_mcast_frame:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0x12, 0x34, 0x00, 0x00
+    .byte   0x40, 0x01, 0x7C, 0x9D
+    .byte   0xE0, 0x00, 0x00, 0x01                   /* src: 224.0.0.1 */
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x08, 0x00, 0xF7, 0xFD
+    .byte   0x00, 0x01, 0x00, 0x01
+
 /* Overlapping fragment: id=0xABCD, offset=1 (8 bytes), MF=0, 8-byte payload */
 .balign 4
 ip_frag_overlap:
@@ -1015,6 +1095,8 @@ name_ip_src_zero:          .asciz "ip_handle_martian_src_zero"
 name_ip_src_loopback:      .asciz "ip_handle_martian_src_loopback"
 name_ip_src_loopback_high: .asciz "ip_handle_martian_src_loopback_high"
 name_ip_src_self:          .asciz "ip_handle_martian_src_self"
+name_ip_src_bcast:         .asciz "ip_handle_martian_src_bcast"
+name_ip_src_mcast:         .asciz "ip_handle_martian_src_mcast"
 name_ip_reasm:      .asciz "ip_reasm_two_frags"
 name_ip_timeout:    .asciz "ip_reasm_timeout"
 name_ip_overlap:    .asciz "ip_reasm_overlap"

@@ -153,6 +153,8 @@ _start:
     bl      test_icmp_send_no_ctx
     bl      test_icmp_rate_allow
     bl      test_icmp_rate_deny
+    bl      test_icmp_err_bcast_dst
+    bl      test_icmp_err_mcast_dst
     bl      test_ip_handle_icmp
     bl      test_ip_handle_short
     bl      test_ip_handle_bad_cksum
@@ -166,6 +168,8 @@ _start:
     bl      test_ip_handle_martian_src_loopback
     bl      test_ip_handle_martian_src_loopback_high
     bl      test_ip_handle_martian_src_self
+    bl      test_ip_handle_martian_src_bcast
+    bl      test_ip_handle_martian_src_mcast
     bl      test_net_recv_arp
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown

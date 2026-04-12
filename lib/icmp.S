@@ -122,6 +122,19 @@ icmp_send_error:
     mov     w21, w2                     /* w21 = ICMP type */
     mov     w22, w3                     /* w22 = ICMP code */
 
+    /* Guard 0: RFC 1122 3.2.2 — MUST NOT send ICMP error for
+     * datagrams destined to a broadcast or multicast IP address.
+     * Prevents amplification attacks.
+     * Broadcast: 255.255.255.255 (limited broadcast).
+     * Multicast: 224.0.0.0/4 (first nibble == 0xE). */
+    ldr     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
+    cmn     w0, #1                      /* 0xFFFFFFFF? (broadcast) */
+    b.eq    .Lise_ret
+    lsr     w0, w0, #4                  /* first nibble */
+    and     w0, w0, #0xF
+    cmp     w0, #0xE                    /* 224.0.0.0/4? (multicast) */
+    b.eq    .Lise_ret
+
     /* Guard 1: Don't send ICMP errors in response to ICMP errors */
     ldrb    w0, [x19, #(ETH_PAYLOAD + IP_PROTO)]
     cmp     w0, #IP_PROTO_ICMP

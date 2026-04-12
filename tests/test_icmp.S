@@ -21,6 +21,8 @@
 .global test_icmp_send_no_ctx
 .global test_icmp_rate_allow
 .global test_icmp_rate_deny
+.global test_icmp_err_bcast_dst
+.global test_icmp_err_mcast_dst
 
 .section .text
 
@@ -620,6 +622,91 @@ fake_icmp_send:
 /* ========================================================================
  * Test data
  * ======================================================================== */
+/* ========================================================================
+ * test_icmp_err_bcast_dst — RFC 1122 3.2.2: MUST NOT send ICMP error
+ * for datagrams destined to a broadcast address (255.255.255.255).
+ * Exercises the guard that prevents amplification attacks.
+ * ======================================================================== */
+test_icmp_err_bcast_dst:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =icmp_test_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    ldr     x0, =icmp_test_send_count
+    str     wzr, [x0]
+
+    /* Frame with dst IP = 255.255.255.255 (broadcast) */
+    ldr     x0, =icmp_bcast_dst_frame
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PORT_UNREACH
+    bl      icmp_send_error
+
+    /* Send MUST NOT have been called */
+    ldr     x0, =icmp_test_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_icmp_bcast
+
+    ldr     x0, =name_icmp_bcast
+    bl      test_pass
+    b       .Ldone_icmp_bcast
+.Lfail_icmp_bcast:
+    ldr     x0, =name_icmp_bcast
+    bl      test_fail
+.Ldone_icmp_bcast:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_icmp_err_mcast_dst — RFC 1122 3.2.2: MUST NOT send ICMP error
+ * for datagrams destined to a multicast address (224.0.0.0/4).
+ * ======================================================================== */
+test_icmp_err_mcast_dst:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =icmp_test_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    ldr     x0, =icmp_test_send_count
+    str     wzr, [x0]
+
+    /* Frame with dst IP = 224.0.0.1 (multicast) */
+    ldr     x0, =icmp_mcast_dst_frame
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PORT_UNREACH
+    bl      icmp_send_error
+
+    /* Send MUST NOT have been called */
+    ldr     x0, =icmp_test_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_icmp_mcast
+
+    ldr     x0, =name_icmp_mcast
+    bl      test_pass
+    b       .Ldone_icmp_mcast
+.Lfail_icmp_mcast:
+    ldr     x0, =name_icmp_mcast
+    bl      test_fail
+.Ldone_icmp_mcast:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 .section .rodata
 
 /* Sender MAC for verification */
@@ -669,6 +756,40 @@ icmp_not_echo_frame:
     .byte   0x03, 0x00, 0xFC, 0xFD                   /* type=3, code=0, cksum=0xFDFC */
     .byte   0x00, 0x01, 0x00, 0x01
 
+/* 42-byte UDP frame with dst IP = 255.255.255.255 (broadcast).
+ * icmp_send_error must suppress the error for this destination. */
+.balign 4
+icmp_bcast_dst_frame:
+    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF     /* dst: broadcast MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x1C                   /* ver/ihl, totlen */
+    .byte   0x12, 0x34, 0x00, 0x00                   /* id, flags/frag */
+    .byte   0x40, 0x11                               /* ttl=64, proto=UDP */
+    .byte   0x00, 0x00                               /* checksum (ignored) */
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src: 10.0.2.2 */
+    .byte   0xFF, 0xFF, 0xFF, 0xFF                   /* dst: broadcast */
+    .byte   0x00, 0x35, 0x00, 0x07                   /* sport=53, dport=7 */
+    .byte   0x00, 0x08, 0x00, 0x00                   /* udp len=8, cksum=0 */
+
+/* 42-byte UDP frame with dst IP = 224.0.0.1 (multicast).
+ * icmp_send_error must suppress the error for this destination. */
+.balign 4
+icmp_mcast_dst_frame:
+    .byte   0x01, 0x00, 0x5E, 0x00, 0x00, 0x01     /* dst: multicast MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x1C                   /* ver/ihl, totlen */
+    .byte   0x12, 0x34, 0x00, 0x00                   /* id, flags/frag */
+    .byte   0x40, 0x11                               /* ttl=64, proto=UDP */
+    .byte   0x00, 0x00                               /* checksum (ignored) */
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src: 10.0.2.2 */
+    .byte   0xE0, 0x00, 0x00, 0x01                   /* dst: 224.0.0.1 */
+    .byte   0x00, 0x35, 0x00, 0x07                   /* sport=53, dport=7 */
+    .byte   0x00, 0x08, 0x00, 0x00                   /* udp len=8, cksum=0 */
+
+name_icmp_bcast:      .asciz "icmp_err_bcast_dst"
+name_icmp_mcast:      .asciz "icmp_err_mcast_dst"
 name_icmp_echo:       .asciz "icmp_echo_reply"
 name_icmp_not_echo:   .asciz "icmp_not_echo"
 name_icmp_short:      .asciz "icmp_short"

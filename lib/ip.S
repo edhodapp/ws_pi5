@@ -128,10 +128,8 @@ ip_handle:
      *      * 0.0.0.0/8 (we only check the exact zero address, not
      *        0.1.2.3 etc. — the rest of 0/8 is theoretical)
      *      * 169.254.0.0/16 (link-local)
-     *      * 224.0.0.0/4 (multicast as source — RFC 1112 forbids)
      *      * 240.0.0.0/4 (reserved / "Class E")
-     *      * 255.255.255.255 (broadcast as source)
-     *    The three checks above cover the most common attack
+     *    The five checks below cover the most common attack
      *    vectors on a single-host direct-cable deployment. The
      *    remaining RFC 6890 ranges are increasingly exotic and
      *    each would add ~2 instructions. Derivatives targeting
@@ -157,9 +155,16 @@ ip_handle:
     ldr     w3, [x3]
     cmp     w2, w3
     b.eq    .Lip_drop                      /* 7c: self-spoof */
+    cmn     w2, #1
+    b.eq    .Lip_drop                      /* 7d: broadcast (255.255.255.255) */
+    and     w3, w2, #0xF0                  /* first octet high nibble (LE byte 0) */
+    cmp     w3, #0xE0
+    b.eq    .Lip_drop                      /* 7e: multicast (224.0.0.0/4) */
 
     /* 8. IP.DST == net_our_ip (wire-format compare, no rev) */
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
+    ldr     x3, =net_our_ip
+    ldr     w3, [x3]
     cmp     w0, w3
     b.ne    .Lip_drop
 
