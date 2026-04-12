@@ -34,6 +34,7 @@
 .global test_ip_handle_martian_src_mcast
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
+.global test_ip_reasm_timeout_icmp
 .global test_ip_reasm_overlap
 .global test_ip_reasm_nonaligned
 .global test_ip_reasm_min_ttl
@@ -464,6 +465,78 @@ test_ip_reasm_timeout:
 
 .Ldone_ip_timeout:
     ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_timeout_icmp — RFC 1122 §3.2.2.4: reassembly timeout
+ * MUST generate ICMP Time Exceeded (type 11, code 1).
+ *
+ * Feed a fragment to allocate a slot, set up icmp_send_ctx with a
+ * fake send function, fire the timeout callback, then verify the
+ * fake send was called with the correct ICMP type and code.
+ * ======================================================================== */
+test_ip_reasm_timeout_icmp:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ip_reasm_init
+    bl      icmp_init
+
+    /* Set up icmp_send_ctx with fake send */
+    ldr     x19, =icmp_send_ctx
+    str     xzr, [x19, #ICMPC_DWC2_BASE]
+    str     xzr, [x19, #ICMPC_ECM_STATE]
+    ldr     x0, =reasm_icmp_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_reasm_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    ldr     x0, =reasm_send_count
+    str     wzr, [x0]
+
+    /* Feed fragment 1 to allocate a slot */
+    ldr     x0, =ip_frag1_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lrti_copy:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lrti_copy
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_reasm_input
+
+    /* Fire timeout callback on the slot */
+    ldr     x0, =reasm_slots
+    bl      ip_reasm_timeout_cb
+
+    /* Fake send should have been called */
+    ldr     x0, =reasm_send_count
+    ldr     w0, [x0]
+    cbz     w0, .Lfail_ip_rti
+
+    /* Verify ICMP type=11 (Time Exceeded), code=1 (reassembly) */
+    ldr     x0, =reasm_icmp_tx_buf
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_TYPE)]
+    cmp     w1, #ICMP_TIME_EXCEEDED
+    b.ne    .Lfail_ip_rti
+    ldrb    w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + ICMP_CODE)]
+    cmp     w1, #1                     /* code 1: reassembly */
+    b.ne    .Lfail_ip_rti
+
+    ldr     x0, =name_ip_rti
+    bl      test_pass
+    b       .Ldone_ip_rti
+
+.Lfail_ip_rti:
+    ldr     x0, =name_ip_rti
+    bl      test_fail
+
+.Ldone_ip_rti:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /* ========================================================================
@@ -1099,6 +1172,7 @@ name_ip_src_bcast:         .asciz "ip_handle_martian_src_bcast"
 name_ip_src_mcast:         .asciz "ip_handle_martian_src_mcast"
 name_ip_reasm:      .asciz "ip_reasm_two_frags"
 name_ip_timeout:    .asciz "ip_reasm_timeout"
+name_ip_rti:        .asciz "ip_reasm_timeout_icmp"
 name_ip_overlap:    .asciz "ip_reasm_overlap"
 name_ip_nonaligned: .asciz "ip_reasm_nonaligned"
 name_ip_min_ttl:    .asciz "ip_reasm_min_ttl"
@@ -1115,3 +1189,22 @@ ip_handle_buf:
 .balign 8
 ip_reasm_buf:
     .space  ETH_FRAME_MAX
+
+/* ICMP Time Exceeded test: fake send function + tx buffer */
+.balign 4
+reasm_send_count:
+    .word   0
+
+.balign 8
+reasm_icmp_tx_buf:
+    .space  70                     /* ICMP_ERROR_FRAME_LEN */
+
+.section .text
+/* Fake send for reasm timeout ICMP test */
+fake_reasm_send:
+    ldr     x9, =reasm_send_count
+    ldr     w10, [x9]
+    add     w10, w10, #1
+    str     w10, [x9]
+    mov     w0, #0
+    ret

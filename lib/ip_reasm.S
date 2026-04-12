@@ -53,8 +53,81 @@ ip_reasm_set_timer_pool:
  * x0: pointer to reasm slot
  * Clobbers: x0
  */
+/*
+ * ip_reasm_timeout_cb — Timer callback: free slot + send ICMP Time Exceeded
+ *
+ * x0: pointer to the reassembly slot (timer context)
+ *
+ * RFC 1122 §3.2.2.4: when a reassembly timer expires, MUST send
+ * ICMP Time Exceeded (type 11, code 1) to the source.
+ *
+ * Builds a minimal 42-byte synthetic frame on the stack from the
+ * slot's stored fields (src_ip, dst_ip, proto, id), then passes it
+ * to icmp_send_error. The synthetic frame has:
+ *   ETH(14): zeroed (icmp_send_error rewrites it)
+ *   IP(20):  ver=4, ihl=5, proto from slot, src/dst from slot
+ *   payload(8): first 8 bytes from REASM_DATA
+ *
+ * Clobbers: x0-x5, x19, x30
+ */
 ip_reasm_timeout_cb:
-    strb    wzr, [x0, #REASM_FLAGS]
+    stp     x19, x30, [sp, #-64]!
+    mov     x19, x0                     /* x19 = slot pointer */
+
+    /* Build 42-byte synthetic frame at [sp, #16].
+     * Zero the 48-byte region first (covers ETH+IP+8 payload). */
+    stp     xzr, xzr, [sp, #16]
+    stp     xzr, xzr, [sp, #32]
+    stp     xzr, xzr, [sp, #48]
+
+    /* IP header starts at sp+16+14 = sp+30 */
+    add     x1, sp, #30
+
+    /* VER_IHL = 0x45, totlen = 28 (IP+8 payload) */
+    mov     w2, #0x45
+    strb    w2, [x1, #0]               /* ver_ihl */
+    mov     w2, #28
+    rev16   w2, w2
+    strh    w2, [x1, #2]               /* totlen (NBO) */
+
+    /* IP ID from slot */
+    ldrh    w2, [x19, #REASM_IP_ID]
+    strh    w2, [x1, #4]               /* id (already NBO) */
+
+    /* TTL = slot's min TTL, proto from slot */
+    ldrb    w2, [x19, #REASM_MIN_TTL]
+    strb    w2, [x1, #8]               /* ttl */
+    ldrb    w2, [x19, #REASM_PROTO]
+    strb    w2, [x1, #9]               /* proto */
+
+    /* src/dst IP from slot (already NBO) */
+    ldr     w2, [x19, #REASM_SRC_IP]
+    str     w2, [x1, #12]              /* src */
+    ldr     w2, [x19, #REASM_DST_IP]
+    str     w2, [x1, #16]              /* dst */
+
+    /* IP checksum */
+    add     x0, sp, #30                /* IP header start */
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [sp, #(30 + IP_CHECKSUM)]
+
+    /* Copy first 8 bytes of reassembled data as payload */
+    ldr     x2, [x19, #REASM_DATA]
+    str     x2, [sp, #50]              /* sp+30+20 = payload */
+
+    /* Clear the slot BEFORE sending (so the slot is free even if
+     * icmp_send_error has side effects) */
+    strb    wzr, [x19, #REASM_FLAGS]
+
+    /* icmp_send_error(frame, len, type=11, code=1) */
+    add     x0, sp, #16                /* synthetic frame */
+    mov     w1, #42                    /* ETH + IP + 8 */
+    mov     w2, #ICMP_TIME_EXCEEDED
+    mov     w3, #1                     /* code 1: reassembly */
+    bl      icmp_send_error
+
+    ldp     x19, x30, [sp], #64
     ret
 
 /*

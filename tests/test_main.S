@@ -181,6 +181,7 @@ _start:
     bl      test_ntp
     bl      test_ip_reasm_two_frags
     bl      test_ip_reasm_timeout
+    bl      test_ip_reasm_timeout_icmp
     bl      test_ip_reasm_overlap
     bl      test_ip_reasm_nonaligned
     bl      test_ip_reasm_min_ttl

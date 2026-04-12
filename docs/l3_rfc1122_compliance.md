@@ -32,7 +32,7 @@ a DESIGN DECISION (documented rationale).
 | 13 | No ICMP error for broadcast/multicast dst | MUST NOT (3.2.2) | YES | test_icmp_err_bcast_dst, test_icmp_err_mcast_dst | OK |
 | 14 | No ICMP error for non-unicast source | MUST NOT (3.2.2) | YES | — | IP layer now filters bcast/mcast sources (4d/4e) before they reach ICMP. Defense in depth: icmp_send_error also guards on dst. |
 | 15 | Dest Unreachable for unknown protocol/port | MUST (3.2.2.1) | YES | test_udp_wrong_port, test_icmp_send_error | OK |
-| 16 | Time Exceeded (code 1: reassembly timeout) | MUST (3.2.2.4) | NO | — | **DEFECT** — ip_reasm times out slots but does not generate ICMP Time Exceeded |
+| 16 | Time Exceeded (code 1: reassembly timeout) | MUST (3.2.2.4) | YES | test_ip_reasm_timeout_icmp | OK |
 | 17 | MUST NOT originate Redirect | MUST NOT (3.2.2.2) | YES | — | OK — we never generate redirects |
 | 18 | Unknown ICMP type → silently ignore | MUST (3.2.2) | YES | test_icmp_unknown_type | OK |
 | 19 | ICMP error rate limiting | SHOULD (3.2.2) | YES | test_icmp_rate_allow, _deny | OK |
@@ -54,4 +54,4 @@ a DESIGN DECISION (documented rationale).
 | ~~4e: multicast source not filtered~~ | 3.2.1.3 | HIGH | FIXED — ip.S martian filter |
 | ~~13: ICMP error sent for broadcast dst~~ | 3.2.2 | HIGH | FIXED — icmp_send_error guard |
 | ~~14: ICMP error sent for non-unicast src~~ | 3.2.2 | HIGH | FIXED — IP layer blocks upstream |
-| 16: No Time Exceeded for reassembly timeout | 3.2.2.4 | MEDIUM | OPEN — diagnostic value only for a host |
+| ~~16: No Time Exceeded for reassembly timeout~~ | 3.2.2.4 | MEDIUM | FIXED — ip_reasm_timeout_cb now sends ICMP type 11 code 1 |
