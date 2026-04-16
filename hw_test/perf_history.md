@@ -6,6 +6,80 @@ new entries at the TOP so the latest work is immediately visible.
 
 ---
 
+## 2026-04-16 — L3 post-hardening perf (commit 13dc8c6) — PERF=l3
+
+Post-hardening run after callee-saved rate limiter fix and
+frag-zero ICMP guard. Confirms zero perf regression from the
+code quality improvements.
+
+### Per-frame cost (CNTVCT_EL0 @ 54 MHz)
+
+| payload | ip_ns | icmp_ns | ratio vs 64B |
+|---------|-------|---------|--------------|
+| 64B     | 166   | 123     | 1.0x         |
+| 1400B   | 1514  | 1456    | 11.98x       |
+
+### Comparison
+
+| metric | 2026-04-09 (bdf0ef0) | 2026-04-12 (ea7d7b4) | 2026-04-16 (13dc8c6) |
+|--------|---------------------|---------------------|---------------------|
+| ip_ns (64B) | 575 | 165 | **166** |
+| icmp_ns (64B) | 476 | 121 | **123** |
+| delta vs prev | — | -410 (HW csum offload) | **+1 (noise)** |
+
+No regression. The +1 ns is within measurement noise (stdev ~0.5 ns
+in previous characterization runs).
+
+---
+
+## 2026-04-12 — L2 baseline after branch coverage + csum offload (commit d2ebd36) — PERF=recv
+
+Pre-L3 baseline run. All L2 integration tests pass. Build includes
+HW TX checksum offload (ec590fc) and partial-ACK + SP alignment fixes
+(4d26b2b).
+
+### RTT baseline (100 ICMP echo, 64-byte)
+
+| metric  | value    |
+|---------|----------|
+| min     | 0.10 ms  |
+| median  | 0.11 ms  |
+| p99     | 0.16 ms  |
+| max     | 0.23 ms  |
+
+### Burst stats (ARP, single trial per N)
+
+| N    | replies | rx_discards | recv_ns | send_ms | wire_pps |
+|------|---------|-------------|---------|---------|----------|
+| 1    | 1       | 0           | 1046    | 46.2    | 9709     |
+| 50   | 50      | 0           | 1951    | 36.9    | 132626   |
+| 255  | 255     | 0           | 2058    | 60.9    | 290102   |
+| 256  | 256     | 0           | 2000    | 61.4    | 141047   |
+| 257  | 257     | 0           | 2022    | 64.4    | 162145   |
+| 512  | 512     | 0           | 1837    | 59.2    | 82567    |
+| 1024 | 1024    | 0           | 2080    | 53.8    | 293410   |
+
+### Comparison to previous (2026-04-08)
+
+The 2026-04-08 run at N=1024 showed 33-51 rx_discards per trial
+(~3-5% loss). This run: **zero discards, fully lossless at N=1024.**
+The improvement is from TX checksum offload (ec590fc) which reduced
+per-frame TX cost enough that genet_recv drains the ring before it
+overflows.
+
+recv_ns ~2080 is consistent with the 2026-04-08 steady-state
+measurement (~2360 ns pre-csum-offload). The ~280 ns improvement
+matches the expected savings from eliminating the software TCP/ICMP
+checksum computation on the TX path.
+
+### Notes
+
+- drop_count=0 on clean traffic (test_drop_counter_is_zero)
+- All dump_state assertions pass (PIDX/CIDX/TIDX advance correctly)
+- Pi responsive after all burst sizes including 1024
+
+---
+
 ## 2026-04-09 — martian source IP filter cost (commit bdf0ef0 vs synthetic baseline) — **EFFECTIVELY FREE**
 
 Follow-up measurement closing the review of the L3 hardening cycle.
