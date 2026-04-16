@@ -1,3 +1,5 @@
+# mypy: disable-error-code="no-untyped-def"
+# pylint: disable=inconsistent-quotes
 """
 test_l3_malformed_ip.py — IPv4 header negative-path drop tests.
 
@@ -348,6 +350,58 @@ class TestMartianSourceDropped:
             pi_mac=pi_mac, laptop_mac=laptop_mac,
             laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
             reason="src_ip=127.255.255.254",
+        )
+
+    def test_broadcast_src_ip_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """src_ip = 255.255.255.255 (limited broadcast) — RFC 1122
+        §3.2.1.3 MUST. Prevents amplification by responding to frames
+        claiming broadcast source.
+        """
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, "255.255.255.255", PI4_IP,
+            ident=0x5205, seq=1, payload=b"bcast-src",
+        )
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=255.255.255.255",
+        )
+
+    def test_multicast_src_ip_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """src_ip = 224.0.0.1 (multicast) — RFC 1112 forbids multicast
+        as source. RFC 1122 §3.2.1.3 drop rule.
+        """
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, "224.0.0.1", PI4_IP,
+            ident=0x5206, seq=1, payload=b"mcast-src",
+        )
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=224.0.0.1",
+        )
+
+    def test_multicast_src_ip_high_range_dropped(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """src_ip = 239.255.255.255 — upper end of 224/4 multicast.
+        Pins that the filter covers the full /4, not just 224.x.x.x.
+        """
+        frame = ip_frames.build_icmp_echo_frame(
+            laptop_mac, pi_mac, "239.255.255.255", PI4_IP,
+            ident=0x5207, seq=1, payload=b"mcast-high",
+        )
+        _assert_bogus_is_dropped(
+            eth_iface, frame,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            laptop_ip=laptop_ip, rtt_p99_ms=rtt_p99_ms,
+            reason="src_ip=239.255.255.255",
         )
 
     def test_our_own_ip_as_src_dropped(

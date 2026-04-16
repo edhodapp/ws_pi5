@@ -1,3 +1,5 @@
+# mypy: disable-error-code="no-untyped-def"
+# pylint: disable=missing-class-docstring,line-too-long,inconsistent-quotes
 """
 test_l3_frag.py — IPv4 fragment reassembly (lib/ip_reasm.S).
 
@@ -165,7 +167,7 @@ class TestInOrderReassembly:
             f"reassembled echo payload corrupted "
             f"({n_frags} × {frag_size}): "
             f"first mismatch at offset "
-            f"{next((i for i, (a, b) in enumerate(zip(r['icmp']['payload'], echo_payload)) if a != b), 'N/A')}"
+            f"{next((i for i, (a, b) in enumerate(zip(r['icmp']['payload'], echo_payload)) if a != b), 'N/A')}"  # noqa: E501
         )
         # Reassembled IP packet has frag_off=0, flags=0 (ip_reasm
         # clears both when it rebuilds in place).
@@ -446,11 +448,11 @@ class TestSlotExhaustion:
         with wire.WireCapture(eth_iface, bpf=bpf) as cap:
             # Phase 1: burst all 5 first-fragments. The 5th is dropped.
             for flow in flows:
-                wire.send_frame(eth_iface, flow["frag1"])
+                wire.send_frame(eth_iface, flow["frag1"])  # type: ignore[arg-type]  # noqa: E501
             # Phase 2: burst all 5 second-fragments. Flows 0..3 complete,
             # flow 4 has no slot to match (its first-frag was dropped).
             for flow in flows:
-                wire.send_frame(eth_iface, flow["frag2"])
+                wire.send_frame(eth_iface, flow["frag2"])  # type: ignore[arg-type]  # noqa: E501
 
             ident_set = {flow["icmp_ident"] for flow in flows}
 
@@ -482,8 +484,8 @@ class TestSlotExhaustion:
             f"not enforcing REASM_MAX_SLOTS"
         )
         assert len(got_idents) >= 1, (
-            f"no replies at all for the 5-flow burst — something "
-            f"other than the slot cap is broken"
+            "no replies at all for the 5-flow burst — something "
+            "other than the slot cap is broken"
         )
         # Every reply we DID see must be one of the 5 flows we sent.
         all_idents = {flow["icmp_ident"] for flow in flows}
@@ -509,7 +511,7 @@ class TestSlotExhaustion:
                 # frag1 is the first fragment (offset=0, MF=1).
                 # Sending it NOW matches the stuck slot's key, fills
                 # in bits 0..49, and check_complete passes.
-                wire.send_frame(eth_iface, flow["frag1"])
+                wire.send_frame(eth_iface, flow["frag1"])  # type: ignore[arg-type]  # noqa: E501
 
             def is_cleanup_reply(data: bytes) -> bool:
                 if not is_any_echo_reply_from_pi(
@@ -836,6 +838,100 @@ class TestReassemblyTimeout:
             pi_mac=pi_mac, laptop_mac=laptop_mac,
             pi_ip=PI4_IP, laptop_ip=laptop_ip,
             ident=0xAAAD, seq=1, payload=b"alive?",
+            deadline_ms=int(max(20.0 * rtt_p99_ms, 500.0)),
+        )
+        assert alive is not None
+
+
+# ==============================================================
+# RFC 1122 §3.2.2.4: ICMP Time Exceeded on reassembly timeout
+# ==============================================================
+
+def _is_time_exceeded_from_pi(
+    frame: bytes,
+    *,
+    pi_mac: bytes,
+    laptop_mac: bytes,
+    pi_ip: str,
+    laptop_ip: str,
+) -> bool:
+    """Predicate: frame is ICMP type 11 code 1 from the Pi."""
+    try:
+        eth = eth_frames.parse_eth_header(frame)
+        if eth["ethertype"] != eth_frames.ETHERTYPE_IPV4:
+            return False
+        if eth["src"] != pi_mac or eth["dst"] != laptop_mac:
+            return False
+        ip = ip_frames.parse_ipv4_header(
+            frame[eth_frames.ETH_HEADER_LEN:
+                  eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN]
+        )
+        if ip["protocol"] != ip_frames.IP_PROTO_ICMP:
+            return False
+        if ip["src_ip"] != pi_ip or ip["dst_ip"] != laptop_ip:
+            return False
+        icmp = ip_frames.parse_icmp(
+            frame[eth_frames.ETH_HEADER_LEN + ip_frames.IP_HDR_MIN:
+                  eth_frames.ETH_HEADER_LEN + ip["total_length"]]
+        )
+        return bool(
+            icmp["type"] == ip_frames.ICMP_TIME_EXCEEDED
+            and icmp["code"] == 1
+        )
+    except (ValueError, OSError):
+        return False
+
+
+@requires_hardware
+@pytest.mark.l3
+@pytest.mark.slow
+class TestReassemblyTimeoutIcmp:
+
+    def test_timeout_generates_icmp_time_exceeded(
+        self, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+    ):
+        """RFC 1122 §3.2.2.4: when a reassembly slot times out, the
+        Pi MUST send ICMP Time Exceeded (type 11, code 1) to the
+        source of the first fragment.
+
+        Send only the first fragment of a datagram, then wait past
+        REASM_TIMEOUT_SECS while capturing. The Pi's timer callback
+        fires and must emit the ICMP error.
+        """
+        echo_payload = bytes(600 - 8)
+        frames = _build_fragmented_echo(
+            laptop_mac, pi_mac, laptop_ip, PI4_IP,
+            ident=0x3A01, seq=1, echo_payload=echo_payload,
+            ip_ident=0x4A01, frag_size=304,
+        )
+        assert len(frames) == 2
+
+        bpf = icmp_bpf_from_pi(pi_mac, laptop_mac)
+        with wire.WireCapture(eth_iface, bpf=bpf) as cap:
+            wire.send_frame(eth_iface, frames[0])
+            # Wait past the reassembly timeout window.
+            deadline_ms = int((REASM_TIMEOUT_SECS + 3.0) * 1000)
+            reply = wire.wait_for_frame(
+                cap,
+                lambda data: _is_time_exceeded_from_pi(
+                    data,
+                    pi_mac=pi_mac, laptop_mac=laptop_mac,
+                    pi_ip=PI4_IP, laptop_ip=laptop_ip,
+                ),
+                deadline_ms=deadline_ms,
+            )
+        assert reply is not None, (
+            f"no ICMP Time Exceeded from Pi within "
+            f"{deadline_ms} ms after the reassembly timeout — "
+            f"RFC 1122 §3.2.2.4 requires this"
+        )
+
+        # Sanity: Pi is still alive after firing the timeout ICMP.
+        alive = send_echo_and_wait(
+            eth_iface,
+            pi_mac=pi_mac, laptop_mac=laptop_mac,
+            pi_ip=PI4_IP, laptop_ip=laptop_ip,
+            ident=0xAAAE, seq=1, payload=b"alive?",
             deadline_ms=int(max(20.0 * rtt_p99_ms, 500.0)),
         )
         assert alive is not None
