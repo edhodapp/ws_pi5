@@ -55,30 +55,28 @@ icmp_set_send_ctx:
  * Clobbers: x0-x4, x30
  */
 icmp_err_allow:
-    stp     x19, x30, [sp, #-16]!
+    stp     x19, x30, [sp, #-32]!
+    stp     x20, x21, [sp, #16]
 
     bl      timer_now
-    mov     x1, x0                      /* x1 = now */
+    mov     x19, x0                     /* x19 = now (callee-saved) */
 
     ldr     x2, =icmp_err_last_tick
-    ldr     x3, [x2]                    /* x3 = last_tick */
-
-    /* Compute elapsed ticks */
-    sub     x0, x1, x3
+    ldr     x20, [x2]                   /* x20 = last_tick (callee-saved) */
 
     /* Refill if >= 1 second elapsed */
     bl      timer_freq
     /* x0 = freq (ticks per second) */
-    sub     x4, x1, x3                  /* elapsed */
-    cmp     x4, x0
+    sub     x21, x19, x20              /* x21 = elapsed (callee-saved) */
+    cmp     x21, x0
     b.lo    .Liea_no_refill
 
     /* Refill tokens */
-    ldr     x3, =icmp_err_tokens
-    mov     w4, #ICMP_ERR_BURST
-    str     w4, [x3]
-    ldr     x3, =icmp_err_last_tick
-    str     x1, [x3]
+    ldr     x2, =icmp_err_tokens
+    mov     w3, #ICMP_ERR_BURST
+    str     w3, [x2]
+    ldr     x2, =icmp_err_last_tick
+    str     x19, [x2]
 
 .Liea_no_refill:
     /* Try to consume a token */
@@ -95,7 +93,8 @@ icmp_err_allow:
     mov     w0, #0
 
 .Liea_done:
-    ldp     x19, x30, [sp], #16
+    ldp     x20, x21, [sp, #16]
+    ldp     x19, x30, [sp], #32
     ret
 
 /*

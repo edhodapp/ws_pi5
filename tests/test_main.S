@@ -186,6 +186,7 @@ _start:
     bl      test_ip_reasm_two_frags
     bl      test_ip_reasm_timeout
     bl      test_ip_reasm_timeout_icmp
+    bl      test_ip_reasm_timeout_no_frag0
     bl      test_ip_reasm_big_complete
     bl      test_ip_reasm_overlap
     bl      test_ip_reasm_nonaligned

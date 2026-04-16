@@ -74,6 +74,13 @@ ip_reasm_timeout_cb:
     stp     x19, x30, [sp, #-64]!
     mov     x19, x0                     /* x19 = slot pointer */
 
+    /* RFC 1122 §3.2.2.4: only send Time Exceeded if fragment zero
+     * was received. Check bitmap bit 0 (first byte, bit 0). If
+     * fragment zero never arrived, the slot's data is incomplete
+     * and the ICMP error body would be garbage. */
+    ldrb    w1, [x19, #REASM_BITMAP]
+    tbz     w1, #0, .Lrtcb_skip_icmp
+
     /* Build 42-byte synthetic frame at [sp, #16].
      * Zero the 48-byte region first (covers ETH+IP+8 payload). */
     stp     xzr, xzr, [sp, #16]
@@ -133,7 +140,13 @@ ip_reasm_timeout_cb:
     mov     w2, #ICMP_TIME_EXCEEDED
     mov     w3, #1                     /* code 1: reassembly */
     bl      icmp_send_error
+    b       .Lrtcb_ret
 
+.Lrtcb_skip_icmp:
+    /* Fragment zero not received — just free the slot, no ICMP. */
+    strb    wzr, [x19, #REASM_FLAGS]
+
+.Lrtcb_ret:
     ldp     x19, x30, [sp], #64
     ret
 

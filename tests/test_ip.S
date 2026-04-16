@@ -37,6 +37,7 @@
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
 .global test_ip_reasm_timeout_icmp
+.global test_ip_reasm_timeout_no_frag0
 .global test_ip_reasm_big_complete
 .global test_ip_reasm_overlap
 .global test_ip_reasm_nonaligned
@@ -738,6 +739,72 @@ test_ip_handle_martian_src_mcast:
  * Frag1: offset=0, MF=1, 72 bytes. Frag2: offset=9, MF=0, 8 bytes.
  * Total = 80 bytes = 10 bitmap units = 1 full byte + 2 bits.
  * ======================================================================== */
+/* ========================================================================
+ * test_ip_reasm_timeout_no_frag0 — RFC 1122 §3.2.2.4: if fragment
+ * zero was never received, MUST NOT send ICMP Time Exceeded.
+ * Feed only frag2 (offset=2, not zero), fire timeout, verify the
+ * fake send was NOT called.
+ * ======================================================================== */
+test_ip_reasm_timeout_no_frag0:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      ip_reasm_init
+    bl      icmp_init
+
+    /* Set up icmp_send_ctx with fake send */
+    ldr     x19, =icmp_send_ctx
+    str     xzr, [x19, #ICMPC_DWC2_BASE]
+    str     xzr, [x19, #ICMPC_ECM_STATE]
+    ldr     x0, =reasm_icmp_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_reasm_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+    ldr     x0, =reasm_send_count
+    str     wzr, [x0]
+
+    /* Feed ONLY frag2 (offset=2, not zero) to allocate a slot
+     * without setting bitmap bit 0. */
+    ldr     x0, =ip_frag2_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lnf0_copy:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lnf0_copy
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+
+    /* Fire timeout callback on the slot */
+    ldr     x0, =reasm_slots
+    bl      ip_reasm_timeout_cb
+
+    /* Fake send must NOT have been called (no fragment zero) */
+    ldr     x0, =reasm_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_ip_nf0
+
+    /* Slot should still be freed */
+    ldr     x0, =reasm_slots
+    ldrb    w1, [x0, #REASM_FLAGS]
+    cbnz    w1, .Lfail_ip_nf0
+
+    ldr     x0, =name_ip_nf0
+    bl      test_pass
+    b       .Ldone_ip_nf0
+
+.Lfail_ip_nf0:
+    ldr     x0, =name_ip_nf0
+    bl      test_fail
+
+.Ldone_ip_nf0:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 test_ip_reasm_big_complete:
     stp     x29, x30, [sp, #-16]!
 
@@ -1466,6 +1533,7 @@ name_ip_src_zero:          .asciz "ip_handle_martian_src_zero"
 name_ip_src_loopback:      .asciz "ip_handle_martian_src_loopback"
 name_ip_src_loopback_high: .asciz "ip_handle_martian_src_loopback_high"
 name_ip_src_self:          .asciz "ip_handle_martian_src_self"
+name_ip_nf0:               .asciz "ip_reasm_timeout_no_frag0"
 name_ip_bc:                .asciz "ip_reasm_big_complete"
 name_ip_od:                .asciz "ip_reasm_oversize_drop"
 name_ip_fd:                .asciz "ip_handle_frag_dispatch"
