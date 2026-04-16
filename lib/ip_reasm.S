@@ -80,6 +80,13 @@ ip_reasm_timeout_cb:
     stp     xzr, xzr, [sp, #32]
     stp     xzr, xzr, [sp, #48]
 
+    /* Copy sender MAC into synthetic frame's ETH_SRC (offset 6).
+     * icmp_send_error reads this to address the reply. */
+    ldr     w2, [x19, #REASM_SRC_MAC]
+    str     w2, [sp, #(16 + ETH_SRC)]
+    ldrh    w2, [x19, #(REASM_SRC_MAC + 4)]
+    strh    w2, [sp, #(16 + ETH_SRC + 4)]
+
     /* IP header starts at sp+16+14 = sp+30 */
     add     x1, sp, #30
 
@@ -254,6 +261,13 @@ ip_reasm_input:
     mov     w0, #0xFF
     strb    w0, [x24, #REASM_TIMER_SLOT]
     strb    w0, [x24, #REASM_MIN_TTL]  /* init min TTL to 255 */
+
+    /* Copy source MAC (6 bytes) from frame for ICMP timeout reply.
+     * Offset into the frame: ETH_SRC = 6 bytes from start. */
+    ldr     w0, [x19, #ETH_SRC]        /* bytes 0..3 of sender MAC */
+    str     w0, [x24, #REASM_SRC_MAC]
+    ldrh    w0, [x19, #(ETH_SRC + 4)]  /* bytes 4..5 */
+    strh    w0, [x24, #(REASM_SRC_MAC + 4)]
 
     /* Zero bitmap (4 doublewords) */
     add     x0, x24, #REASM_BITMAP

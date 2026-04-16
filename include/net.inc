@@ -165,7 +165,10 @@
 .equ REASM_TOTAL_LEN,    12     /* u16: total payload bytes (valid when have_last) */
 .equ REASM_TIMER_SLOT,   14     /* u8:  timer pool slot (0xFF=none) */
 .equ REASM_MIN_TTL,      15     /* u8:  minimum TTL across fragments */
-.equ REASM_HDR_SIZE,     32     /* padded to 32 */
+.equ REASM_SRC_MAC,      16     /* 6 bytes: sender MAC (needed for
+                                 * ICMP Time Exceeded on timeout to
+                                 * route the reply back to sender) */
+.equ REASM_HDR_SIZE,     32     /* padded to 32 (16..23 holds MAC+pad) */
 .equ REASM_BITMAP,       32     /* 32-byte bitmap (256 bits, 1 per 8-byte unit) */
 .equ REASM_BITMAP_SIZE,  32
 .equ REASM_DATA,         64     /* payload buffer */
