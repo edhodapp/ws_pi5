@@ -21,6 +21,8 @@
 .global test_icmp_send_no_ctx
 .global test_icmp_rate_allow
 .global test_icmp_rate_deny
+.global test_icmp_rate_refill
+.global test_icmp_err_send_denied
 .global test_icmp_err_bcast_dst
 .global test_icmp_err_mcast_dst
 
@@ -609,6 +611,100 @@ test_icmp_rate_deny:
     ret
 
 /* ========================================================================
+ * test_icmp_rate_refill — token bucket refills after time passes.
+ * Exercises icmp.S line 73: b.lo fallthrough (elapsed >= freq,
+ * refill tokens).
+ * ======================================================================== */
+test_icmp_rate_refill:
+    stp     x29, x30, [sp, #-32]!
+    str     x19, [sp, #16]
+
+    bl      icmp_init
+
+    /* Force empty bucket + stale last_tick.
+     * Set last_tick = now - 2*freq to guarantee elapsed > freq
+     * (QEMU counter may not have reached 1 full second yet). */
+    ldr     x0, =icmp_err_tokens
+    str     wzr, [x0]                   /* 0 tokens */
+
+    bl      timer_now
+    mov     x19, x0                     /* x19 = now */
+    bl      timer_freq
+    lsl     x0, x0, #1                  /* 2 * freq */
+    sub     x19, x19, x0               /* now - 2*freq (may wrap) */
+    ldr     x0, =icmp_err_last_tick
+    str     x19, [x0]
+
+    /* icmp_err_allow should see elapsed >= freq, refill,
+     * then consume one token and return 1. */
+    bl      icmp_err_allow
+    cmp     w0, #1
+    b.ne    .Lfail_icmp_rf
+
+    ldr     x0, =name_icmp_rf
+    bl      test_pass
+    b       .Ldone_icmp_rf
+.Lfail_icmp_rf:
+    ldr     x0, =name_icmp_rf
+    bl      test_fail
+.Ldone_icmp_rf:
+    ldr     x19, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_icmp_err_send_denied — rate denial within icmp_send_error.
+ * Exercises icmp.S line 246: cbnz w0 taken (rate denied, no send).
+ * ======================================================================== */
+test_icmp_err_send_denied:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      icmp_init
+
+    /* Set up send context */
+    ldr     x19, =icmp_send_ctx
+    ldr     x0, =icmp_test_tx_buf
+    str     x0, [x19, #ICMPC_TX_BUF]
+    ldr     x0, =fake_icmp_send
+    str     x0, [x19, #ICMPC_SEND_FN]
+
+    /* Exhaust all ICMP error tokens */
+    mov     w20, #ICMP_ERR_BURST
+.Liesd_drain:
+    cbz     w20, .Liesd_drained
+    bl      icmp_err_allow
+    sub     w20, w20, #1
+    b       .Liesd_drain
+.Liesd_drained:
+
+    ldr     x0, =icmp_test_send_count
+    str     wzr, [x0]
+
+    /* Call icmp_send_error — should be denied by rate limit */
+    ldr     x0, =icmp_echo_template
+    mov     w1, #42
+    mov     w2, #ICMP_DEST_UNREACHABLE
+    mov     w3, #ICMP_CODE_PROTO_UNREACH
+    bl      icmp_send_error
+
+    /* Send must NOT have been called */
+    ldr     x0, =icmp_test_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Lfail_icmp_esd
+
+    ldr     x0, =name_icmp_esd
+    bl      test_pass
+    b       .Ldone_icmp_esd
+.Lfail_icmp_esd:
+    ldr     x0, =name_icmp_esd
+    bl      test_fail
+.Ldone_icmp_esd:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Fake ICMP send function — increments counter
  * ======================================================================== */
 fake_icmp_send:
@@ -788,6 +884,8 @@ icmp_mcast_dst_frame:
     .byte   0x00, 0x35, 0x00, 0x07                   /* sport=53, dport=7 */
     .byte   0x00, 0x08, 0x00, 0x00                   /* udp len=8, cksum=0 */
 
+name_icmp_rf:         .asciz "icmp_rate_refill"
+name_icmp_esd:        .asciz "icmp_err_send_denied"
 name_icmp_bcast:      .asciz "icmp_err_bcast_dst"
 name_icmp_mcast:      .asciz "icmp_err_mcast_dst"
 name_icmp_echo:       .asciz "icmp_echo_reply"

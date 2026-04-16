@@ -30,11 +30,14 @@
 .global test_ip_handle_martian_src_loopback
 .global test_ip_handle_martian_src_loopback_high
 .global test_ip_handle_martian_src_self
+.global test_ip_handle_frag_dispatch
+.global test_ip_handle_udp
 .global test_ip_handle_martian_src_bcast
 .global test_ip_handle_martian_src_mcast
 .global test_ip_reasm_two_frags
 .global test_ip_reasm_timeout
 .global test_ip_reasm_timeout_icmp
+.global test_ip_reasm_big_complete
 .global test_ip_reasm_overlap
 .global test_ip_reasm_nonaligned
 .global test_ip_reasm_min_ttl
@@ -719,6 +722,219 @@ test_ip_handle_martian_src_mcast:
  * Frag1: offset=0, MF=1, 16 bytes (sets bitmap bits 0-1)
  * Frag2: offset=1 (8 bytes), MF=0, 8 bytes (bit 1 already set → overlap)
  * ======================================================================== */
+/* ========================================================================
+ * test_ip_handle_frag_dispatch — Send 2 fragments through ip_handle
+ * (not ip_reasm_input directly). Exercises:
+ *   - ip.S line 176: cbz w2 fallthrough (has fragments)
+ *   - ip.S line 182: cbz x0 fallthrough (reassembly complete)
+ * The reassembled payload is garbage ICMP (type=0x41) so icmp_handle
+ * drops it. ip_handle returns 0, but the fragmentation branches
+ * ARE taken.
+ * ======================================================================== */
+/* ========================================================================
+ * test_ip_reasm_big_complete — 80-byte payload across 2 fragments.
+ * Exercises the FULL-BYTE bitmap loop (ip_reasm.S line 397 fallthrough)
+ * which requires total_bits >= 8 (payload >= 64 bytes).
+ * Frag1: offset=0, MF=1, 72 bytes. Frag2: offset=9, MF=0, 8 bytes.
+ * Total = 80 bytes = 10 bitmap units = 1 full byte + 2 bits.
+ * ======================================================================== */
+test_ip_reasm_big_complete:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Frag1 → ip_reasm_input */
+    ldr     x0, =ip_big_frag1
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #106                /* ETH(14) + IP(20) + payload(72) */
+.Lbc_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lbc_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #106
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_bc       /* should be incomplete */
+
+    /* Frag2 → ip_reasm_input */
+    ldr     x0, =ip_big_frag2
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lbc_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lbc_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+    cbz     x0, .Lfail_ip_bc       /* should be complete */
+
+    /* Verify reassembled IP totlen = 20 + 80 = 100 */
+    ldrh    w1, [x0, #(ETH_PAYLOAD + IP_TOTLEN)]
+    rev16   w1, w1
+    uxth    w1, w1
+    cmp     w1, #100
+    b.ne    .Lfail_ip_bc
+
+    ldr     x0, =name_ip_bc
+    bl      test_pass
+    b       .Ldone_ip_bc
+
+.Lfail_ip_bc:
+    ldr     x0, =name_ip_bc
+    bl      test_fail
+
+.Ldone_ip_bc:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_reasm_oversize_drop — Reassembled payload > 1480 bytes.
+ * Exercises ip_reasm.S line 430: b.hi .Lri_free_drop (taken).
+ * Frag1: offset=0, 8 bytes. Frag2: offset=185, 8 bytes.
+ * Total = 185*8+8 = 1488 > 1480.
+ * ======================================================================== */
+test_ip_reasm_oversize_drop:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Frag1 → ip_reasm_input */
+    ldr     x0, =ip_over_frag1
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lod_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lod_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_od       /* incomplete */
+
+    /* Frag2 (triggers completion + oversize drop) */
+    ldr     x0, =ip_over_frag2
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lod_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lod_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_reasm_input
+    cbnz    x0, .Lfail_ip_od       /* should return 0 (oversize drop) */
+
+    /* Slot should be freed */
+    ldr     x0, =reasm_slots
+    ldrb    w1, [x0, #REASM_FLAGS]
+    cbnz    w1, .Lfail_ip_od
+
+    ldr     x0, =name_ip_od
+    bl      test_pass
+    b       .Ldone_ip_od
+
+.Lfail_ip_od:
+    ldr     x0, =name_ip_od
+    bl      test_fail
+
+.Ldone_ip_od:
+    ldp     x29, x30, [sp], #16
+    ret
+
+test_ip_handle_frag_dispatch:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      ip_reasm_init
+
+    /* Fragment 1 → ip_handle (returns 0: incomplete) */
+    ldr     x0, =ip_frag1_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #50
+.Lfd_copy1:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lfd_copy1
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #50
+    bl      ip_handle
+    /* Fragment 1 returns 0 (no reply yet) — fine */
+
+    /* Fragment 2 → ip_handle (completes reassembly, dispatches) */
+    ldr     x0, =ip_frag2_template
+    ldr     x1, =ip_reasm_buf
+    mov     w2, #42
+.Lfd_copy2:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lfd_copy2
+
+    ldr     x0, =ip_reasm_buf
+    mov     w1, #42
+    bl      ip_handle
+    /* Reassembled ICMP has garbage type (0x41), so icmp_handle
+     * drops it and ip_handle returns 0. The test asserts this. */
+    cbnz    w0, .Lfail_ip_fd
+
+    ldr     x0, =name_ip_fd
+    bl      test_pass
+    b       .Ldone_ip_fd
+
+.Lfail_ip_fd:
+    ldr     x0, =name_ip_fd
+    bl      test_fail
+
+.Ldone_ip_fd:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_ip_handle_udp — Route a UDP echo frame through ip_handle.
+ * Exercises ip.S line 196: b.eq .Lip_udp (UDP dispatch taken).
+ * Uses a valid UDP echo to port 7, expects a reply (w0 > 0).
+ * ======================================================================== */
+test_ip_handle_udp:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Copy UDP frame to mutable buffer */
+    ldr     x0, =ip_udp_template
+    ldr     x1, =ip_handle_buf
+    mov     w2, #46
+.Lhudp_copy:
+    sub     w2, w2, #1
+    ldrb    w3, [x0, x2]
+    strb    w3, [x1, x2]
+    cbnz    w2, .Lhudp_copy
+
+    ldr     x0, =ip_handle_buf
+    mov     w1, #46
+    bl      ip_handle
+    /* UDP echo to port 7 should produce a reply */
+    cbz     w0, .Lfail_ip_hudp
+
+    ldr     x0, =name_ip_hudp
+    bl      test_pass
+    b       .Ldone_ip_hudp
+
+.Lfail_ip_hudp:
+    ldr     x0, =name_ip_hudp
+    bl      test_fail
+
+.Ldone_ip_hudp:
+    ldp     x29, x30, [sp], #16
+    ret
+
 test_ip_reasm_overlap:
     stp     x29, x30, [sp, #-16]!
 
@@ -1121,6 +1337,88 @@ ip_src_mcast_frame:
     .byte   0x08, 0x00, 0xF7, 0xFD
     .byte   0x00, 0x01, 0x00, 0x01
 
+/* Big frag1: offset=0, MF=1, 72-byte payload. id=0xBEEF.
+ * IP: totlen=92, flags=0x2000, cksum=0x83A1. 106 bytes total. */
+.balign 4
+ip_big_frag1:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x5C
+    .byte   0xBE, 0xEF, 0x20, 0x00
+    .byte   0x40, 0x01, 0x83, 0xA1
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    /* 72 bytes payload (0x01..0x48) */
+    .byte   0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
+    .byte   0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10
+    .byte   0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18
+    .byte   0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
+    .byte   0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28
+    .byte   0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30
+    .byte   0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38
+    .byte   0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40
+    .byte   0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48
+
+/* Big frag2: offset=9 (72 bytes), MF=0, 8-byte payload. id=0xBEEF.
+ * IP: totlen=28, flags_frag=0x0009, cksum=0xA3D8. 42 bytes total. */
+.balign 4
+ip_big_frag2:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0xBE, 0xEF, 0x00, 0x09
+    .byte   0x40, 0x01, 0xA3, 0xD8
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50
+
+/* Oversize frag1: offset=0, MF=1, 8 bytes. id=0xDEAD.
+ * IP: totlen=28, flags=0x2000, cksum=0x6423. */
+.balign 4
+ip_over_frag1:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0xDE, 0xAD, 0x20, 0x00
+    .byte   0x40, 0x01, 0x64, 0x23
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8
+
+/* Oversize frag2: offset=185 (1480 bytes), MF=0, 8 bytes. id=0xDEAD.
+ * total = 185*8+8 = 1488 > 1480. IP: flags_frag=0x00B9, cksum=0x836A. */
+.balign 4
+ip_over_frag2:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+    .byte   0x08, 0x00
+    .byte   0x45, 0x00, 0x00, 0x1C
+    .byte   0xDE, 0xAD, 0x00, 0xB9
+    .byte   0x40, 0x01, 0x83, 0x6A
+    .byte   0x0A, 0x00, 0x02, 0x02
+    .byte   0x0A, 0x00, 0x02, 0x0F
+    .byte   0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8
+
+/* UDP echo to port 7: 46 bytes (ETH 14 + IP 20 + UDP 8 + data 4).
+ * sport=9999 (0x270F), dport=7, UDP len=12, checksum=0 (skip).
+ * IP: totlen=32 (0x0020), proto=17, cksum=0x5089. */
+.balign 4
+ip_udp_template:
+    .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01     /* dst: our MAC */
+    .byte   0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF     /* src: sender */
+    .byte   0x08, 0x00                               /* EtherType: IPv4 */
+    .byte   0x45, 0x00, 0x00, 0x20                   /* ver/ihl, totlen=32 */
+    .byte   0x12, 0x34, 0x00, 0x00                   /* id, flags/frag */
+    .byte   0x40, 0x11, 0x50, 0x89                   /* ttl=64, proto=UDP, cksum */
+    .byte   0x0A, 0x00, 0x02, 0x02                   /* src: 10.0.2.2 */
+    .byte   0x0A, 0x00, 0x02, 0x0F                   /* dst: 10.0.2.15 */
+    .byte   0x27, 0x0F, 0x00, 0x07                   /* sport=9999, dport=7 */
+    .byte   0x00, 0x0C, 0x00, 0x00                   /* UDP len=12, cksum=0 */
+    .byte   0x41, 0x42, 0x43, 0x44                   /* payload: ABCD */
+
 /* Overlapping fragment: id=0xABCD, offset=1 (8 bytes), MF=0, 8-byte payload */
 .balign 4
 ip_frag_overlap:
@@ -1168,6 +1466,10 @@ name_ip_src_zero:          .asciz "ip_handle_martian_src_zero"
 name_ip_src_loopback:      .asciz "ip_handle_martian_src_loopback"
 name_ip_src_loopback_high: .asciz "ip_handle_martian_src_loopback_high"
 name_ip_src_self:          .asciz "ip_handle_martian_src_self"
+name_ip_bc:                .asciz "ip_reasm_big_complete"
+name_ip_od:                .asciz "ip_reasm_oversize_drop"
+name_ip_fd:                .asciz "ip_handle_frag_dispatch"
+name_ip_hudp:              .asciz "ip_handle_udp"
 name_ip_src_bcast:         .asciz "ip_handle_martian_src_bcast"
 name_ip_src_mcast:         .asciz "ip_handle_martian_src_mcast"
 name_ip_reasm:      .asciz "ip_reasm_two_frags"
@@ -1184,7 +1486,7 @@ ip_cksum_buf:
 
 .balign 4
 ip_handle_buf:
-    .space  42
+    .space  46
 
 .balign 8
 ip_reasm_buf:

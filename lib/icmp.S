@@ -18,6 +18,7 @@
 .global icmp_err_allow
 .global icmp_send_ctx
 .global icmp_err_tokens
+.global icmp_err_last_tick
 
 .section .text
 

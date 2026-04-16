@@ -153,6 +153,8 @@ _start:
     bl      test_icmp_send_no_ctx
     bl      test_icmp_rate_allow
     bl      test_icmp_rate_deny
+    bl      test_icmp_rate_refill
+    bl      test_icmp_err_send_denied
     bl      test_icmp_err_bcast_dst
     bl      test_icmp_err_mcast_dst
     bl      test_ip_handle_icmp
@@ -170,6 +172,8 @@ _start:
     bl      test_ip_handle_martian_src_self
     bl      test_ip_handle_martian_src_bcast
     bl      test_ip_handle_martian_src_mcast
+    bl      test_ip_handle_frag_dispatch
+    bl      test_ip_handle_udp
     bl      test_net_recv_arp
     bl      test_net_recv_icmp
     bl      test_net_recv_unknown
@@ -182,6 +186,7 @@ _start:
     bl      test_ip_reasm_two_frags
     bl      test_ip_reasm_timeout
     bl      test_ip_reasm_timeout_icmp
+    bl      test_ip_reasm_big_complete
     bl      test_ip_reasm_overlap
     bl      test_ip_reasm_nonaligned
     bl      test_ip_reasm_min_ttl
