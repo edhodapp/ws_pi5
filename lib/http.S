@@ -18,6 +18,7 @@
 .global http_find_end_of_headers
 .global http_find_uri_end
 .global http_match_uri
+.global http_find_host_header
 
 .section .text
 
@@ -55,10 +56,11 @@ http_set_send_ctx:
  * Clobbers: x0-x6, x19-x24, x30
  */
 http_poll:
-    stp     x29, x30, [sp, #-64]!
+    stp     x29, x30, [sp, #-80]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
+    /* sp+64..79: scratch space for request parsing */
 
     ldr     x19, =tcp_conn_table
     ldr     x20, =http_conn_table
@@ -123,37 +125,117 @@ http_poll:
     /* Found end of headers at offset w0 */
     mov     w23, w0                     /* header_end offset */
 
-    /* Verify GET method */
+    /* --- Parse method ---
+     * Check GET (4 bytes "GET ") or HEAD (5 bytes "HEAD "). */
+    mov     w0, #0
+    strb    w0, [x20, #HCONN_FLAGS]     /* clear flags */
+
     ldr     w0, [x22]
     ldr     w1, =HTTP_GET_MARKER
     cmp     w0, w1
+    b.eq    .Lhp_method_get
+
+    /* Check HEAD: first 4 bytes "HEAD" + 5th byte ' ' */
+    ldr     w1, =HTTP_HEAD_MARK_LO
+    cmp     w0, w1
+    b.ne    .Lhp_bad_method
+    ldrb    w1, [x22, #4]
+    cmp     w1, #HTTP_HEAD_SPACE
     b.ne    .Lhp_bad_method
 
-    /* Extract URI: starts at offset 4, ends at next space */
-    add     x0, x22, #4
-    sub     w1, w23, #4
-    bl      http_find_uri_end
-    mov     w24, w0
+    /* HEAD method */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    orr     w0, w0, #HFLAG_HEAD
+    strb    w0, [x20, #HCONN_FLAGS]
+    mov     w24, #5                     /* method_len = 5 ("HEAD ") */
+    b       .Lhp_parse_uri
 
-    /* Match URI */
-    add     x0, x22, #4
-    mov     w1, w24
+.Lhp_method_get:
+    mov     w24, #4                     /* method_len = 4 ("GET ") */
+
+.Lhp_parse_uri:
+    /* Extract URI: starts at offset method_len, ends at next space */
+    add     x0, x22, x24, uxtw
+    sub     w1, w23, w24
+    bl      http_find_uri_end
+    /* w0 = URI length */
+
+    /* Save URI length — needed later for route matching.
+     * w0 = uri_len from http_find_uri_end. */
+    str     w0, [sp, #64]
+
+    /* --- Parse HTTP version ---
+     * After URI there should be " HTTP/1.x\r\n". Look for "1.1"
+     * vs "1.0" in the version string. Position: method_len + uri_len + 1
+     * (the space after URI). */
+    add     w1, w24, w0                 /* method_len + uri_len */
+    add     w1, w1, #1                  /* skip space after URI */
+    add     w1, w1, #5                  /* skip "HTTP/" → points to '1' */
+    cmp     w1, w23
+    b.hs    .Lhp_bad_request            /* truncated version → 400 */
+    add     w1, w1, #2                  /* skip "1." → points to '0' or '1' */
+    cmp     w1, w23
+    b.hs    .Lhp_bad_request
+    ldrb    w2, [x22, w1, uxtw]
+    cmp     w2, #'1'
+    b.ne    .Lhp_version_done           /* not '1' → assume 1.0 */
+    ldrb    w2, [x20, #HCONN_FLAGS]
+    orr     w2, w2, #HFLAG_HTTP11
+    strb    w2, [x20, #HCONN_FLAGS]
+.Lhp_version_done:
+
+    /* --- Host header check (RFC 9112: MUST for HTTP/1.1) --- */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_HTTP11
+    b.eq    .Lhp_host_ok               /* HTTP/1.0 → Host not required */
+
+    /* Scan for "Host:" (case-sensitive per convention; browsers
+     * always send capitalized) */
+    mov     x0, x22
+    mov     w2, w23
+    bl      http_find_host_header
+    cbz     w0, .Lhp_bad_request        /* no Host: header → 400 */
+
+.Lhp_host_ok:
+    /* Restore URI length and match route */
+    ldr     w1, [sp, #64]              /* w1 = uri_len */
+    add     x0, x22, x24, uxtw         /* URI start = buf + method_len */
     bl      http_match_uri
 
-    /* Set up response */
+    /* Set up response based on URI match */
+    cbnz    w0, .Lhp_resp_404
+    mov     w0, #HSTATUS_200
     strb    w0, [x20, #HCONN_STATUS]
-    cbz     w0, .Lhp_resp_200
+    ldr     x1, =http_200_body
+    ldr     w2, =http_200_body_len
+    ldr     w3, =http_200_hdr_len
+    b       .Lhp_setup_resp
 
-    /* 404 response */
+.Lhp_resp_404:
+    mov     w0, #HSTATUS_404
+    strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_404_body
     ldr     w2, =http_404_body_len
     ldr     w3, =http_404_hdr_len
     b       .Lhp_setup_resp
 
-.Lhp_resp_200:
-    ldr     x1, =http_200_body
-    ldr     w2, =http_200_body_len
-    ldr     w3, =http_200_hdr_len
+.Lhp_bad_method:
+    /* Unknown method → 405 Method Not Allowed */
+    mov     w0, #HSTATUS_405
+    strb    w0, [x20, #HCONN_STATUS]
+    ldr     x1, =http_405_body
+    ldr     w2, =http_405_body_len
+    ldr     w3, =http_405_hdr_len
+    b       .Lhp_setup_resp
+
+.Lhp_bad_request:
+    /* Malformed request → 400 Bad Request */
+    mov     w0, #HSTATUS_400
+    strb    w0, [x20, #HCONN_STATUS]
+    ldr     x1, =http_400_body
+    ldr     w2, =http_400_body_len
+    ldr     w3, =http_400_hdr_len
+    b       .Lhp_setup_resp
 
 .Lhp_setup_resp:
     str     x1, [x20, #HCONN_BODY_PTR]
@@ -170,15 +252,6 @@ http_poll:
     bl      tcp_rx_flush
 
     b       .Lhp_next
-
-.Lhp_bad_method:
-    /* Treat non-GET as 404 */
-    mov     w0, #1
-    strb    w0, [x20, #HCONN_STATUS]
-    ldr     x1, =http_404_body
-    ldr     w2, =http_404_body_len
-    ldr     w3, =http_404_hdr_len
-    b       .Lhp_setup_resp
 
 /* (parse_incomplete removed — now branches directly to .Lhp_next) */
 
@@ -215,14 +288,32 @@ http_poll:
 
     /* Select header source based on status */
     ldrb    w0, [x20, #HCONN_STATUS]
-    cbnz    w0, .Lhp_hdr_404
+    cbz     w0, .Lhp_hdr_200
+    cmp     w0, #HSTATUS_400
+    b.eq    .Lhp_hdr_400
+    cmp     w0, #HSTATUS_404
+    b.eq    .Lhp_hdr_404
+    cmp     w0, #HSTATUS_405
+    b.eq    .Lhp_hdr_405
+    b       .Lhp_hdr_400              /* fallback for unknown status */
 
+.Lhp_hdr_200:
     ldr     x2, =http_200_hdr
+    add     x2, x2, x22
+    b       .Lhp_do_send
+
+.Lhp_hdr_400:
+    ldr     x2, =http_400_hdr
     add     x2, x2, x22
     b       .Lhp_do_send
 
 .Lhp_hdr_404:
     ldr     x2, =http_404_hdr
+    add     x2, x2, x22
+    b       .Lhp_do_send
+
+.Lhp_hdr_405:
+    ldr     x2, =http_405_hdr
     add     x2, x2, x22
     b       .Lhp_do_send
 
@@ -288,7 +379,7 @@ http_poll:
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #64
+    ldp     x29, x30, [sp], #80
     ret
 
 /*
@@ -349,8 +440,8 @@ http_find_uri_end:
 .Lfue_scan:
     cmp     w2, w1
     b.hs    .Lfue_done
-    ldrb    w0, [x0, x2]
-    cmp     w0, #0x20              /* space */
+    ldrb    w3, [x0, x2]
+    cmp     w3, #0x20              /* space */
     b.eq    .Lfue_done
     add     w2, w2, #1
     b       .Lfue_scan
@@ -376,6 +467,72 @@ http_match_uri:
     ret
 .Lmu_404:
     mov     w0, #1
+    ret
+
+/*
+ * http_find_host_header — Scan headers for "Host:" field
+ *
+ * x0: buffer start (beginning of request)
+ * w2: header section length (up to \r\n\r\n)
+ * Returns: w0 = 1 if Host: found, 0 if not
+ * Clobbers: x0-x4
+ *
+ * Scans for "\r\nHost:" (case-sensitive) after the request-line.
+ * The first \r\n in the buffer ends the request-line; Host: must
+ * appear after that as a header field.
+ */
+http_find_host_header:
+    cmp     w2, #10                 /* minimum: "X\r\nHost:Y" */
+    b.lt    .Lfhh_no
+
+    /* Scan for "\r\nHost:" (6 bytes) */
+    mov     w3, #0
+.Lfhh_scan:
+    sub     w4, w2, #6
+    cmp     w3, w4
+    b.hs    .Lfhh_no
+
+    ldrb    w4, [x0, x3]
+    cmp     w4, #0x0D               /* \r */
+    b.ne    .Lfhh_next
+
+    add     w4, w3, #1
+    ldrb    w4, [x0, x4]
+    cmp     w4, #0x0A               /* \n */
+    b.ne    .Lfhh_next
+
+    /* Check "Host:" at offset +2 */
+    add     w4, w3, #2
+    ldrb    w1, [x0, x4]
+    cmp     w1, #'H'
+    b.ne    .Lfhh_next
+    add     w4, w4, #1
+    ldrb    w1, [x0, x4]
+    cmp     w1, #'o'
+    b.ne    .Lfhh_next
+    add     w4, w4, #1
+    ldrb    w1, [x0, x4]
+    cmp     w1, #'s'
+    b.ne    .Lfhh_next
+    add     w4, w4, #1
+    ldrb    w1, [x0, x4]
+    cmp     w1, #'t'
+    b.ne    .Lfhh_next
+    add     w4, w4, #1
+    ldrb    w1, [x0, x4]
+    cmp     w1, #':'
+    b.ne    .Lfhh_next
+
+    /* Found "\r\nHost:" */
+    mov     w0, #1
+    ret
+
+.Lfhh_next:
+    add     w3, w3, #1
+    b       .Lfhh_scan
+
+.Lfhh_no:
+    mov     w0, #0
     ret
 
 /* ===================================================================
@@ -421,6 +578,39 @@ http_404_body:
     .ascii  "<body><h1>404 Not Found</h1></body></html>\n"
 http_404_body_end:
 .equ http_404_body_len, http_404_body_end - http_404_body
+
+http_400_hdr:
+    .ascii  "HTTP/1.1 400 Bad Request\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 99\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_400_hdr_end:
+.equ http_400_hdr_len, http_400_hdr_end - http_400_hdr
+
+http_400_body:
+    .ascii  "<!DOCTYPE html>\n"
+    .ascii  "<html><head><title>400</title></head>\n"
+    .ascii  "<body><h1>400 Bad Request</h1></body></html>\n"
+http_400_body_end:
+.equ http_400_body_len, http_400_body_end - http_400_body
+
+http_405_hdr:
+    .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
+    .ascii  "Allow: GET, HEAD\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 106\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_405_hdr_end:
+.equ http_405_hdr_len, http_405_hdr_end - http_405_hdr
+
+http_405_body:
+    .ascii  "<!DOCTYPE html>\n"
+    .ascii  "<html><head><title>405</title></head>\n"
+    .ascii  "<body><h1>405 Method Not Allowed</h1></body></html>\n"
+http_405_body_end:
+.equ http_405_body_len, http_405_body_end - http_405_body
 
 /* ===================================================================
  * BSS

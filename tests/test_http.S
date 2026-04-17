@@ -30,6 +30,12 @@ test_http:
     bl      test_http_parse_incomplete
     bl      test_http_parse_404
     bl      test_http_parse_bad_method
+    bl      test_http_parse_head
+    bl      test_http_version_10
+    bl      test_http_version_11
+    bl      test_http_method_not_allowed
+    bl      test_http_missing_host_11
+    bl      test_http_no_host_10_ok
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
@@ -325,10 +331,10 @@ test_http_parse_404:
 
     bl      http_poll
 
-    /* Status should be 1 (404) */
+    /* Status should be HSTATUS_404 */
     ldr     x0, =http_conn_table
     ldrb    w0, [x0, #HCONN_STATUS]
-    cmp     w0, #1
+    cmp     w0, #HSTATUS_404
     b.ne    .Lfail_hp4
 
     ldr     x0, =name_hp4
@@ -378,10 +384,10 @@ test_http_parse_bad_method:
 
     bl      http_poll
 
-    /* Status should be 1 (404 — bad method) */
+    /* Status should be HSTATUS_405 (method not allowed) */
     ldr     x0, =http_conn_table
     ldrb    w0, [x0, #HCONN_STATUS]
-    cmp     w0, #1
+    cmp     w0, #HSTATUS_405
     b.ne    .Lfail_hpbm
 
     ldr     x0, =name_hpbm
@@ -391,6 +397,338 @@ test_http_parse_bad_method:
     ldr     x0, =name_hpbm
     bl      test_fail
 .Ldone_hpbm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_parse_head — HEAD / → SENDING + HFLAG_HEAD set
+ * ======================================================================== */
+test_http_parse_head:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_head_request
+    ldr     w2, =thttp_head_request_len
+.Lhph_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhph_cp
+
+    ldr     w0, =thttp_head_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* State should be SENDING */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hph
+
+    /* HFLAG_HEAD should be set */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_HEAD
+    b.eq    .Lfail_hph
+
+    ldr     x0, =name_hph
+    bl      test_pass
+    b       .Ldone_hph
+.Lfail_hph:
+    ldr     x0, =name_hph
+    bl      test_fail
+.Ldone_hph:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_version_10 — HTTP/1.0 → HFLAG_HTTP11 NOT set
+ * ======================================================================== */
+test_http_version_10:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_10_request
+    ldr     w2, =thttp_get_10_request_len
+.Lhv10_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhv10_cp
+
+    ldr     w0, =thttp_get_10_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* State should be SENDING */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hv10
+
+    /* HFLAG_HTTP11 should NOT be set */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_HTTP11
+    b.ne    .Lfail_hv10
+
+    ldr     x0, =name_hv10
+    bl      test_pass
+    b       .Ldone_hv10
+.Lfail_hv10:
+    ldr     x0, =name_hv10
+    bl      test_fail
+.Ldone_hv10:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_version_11 — HTTP/1.1 → HFLAG_HTTP11 set
+ * ======================================================================== */
+test_http_version_11:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_request
+    ldr     w2, =thttp_get_request_len
+.Lhv11_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhv11_cp
+
+    ldr     w0, =thttp_get_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hv11
+
+    /* HFLAG_HTTP11 SHOULD be set */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_HTTP11
+    b.eq    .Lfail_hv11
+
+    ldr     x0, =name_hv11
+    bl      test_pass
+    b       .Ldone_hv11
+.Lfail_hv11:
+    ldr     x0, =name_hv11
+    bl      test_fail
+.Ldone_hv11:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_method_not_allowed — POST → status 405 (not 404)
+ * ======================================================================== */
+test_http_method_not_allowed:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_request
+    ldr     w2, =thttp_post_request_len
+.Lhmna_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhmna_cp
+
+    ldr     w0, =thttp_post_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Status should be HSTATUS_405 */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_405
+    b.ne    .Lfail_hmna
+
+    ldr     x0, =name_hmna
+    bl      test_pass
+    b       .Ldone_hmna
+.Lfail_hmna:
+    ldr     x0, =name_hmna
+    bl      test_fail
+.Ldone_hmna:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_missing_host_11 — HTTP/1.1 without Host: → status 400
+ * ======================================================================== */
+test_http_missing_host_11:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_nohost_11_request
+    ldr     w2, =thttp_nohost_11_request_len
+.Lhmh_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhmh_cp
+
+    ldr     w0, =thttp_nohost_11_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Status should be HSTATUS_400 */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_400
+    b.ne    .Lfail_hmh
+
+    ldr     x0, =name_hmh
+    bl      test_pass
+    b       .Ldone_hmh
+.Lfail_hmh:
+    ldr     x0, =name_hmh
+    bl      test_fail
+.Ldone_hmh:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_no_host_10_ok — HTTP/1.0 without Host: → accepted (200)
+ * ======================================================================== */
+test_http_no_host_10_ok:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_nohost_10_request
+    ldr     w2, =thttp_nohost_10_request_len
+.Lhnh10_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhnh10_cp
+
+    ldr     w0, =thttp_nohost_10_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Status should be HSTATUS_200 (accepted without Host) */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hnh10
+
+    ldr     x0, =name_hnh10
+    bl      test_pass
+    b       .Ldone_hnh10
+.Lfail_hnh10:
+    ldr     x0, =name_hnh10
+    bl      test_fail
+.Ldone_hnh10:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
@@ -625,6 +963,26 @@ thttp_post_request:
 thttp_post_request_end:
 .equ thttp_post_request_len, thttp_post_request_end - thttp_post_request
 
+thttp_head_request:
+    .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_head_request_end:
+.equ thttp_head_request_len, thttp_head_request_end - thttp_head_request
+
+thttp_get_10_request:
+    .ascii  "GET / HTTP/1.0\r\n\r\n"
+thttp_get_10_request_end:
+.equ thttp_get_10_request_len, thttp_get_10_request_end - thttp_get_10_request
+
+thttp_nohost_11_request:
+    .ascii  "GET / HTTP/1.1\r\n\r\n"
+thttp_nohost_11_request_end:
+.equ thttp_nohost_11_request_len, thttp_nohost_11_request_end - thttp_nohost_11_request
+
+thttp_nohost_10_request:
+    .ascii  "GET / HTTP/1.0\r\n\r\n"
+thttp_nohost_10_request_end:
+.equ thttp_nohost_10_request_len, thttp_nohost_10_request_end - thttp_nohost_10_request
+
 thttp_uri_root:
     .ascii  "/"
 
@@ -640,6 +998,12 @@ name_hpg:   .asciz "http_parse_get"
 name_hpi:   .asciz "http_parse_incomplete"
 name_hp4:   .asciz "http_parse_404"
 name_hpbm:  .asciz "http_parse_bad_method"
+name_hph:   .asciz "http_parse_head"
+name_hv10:  .asciz "http_version_10"
+name_hv11:  .asciz "http_version_11"
+name_hmna:  .asciz "http_method_not_allowed"
+name_hmh:   .asciz "http_missing_host_11"
+name_hnh10: .asciz "http_no_host_10_ok"
 name_hsc:   .asciz "http_send_chunk"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
