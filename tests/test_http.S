@@ -39,6 +39,10 @@ test_http:
     bl      test_http_head_no_body
     bl      test_http_host_lowercase
     bl      test_http_bad_version
+    bl      test_http_fsa_get_11
+    bl      test_http_fsa_head_10
+    bl      test_http_fsa_incomplete
+    bl      test_http_fsa_bad_method
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
@@ -905,6 +909,195 @@ test_http_bad_version:
     ret
 
 /* ========================================================================
+ * test_http_fsa_get_11 — FSA parser: "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+ * → S_DONE, URI="/", version=1, Host found
+ * ======================================================================== */
+test_http_fsa_get_11:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* Zero an HCONN on the stack for the parser */
+    ldr     x19, =http_conn_table      /* reuse slot 0 */
+    mov     w0, #HCONN_SIZE / 8
+    mov     x1, x19
+.Lfg11_z:
+    str     xzr, [x1], #8
+    subs    w0, w0, #1
+    b.ne    .Lfg11_z
+
+    /* Call parser with GET /1.1 + Host request */
+    mov     x0, x19
+    ldr     x1, =thttp_get_request
+    ldr     w2, =thttp_get_request_len
+    bl      http_parse_request
+
+    /* Should return S_DONE */
+    cmp     w0, #S_DONE
+    b.ne    .Lfail_fg11
+
+    /* URI_START should be 4 ("GET " is 4 bytes) */
+    ldrh    w0, [x19, #HCONN_URI_START]
+    cmp     w0, #4
+    b.ne    .Lfail_fg11
+
+    /* URI_LEN should be 1 ("/") */
+    ldrh    w0, [x19, #HCONN_URI_LEN]
+    cmp     w0, #1
+    b.ne    .Lfail_fg11
+
+    /* VER_MINOR should be '1' (HTTP/1.1) */
+    ldrb    w0, [x19, #HCONN_VER_MINOR]
+    cmp     w0, #'1'
+    b.ne    .Lfail_fg11
+
+    /* HOST_FOUND should be 1 */
+    ldrb    w0, [x19, #HCONN_HOST_FOUND]
+    cmp     w0, #1
+    b.ne    .Lfail_fg11
+
+    /* REQ_LEN should equal request length */
+    ldr     w0, [x19, #HCONN_REQ_LEN]
+    ldr     w1, =thttp_get_request_len
+    cmp     w0, w1
+    b.ne    .Lfail_fg11
+
+    ldr     x0, =name_fg11
+    bl      test_pass
+    b       .Ldone_fg11
+.Lfail_fg11:
+    ldr     x0, =name_fg11
+    bl      test_fail
+.Ldone_fg11:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_fsa_head_10 — FSA parser: "HEAD / HTTP/1.0\r\n\r\n"
+ * → S_DONE, URI="/", version=0, no Host required
+ * ======================================================================== */
+test_http_fsa_head_10:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    ldr     x19, =http_conn_table
+    mov     w0, #HCONN_SIZE / 8
+    mov     x1, x19
+.Lfh10_z:
+    str     xzr, [x1], #8
+    subs    w0, w0, #1
+    b.ne    .Lfh10_z
+
+    mov     x0, x19
+    ldr     x1, =thttp_head_10_request
+    ldr     w2, =thttp_head_10_request_len
+    bl      http_parse_request
+
+    cmp     w0, #S_DONE
+    b.ne    .Lfail_fh10
+
+    /* URI_START should be 5 ("HEAD " is 5 bytes) */
+    ldrh    w0, [x19, #HCONN_URI_START]
+    cmp     w0, #5
+    b.ne    .Lfail_fh10
+
+    /* URI_LEN should be 1 */
+    ldrh    w0, [x19, #HCONN_URI_LEN]
+    cmp     w0, #1
+    b.ne    .Lfail_fh10
+
+    /* VER_MINOR should be '0' (HTTP/1.0) */
+    ldrb    w0, [x19, #HCONN_VER_MINOR]
+    cmp     w0, #'0'
+    b.ne    .Lfail_fh10
+
+    /* HOST_FOUND should be 0 (no Host header in this request) */
+    ldrb    w0, [x19, #HCONN_HOST_FOUND]
+    cbnz    w0, .Lfail_fh10
+
+    ldr     x0, =name_fh10
+    bl      test_pass
+    b       .Ldone_fh10
+.Lfail_fh10:
+    ldr     x0, =name_fh10
+    bl      test_fail
+.Ldone_fh10:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_fsa_incomplete — partial request → parser returns non-terminal
+ * ======================================================================== */
+test_http_fsa_incomplete:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    ldr     x19, =http_conn_table
+    mov     w0, #HCONN_SIZE / 8
+    mov     x1, x19
+.Lffi_z:
+    str     xzr, [x1], #8
+    subs    w0, w0, #1
+    b.ne    .Lffi_z
+
+    mov     x0, x19
+    ldr     x1, =thttp_partial_request
+    ldr     w2, =thttp_partial_request_len
+    bl      http_parse_request
+
+    /* Should NOT be DONE or ERROR — still parsing */
+    cmp     w0, #S_DONE
+    b.eq    .Lfail_ffi
+    cmp     w0, #S_ERROR
+    b.eq    .Lfail_ffi
+
+    ldr     x0, =name_ffi
+    bl      test_pass
+    b       .Ldone_ffi
+.Lfail_ffi:
+    ldr     x0, =name_ffi
+    bl      test_fail
+.Ldone_ffi:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_fsa_bad_method — garbage request → S_ERROR
+ * ======================================================================== */
+test_http_fsa_bad_method:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    ldr     x19, =http_conn_table
+    mov     w0, #HCONN_SIZE / 8
+    mov     x1, x19
+.Lffbm_z:
+    str     xzr, [x1], #8
+    subs    w0, w0, #1
+    b.ne    .Lffbm_z
+
+    mov     x0, x19
+    ldr     x1, =thttp_garbage_request
+    ldr     w2, =thttp_garbage_request_len
+    bl      http_parse_request
+
+    cmp     w0, #S_ERROR
+    b.ne    .Lfail_ffbm
+
+    ldr     x0, =name_ffbm
+    bl      test_pass
+    b       .Ldone_ffbm
+.Lfail_ffbm:
+    ldr     x0, =name_ffbm
+    bl      test_fail
+.Ldone_ffbm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_http_send_chunk — SENDING state sends one chunk and advances ptr
  * ======================================================================== */
 test_http_send_chunk:
@@ -1154,6 +1347,16 @@ thttp_nohost_10_request:
 thttp_nohost_10_request_end:
 .equ thttp_nohost_10_request_len, thttp_nohost_10_request_end - thttp_nohost_10_request
 
+thttp_head_10_request:
+    .ascii  "HEAD / HTTP/1.0\r\n\r\n"
+thttp_head_10_request_end:
+.equ thttp_head_10_request_len, thttp_head_10_request_end - thttp_head_10_request
+
+thttp_garbage_request:
+    .ascii  "123 / HTTP/1.1\r\nHost: x\r\n\r\n"
+thttp_garbage_request_end:
+.equ thttp_garbage_request_len, thttp_garbage_request_end - thttp_garbage_request
+
 thttp_bad_version_request:
     .ascii  "GET / JUNK/9.9\r\nHost: test\r\n\r\n"
 thttp_bad_version_request_end:
@@ -1188,6 +1391,10 @@ name_hnh10: .asciz "http_no_host_10_ok"
 name_hhnb:  .asciz "http_head_no_body"
 name_hhl:   .asciz "http_host_lowercase"
 name_hbv:   .asciz "http_bad_version"
+name_fg11:  .asciz "http_fsa_get_11"
+name_fh10:  .asciz "http_fsa_head_10"
+name_ffi:   .asciz "http_fsa_incomplete"
+name_ffbm:  .asciz "http_fsa_bad_method"
 name_hsc:   .asciz "http_send_chunk"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"

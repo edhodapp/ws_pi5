@@ -25,60 +25,17 @@
 .section .text
 
 /*
- * http_classify_char — Map ASCII byte to character class (0-7)
+ * http_classify_char — Map ASCII byte to character class (0-8)
  *
- * w0: input byte
+ * w0: input byte (0-255)
  * Returns: w0 = character class (CC_*)
- * Leaf function, clobbers w0 only.
+ * Leaf function, clobbers w0-w1.
+ *
+ * Uses a 256-byte lookup table for single-ldrb classification.
  */
 http_classify_char:
-    cmp     w0, #'A'
-    b.lt    .Lcc_not_upper
-    cmp     w0, #'Z'
-    b.le    .Lcc_alpha
-.Lcc_not_upper:
-    cmp     w0, #'a'
-    b.lt    .Lcc_not_lower
-    cmp     w0, #'z'
-    b.le    .Lcc_alpha
-.Lcc_not_lower:
-    cmp     w0, #'0'
-    b.lt    .Lcc_not_digit
-    cmp     w0, #'9'
-    b.le    .Lcc_digit
-.Lcc_not_digit:
-    cmp     w0, #0x20
-    b.eq    .Lcc_sp
-    cmp     w0, #0x0D
-    b.eq    .Lcc_cr
-    cmp     w0, #0x0A
-    b.eq    .Lcc_lf
-    cmp     w0, #':'
-    b.eq    .Lcc_colon
-    cmp     w0, #'/'
-    b.eq    .Lcc_slash
-    mov     w0, #CC_OTHER
-    ret
-.Lcc_alpha:
-    mov     w0, #CC_ALPHA
-    ret
-.Lcc_digit:
-    mov     w0, #CC_DIGIT
-    ret
-.Lcc_sp:
-    mov     w0, #CC_SP
-    ret
-.Lcc_cr:
-    mov     w0, #CC_CR
-    ret
-.Lcc_lf:
-    mov     w0, #CC_LF
-    ret
-.Lcc_colon:
-    mov     w0, #CC_COLON
-    ret
-.Lcc_slash:
-    mov     w0, #CC_SLASH
+    ldr     x1, =http_char_class_table
+    ldrb    w0, [x1, w0, uxtw]
     ret
 
 /*
@@ -130,8 +87,9 @@ http_parse_request:
     /* Classify character */
     bl      http_classify_char      /* w0 = char class */
 
-    /* Look up transition: table[state * 8 + class] */
-    lsl     w7, w4, #3              /* state * 8 */
+    /* Look up transition: table[state * 9 + class] */
+    mov     w7, #CC_COUNT
+    mul     w7, w4, w7              /* state * 9 */
     add     w7, w7, w0              /* + class */
     ldrb    w7, [x6, w7, uxtw]     /* w7 = packed (action:4 | next_state:4) */
 
@@ -262,29 +220,64 @@ http_parse_request:
  *
  * Encoding: (action << 5) | next_state  (3-bit action, 5-bit state)
  *
- * Columns: ALPHA  DIGIT  SP     CR     LF     COLON  SLASH  OTHER
+ * 9 columns: ALPHA DIGIT SP    CR    LF    COLON SLASH DOT   OTHER
  * =================================================================== */
 .section .rodata
 .balign 4
 .global http_fsa_table
 http_fsa_table:
-/*  S_METHOD(0)  */ .byte 0x00, 0x13, 0x01, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_M_SP(1)    */ .byte 0x22, 0x22, 0x13, 0x13, 0x13, 0x22, 0x22, 0x22
-/*  S_URI(2)     */ .byte 0x02, 0x02, 0x43, 0x13, 0x13, 0x02, 0x02, 0x02
-/*  S_U_SP(3)    */ .byte 0x04, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VH(4)      */ .byte 0x05, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VT1(5)     */ .byte 0x06, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VT2(6)     */ .byte 0x07, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VP(7)      */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x08, 0x13
-/*  S_VSLASH(8)  */ .byte 0x13, 0x09, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VMAJ(9)    */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x0A
-/*  S_VDOT(10)   */ .byte 0x13, 0x6B, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
-/*  S_VMIN(11)   */ .byte 0x13, 0x13, 0x13, 0x0C, 0x13, 0x13, 0x13, 0x13
-/*  S_RL_CR(12)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13
-/*  S_HDR_ST(13) */ .byte 0x8E, 0x13, 0x13, 0x11, 0x13, 0x13, 0x13, 0x13
-/*  S_HDR_NM(14) */ .byte 0x0E, 0x0E, 0x13, 0x13, 0x13, 0xAF, 0x13, 0x0E
-/*  S_HDR_VL(15) */ .byte 0x0F, 0x0F, 0x0F, 0x10, 0x13, 0x0F, 0x0F, 0x0F
-/*  S_HDR_CR(16) */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13
-/*  S_END_CR(17) */ .byte 0x13, 0x13, 0x13, 0x13, 0xD2, 0x13, 0x13, 0x13
-/*  S_DONE(18)   */ .byte 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12
-/*  S_ERROR(19)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_METHOD(0)  */ .byte 0x00, 0x13, 0x01, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_M_SP(1)    */ .byte 0x22, 0x22, 0x13, 0x13, 0x13, 0x22, 0x22, 0x22, 0x22
+/*  S_URI(2)     */ .byte 0x02, 0x02, 0x43, 0x13, 0x13, 0x02, 0x02, 0x02, 0x02
+/*  S_U_SP(3)    */ .byte 0x04, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VH(4)      */ .byte 0x05, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VT1(5)     */ .byte 0x06, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VT2(6)     */ .byte 0x07, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VP(7)      */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x08, 0x13, 0x13
+/*  S_VSLASH(8)  */ .byte 0x13, 0x09, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VMAJ(9)    */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x0A, 0x13
+/*  S_VDOT(10)   */ .byte 0x13, 0x6B, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VMIN(11)   */ .byte 0x13, 0x13, 0x13, 0x0C, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_RL_CR(12)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13, 0x13
+/*  S_HDR_ST(13) */ .byte 0x8E, 0x13, 0x13, 0x11, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_HDR_NM(14) */ .byte 0x0E, 0x0E, 0x13, 0x13, 0x13, 0xAF, 0x0E, 0x0E, 0x0E
+/*  S_HDR_VL(15) */ .byte 0x0F, 0x0F, 0x0F, 0x10, 0x13, 0x0F, 0x0F, 0x0F, 0x0F
+/*  S_HDR_CR(16) */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13, 0x13
+/*  S_END_CR(17) */ .byte 0x13, 0x13, 0x13, 0x13, 0xD2, 0x13, 0x13, 0x13, 0x13
+/*  S_DONE(18)   */ .byte 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12
+/*  S_ERROR(19)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+
+/* ===================================================================
+ * Character classification lookup table (256 bytes)
+ *
+ * Maps each ASCII byte to its CC_* class. Single ldrb lookup.
+ * =================================================================== */
+.balign 16
+.global http_char_class_table
+http_char_class_table:
+    /*     0     1     2     3     4     5     6     7 */
+    /* 00 */ .byte 8, 8, 8, 8, 8, 8, 8, 8      /* NUL-BEL */
+    /* 08 */ .byte 8, 8, 4, 8, 8, 3, 8, 8      /* BS,HT,LF,VT,FF,CR,SO,SI */
+    /* 10 */ .byte 8, 8, 8, 8, 8, 8, 8, 8      /* DLE-ETB */
+    /* 18 */ .byte 8, 8, 8, 8, 8, 8, 8, 8      /* CAN-US */
+    /* 20 */ .byte 2, 8, 8, 8, 8, 8, 8, 8      /* SP ! " # $ % & ' */
+    /* 28 */ .byte 8, 8, 8, 8, 8, 8, 7, 6      /* ( ) * + , - . / */
+    /* 30 */ .byte 1, 1, 1, 1, 1, 1, 1, 1      /* 0-7 */
+    /* 38 */ .byte 1, 1, 5, 8, 8, 8, 8, 8      /* 8 9 : ; < = > ? */
+    /* 40 */ .byte 8, 0, 0, 0, 0, 0, 0, 0      /* @ A-G */
+    /* 48 */ .byte 0, 0, 0, 0, 0, 0, 0, 0      /* H-O */
+    /* 50 */ .byte 0, 0, 0, 0, 0, 0, 0, 0      /* P-W */
+    /* 58 */ .byte 0, 0, 0, 8, 8, 8, 8, 8      /* X Y Z [ \ ] ^ _ */
+    /* 60 */ .byte 8, 0, 0, 0, 0, 0, 0, 0      /* ` a-g */
+    /* 68 */ .byte 0, 0, 0, 0, 0, 0, 0, 0      /* h-o */
+    /* 70 */ .byte 0, 0, 0, 0, 0, 0, 0, 0      /* p-w */
+    /* 78 */ .byte 0, 0, 0, 8, 8, 8, 8, 8      /* x y z { | } ~ DEL */
+    /* 80-FF: all OTHER */
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8
+    .byte 8,8,8,8,8,8,8,8, 8,8,8,8,8,8,8,8

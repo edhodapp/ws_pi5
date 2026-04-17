@@ -1,0 +1,8 @@
+# PICT model for HTTP FSA transition table
+# Full cross-product: 20 states × 9 char classes = 180 vectors
+#
+# Each vector specifies (state, char_class) and the expected
+# (next_state, action) from the transition table.
+
+State: S_METHOD, S_M_SP, S_URI, S_U_SP, S_VH, S_VT1, S_VT2, S_VP, S_VSLASH, S_VMAJ, S_VDOT, S_VMIN, S_RL_CR, S_HDR_ST, S_HDR_NM, S_HDR_VL, S_HDR_CR, S_END_CR, S_DONE, S_ERROR
+CharClass: CC_ALPHA, CC_DIGIT, CC_SP, CC_CR, CC_LF, CC_COLON, CC_SLASH, CC_DOT, CC_OTHER

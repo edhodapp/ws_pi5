@@ -76,7 +76,7 @@
 .equ S_ERROR,    19     /* malformed request */
 .equ S_COUNT,    20
 
-/* Character classes for FSA (3 bits) */
+/* Character classes for FSA lookup table */
 .equ CC_ALPHA,    0
 .equ CC_DIGIT,    1
 .equ CC_SP,       2
@@ -84,8 +84,9 @@
 .equ CC_LF,       4
 .equ CC_COLON,    5
 .equ CC_SLASH,    6
-.equ CC_OTHER,    7
-.equ CC_COUNT,    8
+.equ CC_DOT,      7
+.equ CC_OTHER,    8
+.equ CC_COUNT,    9
 
 /* Method IDs */
 .equ METHOD_UNKNOWN,  0
