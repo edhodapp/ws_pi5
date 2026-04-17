@@ -165,17 +165,37 @@ http_poll:
     str     w0, [sp, #64]
 
     /* --- Parse HTTP version ---
-     * After URI there should be " HTTP/1.x\r\n". Look for "1.1"
-     * vs "1.0" in the version string. Position: method_len + uri_len + 1
-     * (the space after URI). */
+     * After URI: " HTTP/1.x\r\n". Validate the "HTTP/" prefix,
+     * then check minor version digit for 1.0 vs 1.1. */
     add     w1, w24, w0                 /* method_len + uri_len */
-    add     w1, w1, #1                  /* skip space after URI */
-    add     w1, w1, #5                  /* skip "HTTP/" → points to '1' */
-    cmp     w1, w23
-    b.hs    .Lhp_bad_request            /* truncated version → 400 */
-    add     w1, w1, #2                  /* skip "1." → points to '0' or '1' */
-    cmp     w1, w23
-    b.hs    .Lhp_bad_request
+    add     w1, w1, #1                  /* skip space → version start */
+    add     w5, w1, #8                  /* need at least "HTTP/1.x" = 8 chars */
+    cmp     w5, w23
+    b.hs    .Lhp_bad_request            /* truncated → 400 */
+
+    /* Validate "HTTP/" prefix (5 bytes at w1) */
+    ldrb    w2, [x22, w1, uxtw]
+    cmp     w2, #'H'
+    b.ne    .Lhp_bad_request
+    add     w5, w1, #1
+    ldrb    w2, [x22, w5, uxtw]
+    cmp     w2, #'T'
+    b.ne    .Lhp_bad_request
+    add     w5, w5, #1
+    ldrb    w2, [x22, w5, uxtw]
+    cmp     w2, #'T'
+    b.ne    .Lhp_bad_request
+    add     w5, w5, #1
+    ldrb    w2, [x22, w5, uxtw]
+    cmp     w2, #'P'
+    b.ne    .Lhp_bad_request
+    add     w5, w5, #1
+    ldrb    w2, [x22, w5, uxtw]
+    cmp     w2, #'/'
+    b.ne    .Lhp_bad_request
+
+    /* Minor version at offset +7 ("HTTP/1.x" → x at pos 7) */
+    add     w1, w1, #7                  /* points to '0' or '1' */
     ldrb    w2, [x22, w1, uxtw]
     cmp     w2, #'1'
     b.ne    .Lhp_version_done           /* not '1' → assume 1.0 */
@@ -506,26 +526,32 @@ http_find_host_header:
     cmp     w4, #0x0A               /* \n */
     b.ne    .Lfhh_next
 
-    /* Check "Host:" at offset +2 */
+    /* Check "Host:" at offset +2 (case-insensitive per RFC 9110 §5.1:
+     * header field names are case-insensitive). OR with 0x20 folds
+     * uppercase ASCII to lowercase before comparison. */
     add     w4, w3, #2
     ldrb    w1, [x0, x4]
-    cmp     w1, #'H'
+    orr     w1, w1, #0x20           /* fold to lowercase */
+    cmp     w1, #'h'
     b.ne    .Lfhh_next
     add     w4, w4, #1
     ldrb    w1, [x0, x4]
+    orr     w1, w1, #0x20
     cmp     w1, #'o'
     b.ne    .Lfhh_next
     add     w4, w4, #1
     ldrb    w1, [x0, x4]
+    orr     w1, w1, #0x20
     cmp     w1, #'s'
     b.ne    .Lfhh_next
     add     w4, w4, #1
     ldrb    w1, [x0, x4]
+    orr     w1, w1, #0x20
     cmp     w1, #'t'
     b.ne    .Lfhh_next
     add     w4, w4, #1
     ldrb    w1, [x0, x4]
-    cmp     w1, #':'
+    cmp     w1, #':'                /* colon is not alpha — exact match */
     b.ne    .Lfhh_next
 
     /* Found "\r\nHost:" */
@@ -552,8 +578,9 @@ http_find_host_header:
 
 http_200_hdr:
     .ascii  "HTTP/1.1 200 OK\r\n"
+    .ascii  "Server: ws_pi5\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
-    .ascii  "Content-Length: 148\r\n"
+    .ascii  "Content-Length: 158\r\n"
     .ascii  "Connection: close\r\n"
     .ascii  "\r\n"
 http_200_hdr_end:
@@ -561,15 +588,16 @@ http_200_hdr_end:
 
 http_200_body:
     .ascii  "<!DOCTYPE html>\n"
-    .ascii  "<html><head><title>Pi 3</title></head>\n"
-    .ascii  "<body><h1>Hello from bare-metal Pi 3!</h1>\n"
-    .ascii  "<p>No OS. No C. Just assembly.</p>\n"
+    .ascii  "<html><head><title>ws_pi5</title></head>\n"
+    .ascii  "<body><h1>Hello from bare-metal Pi 4!</h1>\n"
+    .ascii  "<p>No OS. No C. Just AArch64 assembly.</p>\n"
     .ascii  "</body></html>\n"
 http_200_body_end:
 .equ http_200_body_len, http_200_body_end - http_200_body
 
 http_404_hdr:
     .ascii  "HTTP/1.1 404 Not Found\r\n"
+    .ascii  "Server: ws_pi5\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 97\r\n"
     .ascii  "Connection: close\r\n"
@@ -586,6 +614,7 @@ http_404_body_end:
 
 http_400_hdr:
     .ascii  "HTTP/1.1 400 Bad Request\r\n"
+    .ascii  "Server: ws_pi5\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 99\r\n"
     .ascii  "Connection: close\r\n"
@@ -602,6 +631,7 @@ http_400_body_end:
 
 http_405_hdr:
     .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
+    .ascii  "Server: ws_pi5\r\n"
     .ascii  "Allow: GET, HEAD\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 106\r\n"

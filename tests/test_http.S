@@ -37,6 +37,8 @@ test_http:
     bl      test_http_missing_host_11
     bl      test_http_no_host_10_ok
     bl      test_http_head_no_body
+    bl      test_http_host_lowercase
+    bl      test_http_bad_version
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
@@ -792,6 +794,116 @@ test_http_head_no_body:
     ret
 
 /* ========================================================================
+ * test_http_host_lowercase — "host:" (lowercase) accepted for HTTP/1.1
+ * ======================================================================== */
+test_http_host_lowercase:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_host_lower_request
+    ldr     w2, =thttp_host_lower_request_len
+.Lhhl_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhhl_cp
+
+    ldr     w0, =thttp_host_lower_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Should be SENDING with status 200 (not 400 from missing Host) */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hhl
+
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hhl
+
+    ldr     x0, =name_hhl
+    bl      test_pass
+    b       .Ldone_hhl
+.Lfail_hhl:
+    ldr     x0, =name_hhl
+    bl      test_fail
+.Ldone_hhl:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_bad_version — garbage version string → 400 Bad Request
+ * ======================================================================== */
+test_http_bad_version:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_bad_version_request
+    ldr     w2, =thttp_bad_version_request_len
+.Lhbv_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhbv_cp
+
+    ldr     w0, =thttp_bad_version_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Status should be HSTATUS_400 */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_400
+    b.ne    .Lfail_hbv
+
+    ldr     x0, =name_hbv
+    bl      test_pass
+    b       .Ldone_hbv
+.Lfail_hbv:
+    ldr     x0, =name_hbv
+    bl      test_fail
+.Ldone_hbv:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_http_send_chunk — SENDING state sends one chunk and advances ptr
  * ======================================================================== */
 test_http_send_chunk:
@@ -841,9 +953,9 @@ test_http_send_chunk:
     str     wzr, [x20, #HCONN_RESP_PTR]
     ldr     x0, =http_200_body
     str     x0, [x20, #HCONN_BODY_PTR]
-    mov     w0, #148                    /* http_200_body_len */
+    mov     w0, #158                    /* http_200_body_len */
     str     w0, [x20, #HCONN_BODY_LEN]
-    mov     w1, #99                     /* http_200_hdr_len */
+    mov     w1, #115                    /* http_200_hdr_len (with Server:) */
     str     w1, [x20, #HCONN_HDR_LEN]
     add     w2, w0, w1
     str     w2, [x20, #HCONN_RESP_LEN]
@@ -1041,6 +1153,16 @@ thttp_nohost_10_request:
 thttp_nohost_10_request_end:
 .equ thttp_nohost_10_request_len, thttp_nohost_10_request_end - thttp_nohost_10_request
 
+thttp_bad_version_request:
+    .ascii  "GET / JUNK/9.9\r\nHost: test\r\n\r\n"
+thttp_bad_version_request_end:
+.equ thttp_bad_version_request_len, thttp_bad_version_request_end - thttp_bad_version_request
+
+thttp_host_lower_request:
+    .ascii  "GET / HTTP/1.1\r\nhost: 10.0.2.15\r\n\r\n"
+thttp_host_lower_request_end:
+.equ thttp_host_lower_request_len, thttp_host_lower_request_end - thttp_host_lower_request
+
 thttp_uri_root:
     .ascii  "/"
 
@@ -1063,6 +1185,8 @@ name_hmna:  .asciz "http_method_not_allowed"
 name_hmh:   .asciz "http_missing_host_11"
 name_hnh10: .asciz "http_no_host_10_ok"
 name_hhnb:  .asciz "http_head_no_body"
+name_hhl:   .asciz "http_host_lowercase"
+name_hbv:   .asciz "http_bad_version"
 name_hsc:   .asciz "http_send_chunk"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
