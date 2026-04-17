@@ -108,34 +108,74 @@ http_poll:
     ldrh    w0, [x19, #TCONN_RXLEN]
     cbz     w0, .Lhp_next
 
-    /* Peek rx buffer (returns pointer + length, no copy) */
+    /* Peek rx buffer */
     mov     x0, x19
     bl      tcp_rx_peek
-    /* x0 = buffer pointer, w1 = byte count */
-    mov     x22, x0                     /* save buf ptr */
-    mov     w23, w1                     /* save len */
+    mov     x22, x0                     /* x22 = buf ptr */
+    mov     w23, w1                     /* w23 = data len */
 
-    /* Scan for \r\n\r\n */
-    mov     x0, x22
-    mov     w1, w23
-    bl      http_find_end_of_headers
-    cmp     w0, #-1
-    b.eq    .Lhp_next                   /* incomplete → stay in RECV_HDR */
+    /* Run the FSA parser (state persists in HCONN across calls) */
+    mov     x0, x20                     /* HCONN */
+    mov     x1, x22                     /* buf */
+    mov     w2, w23                     /* len */
+    bl      http_parse_request
 
-    /* Found end of headers at offset w0 */
-    mov     w23, w0                     /* header_end offset */
+    /* Check parser result */
+    cmp     w0, #S_DONE
+    b.eq    .Lhp_fsa_done
+    cmp     w0, #S_ERROR
+    b.eq    .Lhp_bad_request
+    b       .Lhp_next                   /* need more data */
 
-    /* --- Parse method ---
-     * Check GET (4 bytes "GET ") or HEAD (5 bytes "HEAD "). */
+.Lhp_fsa_done:
+    /* --- FSA completed: extract fields and set up response ---
+     *
+     * HCONN parser fields: URI_START, URI_LEN, VER_MINOR,
+     * HOST_FOUND. Method identified by comparing raw bytes.
+     *
+     * The FSA validates structure but not the specific "HTTP/"
+     * prefix characters (it accepts any ALPHA in those positions).
+     * Validate the prefix here. Version starts at:
+     * URI_START + URI_LEN + 1 (space after URI). */
+    ldrh    w0, [x20, #HCONN_URI_START]
+    ldrh    w1, [x20, #HCONN_URI_LEN]
+    add     w0, w0, w1
+    add     w0, w0, #1                  /* offset of 'H' in "HTTP/" */
+    ldrb    w1, [x22, w0, uxtw]
+    cmp     w1, #'H'
+    b.ne    .Lhp_bad_request
+    add     w0, w0, #1
+    ldrb    w1, [x22, w0, uxtw]
+    cmp     w1, #'T'
+    b.ne    .Lhp_bad_request
+    add     w0, w0, #1
+    ldrb    w1, [x22, w0, uxtw]
+    cmp     w1, #'T'
+    b.ne    .Lhp_bad_request
+    add     w0, w0, #1
+    ldrb    w1, [x22, w0, uxtw]
+    cmp     w1, #'P'
+    b.ne    .Lhp_bad_request
+
+    /* Set flags from parsed fields */
     mov     w0, #0
-    strb    w0, [x20, #HCONN_FLAGS]     /* clear flags */
+    strb    w0, [x20, #HCONN_FLAGS]
 
+    /* HTTP/1.1 if VER_MINOR == '1' */
+    ldrb    w0, [x20, #HCONN_VER_MINOR]
+    cmp     w0, #'1'
+    b.ne    .Lhp_ver_done
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    orr     w0, w0, #HFLAG_HTTP11
+    strb    w0, [x20, #HCONN_FLAGS]
+.Lhp_ver_done:
+
+    /* Identify method: "GET " or "HEAD " */
     ldr     w0, [x22]
     ldr     w1, =HTTP_GET_MARKER
     cmp     w0, w1
     b.eq    .Lhp_method_get
 
-    /* Check HEAD: first 4 bytes "HEAD" + 5th byte ' ' */
     ldr     w1, =HTTP_HEAD_MARK_LO
     cmp     w0, w1
     b.ne    .Lhp_bad_method
@@ -147,82 +187,25 @@ http_poll:
     ldrb    w0, [x20, #HCONN_FLAGS]
     orr     w0, w0, #HFLAG_HEAD
     strb    w0, [x20, #HCONN_FLAGS]
-    mov     w24, #5                     /* method_len = 5 ("HEAD ") */
-    b       .Lhp_parse_uri
+    b       .Lhp_method_done
 
 .Lhp_method_get:
-    mov     w24, #4                     /* method_len = 4 ("GET ") */
+.Lhp_method_done:
 
-.Lhp_parse_uri:
-    /* Extract URI: starts at offset method_len, ends at next space */
-    add     x0, x22, x24, uxtw
-    sub     w1, w23, w24
-    bl      http_find_uri_end
-    /* w0 = URI length */
-
-    /* Save URI length — needed later for route matching.
-     * w0 = uri_len from http_find_uri_end. */
-    str     w0, [sp, #64]
-
-    /* --- Parse HTTP version ---
-     * After URI: " HTTP/1.x\r\n". Validate the "HTTP/" prefix,
-     * then check minor version digit for 1.0 vs 1.1. */
-    add     w1, w24, w0                 /* method_len + uri_len */
-    add     w1, w1, #1                  /* skip space → version start */
-    add     w5, w1, #8                  /* need at least "HTTP/1.x" = 8 chars */
-    cmp     w5, w23
-    b.hs    .Lhp_bad_request            /* truncated → 400 */
-
-    /* Validate "HTTP/" prefix (5 bytes at w1) */
-    ldrb    w2, [x22, w1, uxtw]
-    cmp     w2, #'H'
-    b.ne    .Lhp_bad_request
-    add     w5, w1, #1
-    ldrb    w2, [x22, w5, uxtw]
-    cmp     w2, #'T'
-    b.ne    .Lhp_bad_request
-    add     w5, w5, #1
-    ldrb    w2, [x22, w5, uxtw]
-    cmp     w2, #'T'
-    b.ne    .Lhp_bad_request
-    add     w5, w5, #1
-    ldrb    w2, [x22, w5, uxtw]
-    cmp     w2, #'P'
-    b.ne    .Lhp_bad_request
-    add     w5, w5, #1
-    ldrb    w2, [x22, w5, uxtw]
-    cmp     w2, #'/'
-    b.ne    .Lhp_bad_request
-
-    /* Minor version at offset +7 ("HTTP/1.x" → x at pos 7) */
-    add     w1, w1, #7                  /* points to '0' or '1' */
-    ldrb    w2, [x22, w1, uxtw]
-    cmp     w2, #'1'
-    b.ne    .Lhp_version_done           /* not '1' → assume 1.0 */
-    ldrb    w2, [x20, #HCONN_FLAGS]
-    orr     w2, w2, #HFLAG_HTTP11
-    strb    w2, [x20, #HCONN_FLAGS]
-.Lhp_version_done:
-
-    /* --- Host header check (RFC 9112: MUST for HTTP/1.1) --- */
+    /* Host header check (HTTP/1.1 only) */
     ldrb    w0, [x20, #HCONN_FLAGS]
     tst     w0, #HFLAG_HTTP11
-    b.eq    .Lhp_host_ok               /* HTTP/1.0 → Host not required */
-
-    /* Scan for "Host:" (case-sensitive per convention; browsers
-     * always send capitalized) */
-    mov     x0, x22
-    mov     w2, w23
-    bl      http_find_host_header
-    cbz     w0, .Lhp_bad_request        /* no Host: header → 400 */
+    b.eq    .Lhp_host_ok
+    ldrb    w0, [x20, #HCONN_HOST_FOUND]
+    cbz     w0, .Lhp_bad_request
 
 .Lhp_host_ok:
-    /* Restore URI length and match route */
-    ldr     w1, [sp, #64]              /* w1 = uri_len */
-    add     x0, x22, x24, uxtw         /* URI start = buf + method_len */
+    /* Match URI from parser fields */
+    ldrh    w24, [x20, #HCONN_URI_START]
+    ldrh    w1, [x20, #HCONN_URI_LEN]
+    add     x0, x22, x24, uxtw
     bl      http_match_uri
 
-    /* Set up response based on URI match */
     cbnz    w0, .Lhp_resp_404
     mov     w0, #HSTATUS_200
     strb    w0, [x20, #HCONN_STATUS]
@@ -240,7 +223,6 @@ http_poll:
     b       .Lhp_setup_resp
 
 .Lhp_bad_method:
-    /* Unknown method → 405 Method Not Allowed */
     mov     w0, #HSTATUS_405
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_405_body
@@ -249,7 +231,6 @@ http_poll:
     b       .Lhp_setup_resp
 
 .Lhp_bad_request:
-    /* Malformed request → 400 Bad Request */
     mov     w0, #HSTATUS_400
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_400_body
