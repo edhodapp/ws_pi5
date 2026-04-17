@@ -201,6 +201,23 @@ http_poll:
     cbz     w0, .Lhp_bad_request
 
 .Lhp_host_ok:
+    /* Determine Connection behavior:
+     * - If client sent "Connection: close", set HFLAG_CLOSE
+     * - If HTTP/1.0 (no HFLAG_HTTP11), set HFLAG_CLOSE
+     * - Otherwise: persistent (HTTP/1.1 default) */
+    ldrb    w0, [x20, #HCONN_CLOSE_FOUND]
+    cbnz    w0, .Lhp_set_close
+
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_HTTP11
+    b.ne    .Lhp_conn_done          /* HTTP/1.1 → persistent */
+
+.Lhp_set_close:
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    orr     w0, w0, #HFLAG_CLOSE
+    strb    w0, [x20, #HCONN_FLAGS]
+.Lhp_conn_done:
+
     /* Match URI from parser fields */
     ldrh    w24, [x20, #HCONN_URI_START]
     ldrh    w1, [x20, #HCONN_URI_LEN]
@@ -357,7 +374,36 @@ http_poll:
     b       .Lhp_next
 
 .Lhp_close:
-    /* Response complete — close connection */
+    /* Response complete. Keep-alive or close?
+     * Close if: HFLAG_CLOSE set, or HTTP/1.0 without explicit keep-alive.
+     * For now: HTTP/1.1 default = persistent, HTTP/1.0 = close.
+     * Connection: close from client overrides. */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    tst     w0, #HFLAG_CLOSE
+    b.ne    .Lhp_do_close
+
+    tst     w0, #HFLAG_HTTP11
+    b.eq    .Lhp_do_close           /* HTTP/1.0 → close */
+
+    /* Keep-alive: reset HCONN to RECV_HDR for next request.
+     * Reset parser state so the FSA starts from S_METHOD. */
+    mov     w0, #HTTPS_RECV_HDR
+    strb    w0, [x20, #HCONN_STATE]
+    strb    wzr, [x20, #HCONN_PARSE_STATE]
+    strh    wzr, [x20, #HCONN_PARSE_OFF]
+    strb    wzr, [x20, #HCONN_HOST_FOUND]
+    strb    wzr, [x20, #HCONN_CLOSE_FOUND]
+    strb    wzr, [x20, #HCONN_VER_MINOR]
+
+    /* Partial rx flush: consume only REQ_LEN bytes, preserving
+     * any pipelined data after the current request.
+     * TODO: implement partial flush in tcp layer. For now, full flush. */
+    mov     x0, x19
+    bl      tcp_rx_flush
+
+    b       .Lhp_next
+
+.Lhp_do_close:
     ldr     x23, =http_send_ctx
     mov     x0, x19
     ldr     x1, [x23, #HSCTX_TX_BUF]
@@ -615,7 +661,6 @@ http_200_date:
     .ascii  "\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 158\r\n"
-    .ascii  "Connection: close\r\n"
     .ascii  "\r\n"
 http_200_hdr_end:
 .equ http_200_hdr_len, http_200_hdr_end - http_200_hdr
@@ -641,7 +686,6 @@ http_404_date:
     .ascii  "\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 97\r\n"
-    .ascii  "Connection: close\r\n"
     .ascii  "\r\n"
 http_404_hdr_end:
 .equ http_404_hdr_len, http_404_hdr_end - http_404_hdr

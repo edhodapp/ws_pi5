@@ -17,6 +17,7 @@
 /* HTTP connection flags (stored in HCONN_FLAGS) */
 .equ HFLAG_HTTP11,      0x01    /* bit 0: HTTP/1.1 (vs 1.0) */
 .equ HFLAG_HEAD,        0x02    /* bit 1: HEAD method (suppress body) */
+.equ HFLAG_CLOSE,       0x04    /* bit 2: send Connection: close (close after response) */
 
 /* HTTP connection struct (64 bytes per slot)
  *
@@ -43,6 +44,7 @@
 .equ HCONN_URI_LEN,     38      /* u16 — URI length */
 .equ HCONN_VER_MINOR,   40      /* u8  — version minor digit ('0' or '1') */
 .equ HCONN_HOST_FOUND,  41      /* u8  — 1 if Host: header seen */
+.equ HCONN_CLOSE_FOUND, 42     /* u8  — 1 if Connection: close seen */
 .equ HCONN_METHOD_LEN,  42      /* u16 — method string length */
 .equ HCONN_REQ_LEN,     44      /* u32 — total request length (for pipelining) */
 .equ HCONN_HDR_NM_START, 48     /* u16 — header name start (temp for Host check) */

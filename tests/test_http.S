@@ -1296,7 +1296,7 @@ test_http_send_chunk:
     str     x0, [x20, #HCONN_BODY_PTR]
     mov     w0, #158                    /* http_200_body_len */
     str     w0, [x20, #HCONN_BODY_LEN]
-    mov     w1, #152                    /* http_200_hdr_len (with Server: + Date:) */
+    mov     w1, #133                    /* http_200_hdr_len (no Connection: close) */
     str     w1, [x20, #HCONN_HDR_LEN]
     add     w2, w0, w1
     str     w2, [x20, #HCONN_RESP_LEN]

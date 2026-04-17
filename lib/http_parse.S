@@ -150,13 +150,19 @@ http_parse_request:
     b       .Lparse_advance
 
 .Lact_hdr_check_host:
-    /* We've seen a colon — check if the header name was "Host" (or "host" etc).
-     * Header name: bytes from hdr_name_start to current offset - 1. */
+    /* We've seen a colon — check if the header name is "Host" or
+     * "Connection" (case-insensitive). Header name: bytes from
+     * hdr_name_start to current offset. */
     ldrh    w0, [x19, #HCONN_HDR_NM_START]   /* hdr_name_start */
     sub     w1, w5, w0              /* name_len */
-    cmp     w1, #4
-    b.ne    .Lparse_advance         /* not 4 chars → not Host */
 
+    cmp     w1, #4
+    b.eq    .Lhdr_check_host_4
+    cmp     w1, #10
+    b.eq    .Lhdr_check_conn_10
+    b       .Lparse_advance
+
+.Lhdr_check_host_4:
     /* Case-insensitive check for "host" */
     ldrb    w1, [x20, w0, uxtw]
     orr     w1, w1, #0x20
@@ -179,6 +185,74 @@ http_parse_request:
     b.ne    .Lparse_advance
     mov     w0, #1
     strb    w0, [x19, #HCONN_HOST_FOUND]
+    b       .Lparse_advance
+
+.Lhdr_check_conn_10:
+    /* Case-insensitive check for "connection" (10 chars).
+     * If found AND value contains "close", set HCONN_CLOSE_FOUND. */
+    mov     w3, w0                  /* save name start */
+    ldr     x1, =http_conn_name     /* "connection" reference */
+    mov     w2, #10
+.Lhdr_conn_cmp:
+    cbz     w2, .Lhdr_conn_match
+    ldrb    w7, [x20, w0, uxtw]
+    orr     w7, w7, #0x20
+    ldrb    w8, [x1], #1
+    cmp     w7, w8
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    sub     w2, w2, #1
+    b       .Lhdr_conn_cmp
+
+.Lhdr_conn_match:
+    /* "Connection" header found. Scan value for "close".
+     * Value starts at current parse position + 1 (skip colon).
+     * We look for "close" case-insensitive in the value bytes
+     * until CR. Since we're mid-parse at the colon, the value
+     * hasn't been consumed yet. Scan forward from w5+1. */
+    add     w0, w5, #1             /* skip colon, start of value */
+.Lhdr_conn_skip_sp:
+    cmp     w0, w21                /* bounds check */
+    b.hs    .Lparse_advance
+    ldrb    w1, [x20, w0, uxtw]
+    cmp     w1, #' '               /* skip OWS */
+    b.ne    .Lhdr_conn_val
+    add     w0, w0, #1
+    b       .Lhdr_conn_skip_sp
+
+.Lhdr_conn_val:
+    /* Check if value starts with "close" (5 chars, case-insensitive) */
+    add     w2, w0, #5
+    cmp     w2, w21
+    b.hs    .Lparse_advance        /* not enough bytes */
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'c'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'l'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'o'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'s'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'e'
+    b.ne    .Lparse_advance
+
+    /* "Connection: close" detected */
+    mov     w0, #1
+    strb    w0, [x19, #HCONN_CLOSE_FOUND]
     b       .Lparse_advance
 
 .Lact_req_done:
@@ -246,6 +320,10 @@ http_fsa_table:
 /*  S_END_CR(17) */ .byte 0x13, 0x13, 0x13, 0x13, 0xD2, 0x13, 0x13, 0x13, 0x13
 /*  S_DONE(18)   */ .byte 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12
 /*  S_ERROR(19)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+
+/* Reference string for case-insensitive "connection" header match */
+http_conn_name:
+    .ascii  "connection"
 
 /* ===================================================================
  * Character classification lookup table (256 bytes)
