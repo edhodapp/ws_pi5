@@ -9,7 +9,7 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** Pi 4 hardware bringup complete. The full stack runs on real hardware: UART chainloader, GENET Gigabit Ethernet RX+TX, live PHY speed renegotiation, DSB-barrier ordering guarantees, a hardware-error descriptor drop path, and an in-kernel register/driver-state snapshot for live forensics. A 49-test L2 hardening integration suite drives the Pi from a host laptop (reachability, 256-entry ring wraparound through 1024-frame bursts, link-flap recovery, malformed-frame survival, 100M/1G speed renegotiation, DSB integrity, dump-state consistency) with forensic pcap capture on any failure. Head-to-head on identical hardware, ws_pi5 measured ~1.48x faster per-frame burst-drain cost than the Raspberry Pi OS reference kernel.
+**Current stage:** Serving concurrent HTTP connections on real Pi 4 hardware. The full stack runs end-to-end: UART chainloader, GENET Gigabit Ethernet with HW TX checksum offload, live PHY speed renegotiation, TCP with all RFC compliance defects closed (dual Claude+Gemini audit, 8/8 resolved), and exception vectors for instant fault diagnosis. A 51-test L2 hardening integration suite plus TCP concurrent-connection tests drive the Pi from a host laptop. Head-to-head on identical hardware, ws_pi5 measured ~1.48x faster per-frame burst-drain cost than the Raspberry Pi OS reference kernel.
 
 ## The Experiment
 
@@ -18,7 +18,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send — was developed through human-AI collaboration. The suite has grown to 385 assembly unit tests + 141 Python unit tests + 153 functional tests + 49 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 412 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -58,7 +58,7 @@ boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
       http_poll          Parse requests, send responses (cooperative, non-blocking)
 ```
 
-Kernel image: 27.2 KB (27,848 bytes). Runtime memory: 32.6 MB (dominated by 128 × 256 KB TCP send buffers).
+Kernel image: 32.5 KB (33,224 bytes, including exception vector table). Runtime memory: ~32.6 MB (dominated by 128 × 256 KB TCP send buffers).
 
 ## Project Structure
 
@@ -89,7 +89,7 @@ include/            Shared constants and macros (.inc files)
   timer.inc           Timer pool constants
   vmio.inc            VMIO engine constants
 platform/pi/        Raspberry Pi 4 (BCM2711)
-  boot.S              Entry point — EL2→EL1 drop, MMU setup, park cores 1-3, stack, BSS
+  boot.S              Entry point — EL2→EL1 drop, MMU setup, exception vectors, park cores 1-3
   main.S              uart_init, GENET (Pi 4 hardware) or DWC2 USB → CDC-ECM (QEMU test harness), net_loop, http_poll
   include/            Pi-specific constants
     platform.inc        PERIPH_BASE (0xFE for Pi 4, 0x3F for QEMU testing)
@@ -116,7 +116,7 @@ chainload/          UART chainloader for Pi 4 development
   chainload.ld        Linked at 0x4000000 (above kernel footprint)
 tests/              Unit and functional tests
   test_main.S         Test runner (boot, MMU, dispatch, pass/fail reporting)
-  test_*.S            Shared protocol stack tests (341 tests including hex_parse)
+  test_*.S            Shared protocol stack tests (374 tests including hex_parse)
   pi/                 Pi-specific driver tests (38 tests)
     test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
     test_gpio.S         GPIO function select tests (5 tests)
@@ -218,7 +218,7 @@ The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-indepe
 
 ### Unit Tests
 
-385 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, multi-segment send, RFC 6298 RTO), HTTP request/response handling, Intel HEX parsing, and the GENET RX drop-path bookkeeping. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+412 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, timestamps/PAWS, multi-segment send, RFC 6298 RTO, congestion control with fast recovery), HTTP request/response handling, Intel HEX parsing, and the GENET RX drop-path bookkeeping. A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
 141 Python unit tests run off-hardware: the Intel HEX library (34 tests, 100% mutation score under mutmut), the `hw_send.py` chainloader host tool (12 tests, covering ioctl DTR toggle and termios line-read deadline shaping), and the L2 hardening framework (95 tests covering `eth_frames`, `link`, and `wire` — the testable pieces of the `hw_test/` integration suite).
 
@@ -312,6 +312,7 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 **Reliability:**
 - RFC 6298 RTO: SRTT/RTTVAR measurement, Karn's algorithm, doubling on timeout
 - Fast retransmit on 3 duplicate ACKs (RFC 5681) with multiplicative decrease
+- Fast recovery: cwnd inflation on dup ACKs beyond 3rd, deflation on new ACK (RFC 5681 §3.2)
 - SACK (RFC 2018): parse SACK blocks, SACK-aware selective retransmit
 - Congestion control: slow start, congestion avoidance, ssthresh tracking (256 KB cap)
 - OOO segment buffering: 4 slots per connection, receive window check, merge on in-order delivery
@@ -324,7 +325,7 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 - SACK-Permitted: negotiated from SYN, included in SYN-ACK
 
 **Security hardening:**
-- RST SEQ validation (RFC 5961): out-of-window RSTs silently dropped
+- RST SEQ validation (RFC 5961): exact-match required; in-window non-exact sends Challenge ACK
 - RST rate limiting: token-bucket at 10/sec burst
 - ICMP soft errors for ESTABLISHED+ (RFC 5461): only hard-close SYN_RCVD
 - Idle connection reaper: per-state timeouts (SYN_RCVD 60s, ESTABLISHED 120s, FIN states 60s)
