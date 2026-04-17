@@ -19,6 +19,7 @@
 .global http_find_uri_end
 .global http_match_uri
 .global http_find_host_header
+.global http_update_date
 
 .section .text
 
@@ -548,9 +549,57 @@ http_find_host_header:
     ret
 
 /* ===================================================================
+/*
+ * http_update_date — Update Date header in all response templates
+ *
+ * Called from the idle loop. Gets current time via timer_now + ntp_time.
+ * If NTP not synced, leaves the default epoch date.
+ *
+ * Clobbers: x0-x7, x19-x24, x30 (via http_format_date)
+ */
+http_update_date:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      timer_now
+    bl      ntp_time
+    cbz     x0, .Lud_done           /* not synced → keep existing */
+
+    /* Format into each template's Date field */
+    mov     x19, x0                 /* save timestamp */
+
+    mov     x0, x19
+    ldr     x1, =http_200_date
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_404_date
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_400_date
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_405_date
+    bl      http_format_date
+
+.Lud_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ===================================================================
  * Response data
+ *
+ * Headers are in .data (writable) because the Date field is filled
+ * at runtime by http_update_date. The "Date: " prefix and \r\n are
+ * static; the 29-byte date value is overwritten each second.
+ *
+ * Bodies remain in .rodata (immutable).
  * =================================================================== */
-.section .rodata
+.section .data
+.balign 4
 
 .global http_200_hdr
 .global http_200_body
@@ -560,6 +609,10 @@ http_find_host_header:
 http_200_hdr:
     .ascii  "HTTP/1.1 200 OK\r\n"
     .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_200_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 158\r\n"
     .ascii  "Connection: close\r\n"
@@ -567,6 +620,7 @@ http_200_hdr:
 http_200_hdr_end:
 .equ http_200_hdr_len, http_200_hdr_end - http_200_hdr
 
+.section .rodata
 http_200_body:
     .ascii  "<!DOCTYPE html>\n"
     .ascii  "<html><head><title>ws_pi5</title></head>\n"
@@ -576,9 +630,15 @@ http_200_body:
 http_200_body_end:
 .equ http_200_body_len, http_200_body_end - http_200_body
 
+.section .data
+.balign 4
 http_404_hdr:
     .ascii  "HTTP/1.1 404 Not Found\r\n"
     .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_404_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 97\r\n"
     .ascii  "Connection: close\r\n"
@@ -586,6 +646,7 @@ http_404_hdr:
 http_404_hdr_end:
 .equ http_404_hdr_len, http_404_hdr_end - http_404_hdr
 
+.section .rodata
 http_404_body:
     .ascii  "<!DOCTYPE html>\n"
     .ascii  "<html><head><title>404</title></head>\n"
@@ -593,9 +654,15 @@ http_404_body:
 http_404_body_end:
 .equ http_404_body_len, http_404_body_end - http_404_body
 
+.section .data
+.balign 4
 http_400_hdr:
     .ascii  "HTTP/1.1 400 Bad Request\r\n"
     .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_400_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 99\r\n"
     .ascii  "Connection: close\r\n"
@@ -603,6 +670,7 @@ http_400_hdr:
 http_400_hdr_end:
 .equ http_400_hdr_len, http_400_hdr_end - http_400_hdr
 
+.section .rodata
 http_400_body:
     .ascii  "<!DOCTYPE html>\n"
     .ascii  "<html><head><title>400</title></head>\n"
@@ -610,9 +678,15 @@ http_400_body:
 http_400_body_end:
 .equ http_400_body_len, http_400_body_end - http_400_body
 
+.section .data
+.balign 4
 http_405_hdr:
     .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
     .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_405_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
     .ascii  "Allow: GET, HEAD\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 106\r\n"
@@ -621,6 +695,7 @@ http_405_hdr:
 http_405_hdr_end:
 .equ http_405_hdr_len, http_405_hdr_end - http_405_hdr
 
+.section .rodata
 http_405_body:
     .ascii  "<!DOCTYPE html>\n"
     .ascii  "<html><head><title>405</title></head>\n"

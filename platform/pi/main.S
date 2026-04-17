@@ -254,6 +254,7 @@ net_loop:
     mov     x1, x0
     ldr     x0, =timer_pool
     bl      timer_check
+    bl      http_update_date
     bl      http_poll
     b       net_loop
 
