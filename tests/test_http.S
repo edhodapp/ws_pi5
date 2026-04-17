@@ -43,6 +43,8 @@ test_http:
     bl      test_http_fsa_head_10
     bl      test_http_fsa_incomplete
     bl      test_http_fsa_bad_method
+    bl      test_http_chunk_encode
+    bl      test_http_chunk_terminate
     bl      test_http_date_epoch
     bl      test_http_date_2026
     bl      test_http_leap_2000
@@ -1101,6 +1103,97 @@ test_http_fsa_bad_method:
     ret
 
 /* ========================================================================
+ * test_http_chunk_encode — 5 bytes "Hello" → "5\r\nHello\r\n" (10 bytes)
+ * ======================================================================== */
+test_http_chunk_encode:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =thttp_chunk_buf
+    ldr     x1, =thttp_chunk_data
+    mov     w2, #5
+    bl      http_chunk_encode
+
+    /* Should return 10 bytes: "5\r\nHello\r\n" */
+    cmp     w0, #10
+    b.ne    .Lfail_hce
+
+    /* Verify first byte is '5' */
+    ldr     x0, =thttp_chunk_buf
+    ldrb    w1, [x0]
+    cmp     w1, #'5'
+    b.ne    .Lfail_hce
+
+    /* Verify \r\n after size */
+    ldrb    w1, [x0, #1]
+    cmp     w1, #0x0D
+    b.ne    .Lfail_hce
+    ldrb    w1, [x0, #2]
+    cmp     w1, #0x0A
+    b.ne    .Lfail_hce
+
+    /* Verify data starts at offset 3 */
+    ldrb    w1, [x0, #3]
+    cmp     w1, #'H'
+    b.ne    .Lfail_hce
+
+    /* Verify trailing \r\n */
+    ldrb    w1, [x0, #8]
+    cmp     w1, #0x0D
+    b.ne    .Lfail_hce
+    ldrb    w1, [x0, #9]
+    cmp     w1, #0x0A
+    b.ne    .Lfail_hce
+
+    ldr     x0, =name_hce
+    bl      test_pass
+    b       .Ldone_hce
+.Lfail_hce:
+    ldr     x0, =name_hce
+    bl      test_fail
+.Ldone_hce:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_http_chunk_terminate — "0\r\n\r\n" = 5 bytes
+ * ======================================================================== */
+test_http_chunk_terminate:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =thttp_chunk_buf
+    bl      http_chunk_terminate
+
+    cmp     w0, #5
+    b.ne    .Lfail_hct
+
+    ldr     x0, =thttp_chunk_buf
+    ldrb    w1, [x0]
+    cmp     w1, #'0'
+    b.ne    .Lfail_hct
+    ldrb    w1, [x0, #1]
+    cmp     w1, #0x0D
+    b.ne    .Lfail_hct
+    ldrb    w1, [x0, #2]
+    cmp     w1, #0x0A
+    b.ne    .Lfail_hct
+    ldrb    w1, [x0, #3]
+    cmp     w1, #0x0D
+    b.ne    .Lfail_hct
+    ldrb    w1, [x0, #4]
+    cmp     w1, #0x0A
+    b.ne    .Lfail_hct
+
+    ldr     x0, =name_hct
+    bl      test_pass
+    b       .Ldone_hct
+.Lfail_hct:
+    ldr     x0, =name_hct
+    bl      test_fail
+.Ldone_hct:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Helper: thttp_check_date — compare formatted date output to expected
  *
  * x0: expected string, x1: actual buffer, w2: length
@@ -1541,11 +1634,16 @@ name_fg11:  .asciz "http_fsa_get_11"
 name_fh10:  .asciz "http_fsa_head_10"
 name_ffi:   .asciz "http_fsa_incomplete"
 name_ffbm:  .asciz "http_fsa_bad_method"
+name_hce:   .asciz "http_chunk_encode"
+name_hct:   .asciz "http_chunk_terminate"
 name_hde:   .asciz "http_date_epoch"
 name_hd26:  .asciz "http_date_2026"
 name_hl20:  .asciz "http_leap_2000"
 name_hn21:  .asciz "http_noleap_2100"
 name_hsc:   .asciz "http_send_chunk"
+
+thttp_chunk_data:
+    .ascii  "Hello"
 
 thttp_date_epoch_expected:
     .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
@@ -1569,6 +1667,10 @@ thttp_tx_buf:
 .balign 4
 thttp_send_count:
     .word   0
+
+.balign 4
+thttp_chunk_buf:
+    .space  64
 
 .balign 4
 thttp_date_buf:
