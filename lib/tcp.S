@@ -1538,15 +1538,13 @@ tcp_listen_syn_handler:
     cmn     w0, #1
     b.eq    .Llsyn_no_wscale
 
-    /* Store peer's WSCALE and our WSCALE */
+    /* Store peer's WSCALE and our WSCALE.
+     * RFC 7323 §2.2: SYN window is NEVER scaled — the shift applies
+     * only to window values in segments after the handshake.  The
+     * normal ACK path (tcp_estab_ack_handler) applies the shift. */
     strb    w0, [x21, #TCONN_SND_WSCALE]
     mov     w1, #TCP_OUR_WSCALE
     strb    w1, [x21, #TCONN_RCV_WSCALE]
-
-    /* Apply WSCALE to the already-stored SND_WND */
-    ldr     w1, [x21, #TCONN_SND_WND]
-    lsl     w1, w1, w0
-    str     w1, [x21, #TCONN_SND_WND]
     b       .Llsyn_wscale_done
 
 .Llsyn_no_wscale:
@@ -1661,14 +1659,16 @@ tcp_drop_handler:
  * Otherwise: copy data to rx buffer, RCV_NXT += data_len, build ACK reply
  */
 tcp_estab_ack_handler:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
 
     mov     x19, x0                 /* x19 = conn */
     mov     x20, x1                 /* x20 = frame */
     mov     w21, w2                 /* w21 = tcp_section_len */
     mov     w22, w3                 /* w22 = tcp_header_len */
+    mov     w23, #0                 /* w23 = deferred TSval (0 = no update) */
 
     /* Update SND_WND from incoming ACK */
     ldrh    w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
@@ -1748,6 +1748,21 @@ tcp_estab_ack_handler:
     ldp     x4, x5, [sp], #16
 .Leak_no_rtt:
 
+    /* RFC 5681 §3.2: check if this new ACK exits fast recovery.
+     * In recovery when SACK_RECOVER != 0 && SND_UNA < SACK_RECOVER.
+     * Exit when new SND_UNA (w4) >= SACK_RECOVER. */
+    ldr     w7, [x19, #TCONN_SACK_RECOVER]
+    cbz     w7, .Leak_normal_cwnd       /* not in recovery */
+    cmp     w4, w7
+    b.lo    .Leak_normal_cwnd           /* still in recovery, partial ACK */
+    /* Exit fast recovery: cwnd = ssthresh (deflation) */
+    ldr     w7, [x19, #TCONN_SSTHRESH]
+    str     w7, [x19, #TCONN_CWND]
+    str     wzr, [x19, #TCONN_SACK_RECOVER]
+    strb    wzr, [x19, #TCONN_DUP_ACK_CNT]
+    b       .Leak_cwnd_done
+
+.Leak_normal_cwnd:
     /* Congestion control: grow cwnd on new ACK (RFC 5681) */
     ldr     w7, [x19, #TCONN_CWND]
     ldr     w8, [x19, #TCONN_SSTHRESH]
@@ -1771,6 +1786,7 @@ tcp_estab_ack_handler:
     csel    w7, w7, w10, lo
     str     w7, [x19, #TCONN_CWND]
     strb    wzr, [x19, #TCONN_DUP_ACK_CNT]
+.Leak_cwnd_done:
 
     /* If SND_UNA == SND_NXT, all data ACKed → clear retransmit */
     cmp     w4, w6
@@ -1790,7 +1806,9 @@ tcp_estab_ack_handler:
     ldr     w2, [x19, #TCONN_TS_RECENT]
     sub     w3, w0, w2              /* signed diff */
     tbnz    w3, #31, .Leak_paws_drop /* TSval < TS_RECENT → PAWS drop */
-    str     w0, [x19, #TCONN_TS_RECENT] /* update TS_RECENT */
+    /* RFC 7323 §4.3: defer TS_RECENT update until SEQ validated.
+     * OOO segments must NOT poison TS_RECENT. */
+    mov     w23, w0                 /* save TSval; store after SEQ check */
 .Leak_paws_done:
 
     sub     w4, w21, w22            /* w4 = data_len */
@@ -1852,6 +1870,11 @@ tcp_estab_ack_handler:
 
     b       .Leak_dup_data          /* send dup ACK */
 .Leak_seq_ok:
+
+    /* Commit deferred TS_RECENT now that SEQ is validated */
+    cbz     w23, .Leak_ts_ok
+    str     w23, [x19, #TCONN_TS_RECENT]
+.Leak_ts_ok:
 
     /* Check rx buffer overflow */
     ldrh    w5, [x19, #TCONN_RXLEN]
@@ -1950,9 +1973,10 @@ tcp_estab_ack_handler:
     mov     x5, x19                 /* conn */
     bl      tcp_build_reply
 
+    ldr     x23, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 .Leak_paws_drop:
@@ -1976,12 +2000,18 @@ tcp_estab_ack_handler:
     mov     x5, x19                 /* conn */
     bl      tcp_build_reply
 
+    ldr     x23, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 .Leak_pure_ack:
+    /* Pure ACK: commit deferred TS_RECENT (pure ACKs are always valid) */
+    cbz     w23, .Leak_ts_ack_ok
+    str     w23, [x19, #TCONN_TS_RECENT]
+.Leak_ts_ack_ok:
+
     /* Check for duplicate ACK: seg_ack == SND_UNA and data in flight */
     ldr     w4, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
     rev     w4, w4                  /* seg_ack host order */
@@ -1997,20 +2027,32 @@ tcp_estab_ack_handler:
     add     w7, w7, #1
     strb    w7, [x19, #TCONN_DUP_ACK_CNT]
     cmp     w7, #TCP_DUPACK_THRESH
-    b.ne    .Leak_not_dup           /* not at threshold yet */
+    b.lo    .Leak_not_dup           /* below threshold → ignore */
+    b.hi    .Leak_cwnd_inflate      /* above threshold → inflate only */
 
-    /* Fast retransmit: retransmit immediately (SACK-aware) */
+    /* Exactly at threshold: enter fast recovery (RFC 5681 §3.2) */
     mov     x0, x19
     mov     x1, x20                 /* frame (for SACK parsing) */
     mov     w2, w22                 /* tcp_header_len */
     bl      tcp_fast_retransmit
-    strb    wzr, [x19, #TCONN_DUP_ACK_CNT]  /* reset counter */
+    b       .Leak_not_dup
+
+.Leak_cwnd_inflate:
+    /* RFC 5681 §3.2: for each additional dup ACK, cwnd += SMSS */
+    ldr     w7, [x19, #TCONN_CWND]
+    ldrh    w8, [x19, #TCONN_PEER_MSS]
+    add     w7, w7, w8
+    mov     w8, #0x40000            /* 256 KB cap */
+    cmp     w7, w8
+    csel    w7, w7, w8, lo
+    str     w7, [x19, #TCONN_CWND]
 
 .Leak_not_dup:
     mov     w0, #0
+    ldr     x23, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
     ret
 
 /*

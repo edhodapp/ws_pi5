@@ -782,11 +782,13 @@ test_arp_timer_cb_rearm:
     ldr     x0, =arp_send_ctx
     bl      arp_timer_cb
 
-    /* The fake pool's slot 0 should now have a non-zero CALLBACK
-     * (timer_set wrote arp_timer_cb's address there). */
+    /* The fake pool's slot 0 should have CALLBACK == arp_timer_cb
+     * (timer_set wrote the re-arm callback there). */
     ldr     x0, =fake_timer_pool
     ldr     x1, [x0, #(TPOOL_SLOTS + SLOT_CALLBACK)]
-    cbz     x1, .Lfail_tcb_rearm
+    ldr     x2, =arp_timer_cb
+    cmp     x1, x2
+    b.ne    .Lfail_tcb_rearm
 
     ldr     x0, =name_tcb_rearm
     bl      test_pass

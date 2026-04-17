@@ -2,7 +2,7 @@
 
 Requirements from RFC 1122 §4.2, RFC 9293, RFC 7323, RFC 2018,
 RFC 6298, RFC 5681. Audited by Claude + independent Gemini review.
-193 TCP unit tests exist. Every deviation tracked.
+412 unit tests pass. All 8 defects closed. Every deviation tracked.
 
 ## Connection Management
 
@@ -42,31 +42,31 @@ RFC 6298, RFC 5681. Audited by Claude + independent Gemini review.
 
 | # | Requirement | RFC | Impl | Tested | Status |
 |---|-------------|-----|------|--------|--------|
-| 20 | Window scaling (RFC 7323) | — | YES | test_tcp_wscale_* (3 tests) | OK |
-| 21 | Timestamps + PAWS (RFC 7323) | — | YES | test_tcp_ts_* (8 tests) | OK |
+| 20 | Window scaling (RFC 7323) | — | YES | test_tcp_wscale_* (4 tests) | OK |
+| 21 | Timestamps + PAWS (RFC 7323) | — | YES | test_tcp_ts_* (9 tests) | OK |
 | 22 | SACK permitted + parsing (RFC 2018) | — | YES | test_tcp_sack_* (5 tests) | OK |
 | 23 | RFC 6298 RTO computation | — | YES | test_tcp_rtt_init, _rto_double | OK |
-| 24 | Congestion control (RFC 5681) | — | YES | test_tcp_cwnd_* (3 tests) | OK |
+| 24 | Congestion control (RFC 5681) | — | YES | test_tcp_cwnd_* (5 tests) | OK |
 
 ## Defects Found (Claude + Gemini independent audit)
 
-### HIGH
+### HIGH — ALL CLOSED
 
-| # | Defect | Source | RFC ref |
-|---|--------|--------|---------|
-| D1 | FIN+data: FIN processed even if data dropped (buffer overflow/OOO). Data loss. | Gemini | RFC 9293 §3.10 |
-| D2 | Zero-window probe sends pure ACK (0-length, SEQ=SND_NXT). RFC requires >=1 byte or out-of-window SEQ. Peer silently ignores → persist ineffective. | Gemini | RFC 9293 §3.8.6.1 |
+| # | Defect | Fix | Commit |
+|---|--------|-----|--------|
+| D1 | FIN+data: FIN processed even if data dropped. Data loss. | tcp_estab_fin_handler rolls back state on data drop | 4b0ac49 |
+| D2 | Zero-window probe pure ACK ineffective. | Probe SEQ patched to SND_NXT-1 + checksum recompute | 4b0ac49 |
 
-### MEDIUM
+### MEDIUM — ALL CLOSED
 
-| # | Defect | Source | RFC ref |
-|---|--------|--------|---------|
-| D3 | No RFC 5961 Challenge ACK for blind RST. In-window RST accepted immediately. | Gemini | RFC 5961 §3.2 / RFC 9293 §3.10.7.4 |
-| D4 | FIN+ACK in FIN_WAIT_1: ACK portion ignored, transitions to CLOSING instead of TIME_WAIT. | Gemini | RFC 9293 state diagram |
-| D5 | SYN window scaled immediately — RFC 7323 §2.2 says SYN window is NEVER scaled. | Gemini | RFC 7323 §2.2 |
-| D6 | TS_RECENT updated before sequence number validation — OOO segment with future TSval poisons PAWS. | Gemini | RFC 7323 §4.3 |
-| D7 | Partial ACK in close handlers doesn't advance SND_UNA — causes unnecessary retransmission. | Gemini | RFC 1122 §4.2.2.13 |
-| D8 | No fast recovery cwnd inflation (dup ACKs after 3rd) or deflation (new ACK). | Gemini | RFC 5681 §3.2 |
+| # | Defect | Fix | Commit |
+|---|--------|-----|--------|
+| D3 | No Challenge ACK for blind RST. | Exact-match RST; in-window non-exact → Challenge ACK | 3e9f427 |
+| D4 | FIN+ACK in FIN_WAIT_1 → CLOSING instead of TIME_WAIT. | Check ACK flag + SEG.ACK==SND_NXT → TIME_WAIT + 2MSL | 1fff404 |
+| D5 | SYN window scaled immediately (RFC 7323 §2.2 forbids). | Remove SND_WND scaling from SYN handler | this commit |
+| D6 | TS_RECENT updated before SEQ validation — OOO poisons PAWS. | Defer TS_RECENT update until after SEQ check | this commit |
+| D7 | Partial ACK in close handlers → spurious RST. | Three-way ACK split: partial returns 0, stays in state | 4d26b2b |
+| D8 | No fast recovery cwnd inflation/deflation (RFC 5681 §3.2). | Dup ACKs > 3 inflate cwnd; new ACK exits recovery → cwnd=ssthresh | this commit |
 
 ### DESIGN DECISIONS
 

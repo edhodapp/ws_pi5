@@ -179,7 +179,7 @@ $(BUILD)/test_kernel8.img: $(BUILD)/test_kernel8.elf
 $(BUILD)/test_kernel8.elf: $(TEST_OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(TEST_OBJS) -o $@
 
-# Branch coverage — run tests under QEMU -d exec,nochain tracing,
+# Branch coverage — run tests under QEMU -d in_asm tracing,
 # then analyze which conditional branches had both sides executed.
 test-coverage:
 	$(MAKE) clean

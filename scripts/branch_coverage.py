@@ -2,15 +2,16 @@
 """Branch coverage analyzer for bare-metal AArch64 test kernels.
 
 Compares the set of conditional branches in an ELF binary (via objdump)
-against the set of translated-block entry PCs logged by QEMU's ``-d exec``
-flag.  For each conditional branch, reports whether the taken side (branch
-target) and the fall-through side (next instruction) were both executed.
+against the set of translated-block entry PCs logged by QEMU's
+``-d in_asm`` flag.  For each conditional branch, reports whether
+the taken side (target) and the fall-through side (next instruction)
+were both executed.
 
 Usage::
 
     qemu-system-aarch64 -M raspi3b -kernel build/test_kernel8.img \\
         -serial file:/dev/null -display none \\
-        -d exec,nochain -D build/qemu_trace.log &
+        -d in_asm -D build/qemu_trace.log &
     # ... wait for QEMU to finish ...
     python scripts/branch_coverage.py \\
         build/test_kernel8.elf build/qemu_trace.log
@@ -40,8 +41,9 @@ _COND_BRANCH_RE = re.compile(
     r"$",
 )
 
-# QEMU ``-d in_asm`` guest PC: ``0x00080000:``
-_INASM_RE = re.compile(r"^0x([0-9a-f]+):\s*$")
+# QEMU ``-d in_asm`` guest PC: ``0x00080000:`` (possibly followed
+# by disassembly on the same line in some QEMU versions).
+_INASM_RE = re.compile(r"^0x([0-9a-f]+):")
 
 
 @dataclass

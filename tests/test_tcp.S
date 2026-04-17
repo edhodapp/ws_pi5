@@ -191,6 +191,7 @@ test_tcp:
     bl      test_tcp_ts_paws_accept
     bl      test_tcp_ts_paws_reject
     bl      test_tcp_ts_recent_update
+    bl      test_tcp_ts_ooo_no_poison
     bl      test_tcp_icmp_err_lport
     bl      test_tcp_icmp_err_rip
     bl      test_tcp_icmp_err_proto_unreach
@@ -206,6 +207,8 @@ test_tcp:
     bl      test_tcp_cwnd_grow
     bl      test_tcp_cwnd_rtx_reset
     bl      test_tcp_cwnd_gate
+    bl      test_tcp_cwnd_inflate
+    bl      test_tcp_cwnd_deflate
     bl      test_tcp_ooo_merge
     bl      test_tcp_rst_ratelimit
     bl      test_tcp_rst_refill
@@ -257,6 +260,7 @@ test_tcp:
     bl      test_tcp_wscale_negotiate
     bl      test_tcp_wscale_no_opt
     bl      test_tcp_wscale_window_apply
+    bl      test_tcp_wscale_syn_window_unscaled
     bl      test_tcp_sndbuf_write
     bl      test_tcp_sndbuf_ack_advance
     bl      test_tcp_sack_perm_negotiate
@@ -8767,6 +8771,101 @@ test_tcp_ts_recent_update:
     ret
 
 /* ========================================================================
+ * test_tcp_ts_ooo_no_poison — RFC 7323 §4.3: OOO segment must NOT update
+ * TS_RECENT.  Send OOO segment with TSval=9999, then in-order with
+ * TSval=1000.  The in-order segment must NOT be PAWS-rejected.
+ * ======================================================================== */
+.global test_tcp_ts_ooo_no_poison
+test_tcp_ts_ooo_no_poison:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_top
+    mov     x19, x0                 /* conn */
+    mov     w20, w1                 /* ISN */
+
+    /* Enable timestamps, set TS_RECENT = 500 */
+    mov     w0, #1
+    strb    w0, [x19, #TCONN_TS_ENABLED]
+    mov     w0, #500
+    str     w0, [x19, #TCONN_TS_RECENT]
+
+    /* Save RCV_NXT (should be 2) */
+    ldr     w21, [x19, #TCONN_RCV_NXT]
+
+    /* --- Step 1: Send OOO segment with SEQ=7 (gap of 5), TSval=9999 --- */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w20                 /* ISN */
+    ldr     w2, =9999               /* TSval (large future value) */
+    bl      ttcp_build_ts_data_frame
+
+    /* Patch SEQ to 7 (NBO) */
+    ldr     x0, =tcp_test_buf
+    mov     w1, #7
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* Recompute TCP checksum (37 bytes: 32 header + 5 payload) */
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #37
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Process OOO segment */
+    mov     x0, x1
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* RCV_NXT must NOT advance (OOO buffered but not delivered) */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    cmp     w0, w21
+    b.ne    .Lfail_tcp_top
+
+    /* TS_RECENT must NOT be updated to 9999 */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    ldr     w1, =9999
+    cmp     w0, w1
+    b.eq    .Lfail_tcp_top          /* poisoned! */
+
+    /* --- Step 2: Send in-order segment with SEQ=2, TSval=1000 --- */
+    ldr     x0, =tcp_test_buf
+    mov     w1, w20                 /* ISN */
+    mov     w2, #1000               /* TSval (smaller than 9999) */
+    bl      ttcp_build_ts_data_frame
+    /* SEQ=2 is already correct from template */
+
+    ldr     x0, =tcp_test_buf
+    mov     w1, #71
+    bl      tcp_handle
+
+    /* RCV_NXT must advance: 2 + 5 (in-order) + 5 (OOO merged) = 12 */
+    ldr     w0, [x19, #TCONN_RCV_NXT]
+    sub     w0, w0, w21             /* delta from original RCV_NXT */
+    cmp     w0, #10                 /* 5 in-order + 5 OOO merged */
+    b.ne    .Lfail_tcp_top
+
+    /* TS_RECENT must be 1000 (from the in-order segment), not 9999 */
+    ldr     w0, [x19, #TCONN_TS_RECENT]
+    mov     w1, #1000
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_top
+
+    ldr     x0, =name_tcp_top
+    bl      test_pass
+    b       .Ldone_tcp_top
+.Lfail_tcp_top:
+    ldr     x0, =name_tcp_top
+    bl      test_fail
+.Ldone_tcp_top:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * test_tcp_icmp_err_lport — ICMP type 3 with wrong lport → no state change
  * ======================================================================== */
 test_tcp_icmp_err_lport:
@@ -9545,6 +9644,224 @@ test_tcp_cwnd_gate:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
+ * test_tcp_cwnd_inflate — RFC 5681 §3.2: each dup ACK after 3rd inflates
+ * cwnd by SMSS during fast recovery.
+ * ======================================================================== */
+.global test_tcp_cwnd_inflate
+test_tcp_cwnd_inflate:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_cwi
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes to populate send buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_cwi
+
+    /* Set up mock send context (for fast retransmit) */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    ldr     w20, [x21, #TCONN_SND_UNA]
+
+    /* Send 3 dup ACKs to trigger fast retransmit */
+    mov     w19, #3
+.Lcwi_dup_loop:
+    cbz     w19, .Lcwi_after_frtx
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w20
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #54
+    bl      tcp_handle
+    sub     w19, w19, #1
+    b       .Lcwi_dup_loop
+
+.Lcwi_after_frtx:
+    /* Record cwnd after fast retransmit entry */
+    ldr     w23, [x21, #TCONN_CWND]
+    ldrh    w24, [x21, #TCONN_PEER_MSS]
+
+    /* Send 4th dup ACK → should inflate cwnd by MSS */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w20
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Verify cwnd == cwnd_before + MSS */
+    ldr     w0, [x21, #TCONN_CWND]
+    add     w1, w23, w24
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_cwi
+
+    ldr     x0, =name_tcp_cwi
+    bl      test_pass
+    b       .Ldone_tcp_cwi
+.Lfail_tcp_cwi:
+    ldr     x0, =name_tcp_cwi
+    bl      test_fail
+.Ldone_tcp_cwi:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* ========================================================================
+ * test_tcp_cwnd_deflate — RFC 5681 §3.2: new ACK that exits fast recovery
+ * sets cwnd = ssthresh (deflation).
+ * ======================================================================== */
+.global test_tcp_cwnd_deflate
+test_tcp_cwnd_deflate:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_cwd
+    mov     x21, x0                 /* conn */
+    mov     w22, w1                 /* ISN */
+
+    /* Send 5 bytes to populate send buffer */
+    mov     x0, x21
+    ldr     x1, =tcp_send_test_buf
+    ldr     x2, =tcp_send_payload
+    mov     w3, #5
+    bl      tcp_send
+    cbz     w0, .Lfail_tcp_cwd
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_test_buf3
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    ldr     w20, [x21, #TCONN_SND_UNA]
+
+    /* Send 3 dup ACKs to enter fast recovery */
+    mov     w19, #3
+.Lcwd_dup_loop:
+    cbz     w19, .Lcwd_after_frtx
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w1, w20
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #54
+    bl      tcp_handle
+    sub     w19, w19, #1
+    b       .Lcwd_dup_loop
+
+.Lcwd_after_frtx:
+    /* SACK_RECOVER should be set to SND_NXT */
+    ldr     w23, [x21, #TCONN_SACK_RECOVER]
+    cbz     w23, .Lfail_tcp_cwd     /* should be non-zero */
+    ldr     w24, [x21, #TCONN_SSTHRESH]
+
+    /* Send new ACK with ACK = SND_NXT (acks everything, exits recovery) */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x0, =tcp_test_buf
+    ldr     w1, [x21, #TCONN_RCV_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    /* ACK = SND_NXT (acks all including retransmitted data) */
+    ldr     w1, [x21, #TCONN_SND_NXT]
+    rev     w1, w1
+    str     w1, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     w1, #20
+    bl      tcp_checksum
+    ldr     x1, =tcp_test_buf
+    strh    w0, [x1, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x1
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* cwnd should be deflated to ssthresh */
+    ldr     w0, [x21, #TCONN_CWND]
+    cmp     w0, w24
+    b.ne    .Lfail_tcp_cwd
+
+    /* SACK_RECOVER should be cleared */
+    ldr     w0, [x21, #TCONN_SACK_RECOVER]
+    cbnz    w0, .Lfail_tcp_cwd
+
+    /* DUP_ACK_CNT should be cleared */
+    ldrb    w0, [x21, #TCONN_DUP_ACK_CNT]
+    cbnz    w0, .Lfail_tcp_cwd
+
+    ldr     x0, =name_tcp_cwd
+    bl      test_pass
+    b       .Ldone_tcp_cwd
+.Lfail_tcp_cwd:
+    ldr     x0, =name_tcp_cwd
+    bl      test_fail
+.Ldone_tcp_cwd:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
     ret
 
 /* ========================================================================
@@ -10349,9 +10666,10 @@ test_tcp_fast_retransmit:
     cmp     w0, #1
     b.ne    .Lfail_tcp_frtx
 
-    /* Verify DUP_ACK_CNT reset to 0 */
+    /* Verify DUP_ACK_CNT == 3 (stays at threshold during recovery) */
     ldrb    w0, [x21, #TCONN_DUP_ACK_CNT]
-    cbnz    w0, .Lfail_tcp_frtx
+    cmp     w0, #3
+    b.ne    .Lfail_tcp_frtx
 
     /* Verify ssthresh was set (should be max(cwnd/2, 2*MSS)) */
     ldr     w0, [x21, #TCONN_SSTHRESH]
@@ -12753,6 +13071,123 @@ test_tcp_wscale_window_apply:
     ret
 
 /* ========================================================================
+ * test_tcp_wscale_syn_window_unscaled — RFC 7323 §2.2: SYN window is
+ * NEVER scaled.  SYN with WSCALE=4 and window=1000 → SND_WND must be
+ * 1000, not 16000.
+ * ======================================================================== */
+.global test_tcp_wscale_syn_window_unscaled
+test_tcp_wscale_syn_window_unscaled:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* --- Step 1: Build SYN with WSCALE=4, window=1000 (0x03E8) --- */
+    ldr     x0, =tcp_syn_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+
+    ldr     x19, =tcp_test_buf
+
+    /* Append WSCALE option: NOP + Kind=3 + Len=3 + Shift=4 */
+    mov     w0, #0x60          /* doff = 6 words (24 bytes) */
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_DATA_OFF)]
+    mov     w0, #1
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 20)]     /* NOP */
+    mov     w0, #TCP_OPT_WSCALE
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 21)]
+    mov     w0, #TCP_OPT_WSCALE_LEN
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 22)]
+    mov     w0, #4
+    strb    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + 23)]     /* shift=4 */
+
+    /* Patch window to 1000 NBO = 0x03E8 → LE = 0xE803 */
+    mov     w0, #0xE803
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_WINDOW)]
+
+    /* Update IP totlen = 44 (NBO 0x002C → LE 0x2C00) */
+    mov     w0, #0x2C00
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_TOTLEN)]
+
+    /* Recompute IP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+    add     x0, x19, #ETH_PAYLOAD
+    mov     w1, #IP_HDR_MIN
+    bl      ip_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_CHECKSUM)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #24             /* TCP header = 24 bytes with WSCALE */
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    /* Process SYN → SYN-ACK */
+    mov     x0, x19
+    mov     w1, #58
+    bl      tcp_handle
+    cmp     w0, #0
+    b.le    .Lfail_tcp_wsu
+
+    /* Extract ISN from SYN-ACK */
+    ldr     w20, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w20, w20            /* w20 = ISN (host order) */
+
+    /* --- Step 2: Complete handshake with ACK --- */
+    ldr     x0, =tcp_handshake_ack_template
+    ldr     x1, =tcp_test_buf2
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf2
+    add     w0, w20, #1
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* --- Step 3: Find ESTABLISHED conn, check SND_WND --- */
+    ldr     x21, =tcp_conn_table
+    mov     w1, #TCP_MAX_CONNS
+.Lwsu_find:
+    cbz     w1, .Lfail_tcp_wsu
+    sub     w1, w1, #1
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.eq    .Lwsu_found
+    add     x21, x21, #TCONN_SIZE
+    b       .Lwsu_find
+
+.Lwsu_found:
+    /* SND_WND must be 1000 (unscaled), NOT 16000 */
+    ldr     w0, [x21, #TCONN_SND_WND]
+    mov     w1, #1000
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_wsu
+
+    ldr     x0, =name_tcp_wsu
+    bl      test_pass
+    b       .Ldone_tcp_wsu
+.Lfail_tcp_wsu:
+    ldr     x0, =name_tcp_wsu
+    bl      test_fail
+.Ldone_tcp_wsu:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ========================================================================
  * test_tcp_sndbuf_write — tcp_send writes payload to circular send buffer
  * ======================================================================== */
 .global test_tcp_sndbuf_write
@@ -13938,6 +14373,7 @@ name_tcp_tbfs:      .asciz "tcp_ts_build_frame_size"
 name_tcp_tpa:       .asciz "tcp_ts_paws_accept"
 name_tcp_tpr:       .asciz "tcp_ts_paws_reject"
 name_tcp_tru:       .asciz "tcp_ts_recent_update"
+name_tcp_top:       .asciz "tcp_ts_ooo_no_poison"
 name_tcp_ielp:      .asciz "tcp_icmp_err_lport"
 name_tcp_ierip:     .asciz "tcp_icmp_err_rip"
 name_tcp_iepu:      .asciz "tcp_icmp_err_proto_unreach"
@@ -13953,6 +14389,8 @@ name_tcp_tstt:      .asciz "tcp_tsopt_trunc_ts"
 name_tcp_cwg:       .asciz "tcp_cwnd_grow"
 name_tcp_crr:       .asciz "tcp_cwnd_rtx_reset"
 name_tcp_cwga:      .asciz "tcp_cwnd_gate"
+name_tcp_cwi:       .asciz "tcp_cwnd_inflate"
+name_tcp_cwd:       .asciz "tcp_cwnd_deflate"
 name_tcp_oom:       .asciz "tcp_ooo_merge"
 name_tcp_rl:        .asciz "tcp_rst_ratelimit"
 name_tcp_rf:        .asciz "tcp_rst_refill"
@@ -14004,6 +14442,7 @@ name_tcp_rk:        .asciz "tcp_rtt_karn"
 name_tcp_wsn:       .asciz "tcp_wscale_negotiate"
 name_tcp_wno:       .asciz "tcp_wscale_no_opt"
 name_tcp_wwa:       .asciz "tcp_wscale_window_apply"
+name_tcp_wsu:       .asciz "tcp_wscale_syn_window_unscaled"
 name_tcp_sbw:       .asciz "tcp_sndbuf_write"
 name_tcp_sba:       .asciz "tcp_sndbuf_ack_advance"
 name_tcp_spn:       .asciz "tcp_sack_perm_negotiate"
