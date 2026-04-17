@@ -65,7 +65,8 @@ test_http_init:
 
     /* Last slot should also be 0 */
     ldr     x0, =http_conn_table
-    add     x0, x0, #(HTTP_CONN_TABLE_SIZE - HCONN_SIZE)
+    ldr     w1, =(HTTP_CONN_TABLE_SIZE - HCONN_SIZE)
+    add     x0, x0, x1
     ldrb    w0, [x0]
     cbnz    w0, .Lfail_hi
 

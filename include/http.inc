@@ -18,7 +18,12 @@
 .equ HFLAG_HTTP11,      0x01    /* bit 0: HTTP/1.1 (vs 1.0) */
 .equ HFLAG_HEAD,        0x02    /* bit 1: HEAD method (suppress body) */
 
-/* HTTP connection struct (32 bytes per slot) */
+/* HTTP connection struct (64 bytes per slot)
+ *
+ * Bytes 0-31: shared between parser (RECV_HDR) and sender (SENDING).
+ * Bytes 32-63: parser state (only used during RECV_HDR).
+ * This is NOT a union — the parser fields persist until the
+ * transition to SENDING reads them to set up the response. */
 .equ HCONN_STATE,       0       /* u8  — HTTPS_* state */
 .equ HCONN_STATUS,      1       /* u8  — HSTATUS_* response code */
 .equ HCONN_FLAGS,       2       /* u8  — HFLAG_* request flags */
@@ -30,10 +35,62 @@
 .equ HCONN_BODY_LEN,    24      /* u32 — body length */
 .equ HCONN_PAD2,        28      /* u32 — reserved */
 
-.equ HCONN_SIZE,        32
-.equ HCONN_SHIFT,       5       /* log2(32) */
+/* Parser fields (bytes 32-63, used during RECV_HDR) */
+.equ HCONN_PARSE_STATE, 32      /* u8  — FSA state (S_METHOD..S_ERROR) */
+.equ HCONN_METHOD_ID,   33      /* u8  — 0=unknown, 1=GET, 2=HEAD */
+.equ HCONN_PARSE_OFF,   34      /* u16 — current parse offset in rx buffer */
+.equ HCONN_URI_START,   36      /* u16 — byte offset of URI start */
+.equ HCONN_URI_LEN,     38      /* u16 — URI length */
+.equ HCONN_VER_MINOR,   40      /* u8  — version minor digit ('0' or '1') */
+.equ HCONN_HOST_FOUND,  41      /* u8  — 1 if Host: header seen */
+.equ HCONN_METHOD_LEN,  42      /* u16 — method string length */
+.equ HCONN_REQ_LEN,     44      /* u32 — total request length (for pipelining) */
+.equ HCONN_HDR_NM_START, 48     /* u16 — header name start (temp for Host check) */
+/* bytes 50-63: reserved for future parser fields */
+
+.equ HCONN_SIZE,        64
+.equ HCONN_SHIFT,       6       /* log2(64) */
 .equ HTTP_MAX_CONNS,    128
-.equ HTTP_CONN_TABLE_SIZE, 4096 /* 128 * 32 */
+.equ HTTP_CONN_TABLE_SIZE, 8192 /* 128 * 64 */
+
+/* FSA parser states */
+.equ S_METHOD,    0     /* reading method characters */
+.equ S_M_SP,      1     /* space after method → URI start */
+.equ S_URI,       2     /* reading URI */
+.equ S_U_SP,      3     /* space after URI → version start */
+.equ S_VH,        4     /* saw 'H', expect 'T' */
+.equ S_VT1,       5     /* expect second 'T' */
+.equ S_VT2,       6     /* expect 'P' */
+.equ S_VP,        7     /* expect '/' */
+.equ S_VSLASH,    8     /* expect major digit */
+.equ S_VMAJ,      9     /* expect '.' */
+.equ S_VDOT,     10     /* expect minor digit */
+.equ S_VMIN,     11     /* expect CR */
+.equ S_RL_CR,    12     /* expect LF (end request-line) */
+.equ S_HDR_ST,   13     /* header start: CR→end, ALPHA→name */
+.equ S_HDR_NM,   14     /* header field name (until colon) */
+.equ S_HDR_VL,   15     /* header value (until CR) */
+.equ S_HDR_CR,   16     /* expect LF after header value */
+.equ S_END_CR,   17     /* final LF → DONE */
+.equ S_DONE,     18     /* request fully parsed */
+.equ S_ERROR,    19     /* malformed request */
+.equ S_COUNT,    20
+
+/* Character classes for FSA (3 bits) */
+.equ CC_ALPHA,    0
+.equ CC_DIGIT,    1
+.equ CC_SP,       2
+.equ CC_CR,       3
+.equ CC_LF,       4
+.equ CC_COLON,    5
+.equ CC_SLASH,    6
+.equ CC_OTHER,    7
+.equ CC_COUNT,    8
+
+/* Method IDs */
+.equ METHOD_UNKNOWN,  0
+.equ METHOD_GET,      1
+.equ METHOD_HEAD,     2
 
 /* HTTP send context (same layout as TSCTX) */
 .equ HSCTX_DWC2_BASE,  0

@@ -1,0 +1,290 @@
+/*
+ * http_parse.S — FSA-based HTTP/1.x request parser
+ *
+ * Table-driven character-at-a-time parser. Processes bytes from the
+ * TCP rx buffer, advancing the FSA state stored in HCONN. Returns
+ * when the request is fully parsed (S_DONE), an error is detected
+ * (S_ERROR), or the buffer is exhausted (partial request).
+ *
+ * Character classes: ALPHA, DIGIT, SP, CR, LF, COLON, SLASH, OTHER
+ * States: S_METHOD through S_ERROR (20 states, see http.inc)
+ * Transition table: 20 × 8 = 160 bytes in .rodata
+ *
+ * Each table entry is 1 byte: upper 3 bits = action, lower 5 bits =
+ * next state. Supports 32 states and 8 actions. Table: 160 bytes,
+ * lookup is a single ldrb.
+ */
+
+.include "net.inc"
+.include "tcp.inc"
+.include "http.inc"
+
+.global http_parse_request
+.global http_classify_char
+
+.section .text
+
+/*
+ * http_classify_char — Map ASCII byte to character class (0-7)
+ *
+ * w0: input byte
+ * Returns: w0 = character class (CC_*)
+ * Leaf function, clobbers w0 only.
+ */
+http_classify_char:
+    cmp     w0, #'A'
+    b.lt    .Lcc_not_upper
+    cmp     w0, #'Z'
+    b.le    .Lcc_alpha
+.Lcc_not_upper:
+    cmp     w0, #'a'
+    b.lt    .Lcc_not_lower
+    cmp     w0, #'z'
+    b.le    .Lcc_alpha
+.Lcc_not_lower:
+    cmp     w0, #'0'
+    b.lt    .Lcc_not_digit
+    cmp     w0, #'9'
+    b.le    .Lcc_digit
+.Lcc_not_digit:
+    cmp     w0, #0x20
+    b.eq    .Lcc_sp
+    cmp     w0, #0x0D
+    b.eq    .Lcc_cr
+    cmp     w0, #0x0A
+    b.eq    .Lcc_lf
+    cmp     w0, #':'
+    b.eq    .Lcc_colon
+    cmp     w0, #'/'
+    b.eq    .Lcc_slash
+    mov     w0, #CC_OTHER
+    ret
+.Lcc_alpha:
+    mov     w0, #CC_ALPHA
+    ret
+.Lcc_digit:
+    mov     w0, #CC_DIGIT
+    ret
+.Lcc_sp:
+    mov     w0, #CC_SP
+    ret
+.Lcc_cr:
+    mov     w0, #CC_CR
+    ret
+.Lcc_lf:
+    mov     w0, #CC_LF
+    ret
+.Lcc_colon:
+    mov     w0, #CC_COLON
+    ret
+.Lcc_slash:
+    mov     w0, #CC_SLASH
+    ret
+
+/*
+ * http_parse_request — Run the FSA parser on available rx data
+ *
+ * x0: HCONN pointer
+ * x1: rx buffer pointer (from tcp_rx_peek)
+ * w2: rx data length
+ *
+ * Returns: w0 = parser state after processing:
+ *   S_DONE  (18) — request fully parsed
+ *   S_ERROR (19) — malformed request
+ *   other        — need more data (partial request)
+ *
+ * The parser reads HCONN_PARSE_STATE and HCONN_PARSE_OFF on entry,
+ * processes bytes from offset to the end of available data (or until
+ * S_DONE/S_ERROR), and writes back HCONN_PARSE_STATE, HCONN_PARSE_OFF,
+ * and any extracted fields (URI_START, URI_LEN, VER_MINOR, etc.).
+ *
+ * Clobbers: x0-x7, x19-x22 saved/restored
+ */
+http_parse_request:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* x19 = HCONN */
+    mov     x20, x1                 /* x20 = rx buffer */
+    mov     w21, w2                 /* w21 = rx data len */
+
+    ldrb    w4, [x19, #HCONN_PARSE_STATE]   /* w4 = current state */
+    ldrh    w5, [x19, #HCONN_PARSE_OFF]     /* w5 = current offset */
+
+    ldr     x6, =http_fsa_table
+
+.Lparse_loop:
+    /* Exit if we've consumed all available data */
+    cmp     w5, w21
+    b.hs    .Lparse_need_more
+
+    /* Exit if terminal state */
+    cmp     w4, #S_DONE
+    b.hs    .Lparse_terminal        /* S_DONE or S_ERROR */
+
+    /* Load current byte */
+    ldrb    w0, [x20, w5, uxtw]
+    mov     w22, w0                 /* w22 = raw byte (preserved) */
+
+    /* Classify character */
+    bl      http_classify_char      /* w0 = char class */
+
+    /* Look up transition: table[state * 8 + class] */
+    lsl     w7, w4, #3              /* state * 8 */
+    add     w7, w7, w0              /* + class */
+    ldrb    w7, [x6, w7, uxtw]     /* w7 = packed (action:4 | next_state:4) */
+
+    /* Extract next state and action */
+    and     w4, w7, #0x1F           /* new state = lower 5 bits */
+    lsr     w7, w7, #5              /* action = upper 3 bits */
+
+    /* Execute action (0 = none, skip fast) */
+    cbz     w7, .Lparse_advance
+
+    /* Action dispatch */
+    cmp     w7, #1
+    b.eq    .Lact_uri_start
+    cmp     w7, #2
+    b.eq    .Lact_uri_end
+    cmp     w7, #3
+    b.eq    .Lact_ver_minor
+    cmp     w7, #4
+    b.eq    .Lact_hdr_name_start
+    cmp     w7, #5
+    b.eq    .Lact_hdr_check_host
+    cmp     w7, #6
+    b.eq    .Lact_req_done
+    b       .Lparse_advance         /* unknown action → skip */
+
+.Lact_uri_start:
+    /* Record URI start position (current byte is first URI char) */
+    strh    w5, [x19, #HCONN_URI_START]
+    /* Also record method length = current offset (method was 0..offset-1,
+     * but offset now points past the space, so method_len = offset - 1.
+     * Actually, offset points to URI start, method ended at offset-1 (space).
+     * method_len = offset of space = the w5 we had when we saw the space.
+     * But we're at URI start now, so method_len is saved separately
+     * when transitioning from S_METHOD to S_M_SP. Let's store it here:
+     * URI_START is the byte AFTER the space, so method ended at URI_START-2
+     * (the last method char before the space). Method length = URI_START - 1.
+     * Hmm, that's not quite right either. Let me just record method_len
+     * in the S_METHOD→S_M_SP transition. For now, derive it from URI_START.
+     */
+    b       .Lparse_advance
+
+.Lact_uri_end:
+    /* Record URI length: current offset - URI_START */
+    ldrh    w0, [x19, #HCONN_URI_START]
+    sub     w0, w5, w0
+    strh    w0, [x19, #HCONN_URI_LEN]
+    b       .Lparse_advance
+
+.Lact_ver_minor:
+    /* Store the minor version digit */
+    strb    w22, [x19, #HCONN_VER_MINOR]
+    b       .Lparse_advance
+
+.Lact_hdr_name_start:
+    /* Beginning of a header field name — record position for Host check.
+     * We'll check the accumulated name when we see the colon. */
+    strh    w5, [x19, #HCONN_HDR_NM_START]   /* temp: hdr_name_start at offset 50 */
+    b       .Lparse_advance
+
+.Lact_hdr_check_host:
+    /* We've seen a colon — check if the header name was "Host" (or "host" etc).
+     * Header name: bytes from hdr_name_start to current offset - 1. */
+    ldrh    w0, [x19, #HCONN_HDR_NM_START]   /* hdr_name_start */
+    sub     w1, w5, w0              /* name_len */
+    cmp     w1, #4
+    b.ne    .Lparse_advance         /* not 4 chars → not Host */
+
+    /* Case-insensitive check for "host" */
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'h'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'o'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'s'
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    ldrb    w1, [x20, w0, uxtw]
+    orr     w1, w1, #0x20
+    cmp     w1, #'t'
+    b.ne    .Lparse_advance
+    mov     w0, #1
+    strb    w0, [x19, #HCONN_HOST_FOUND]
+    b       .Lparse_advance
+
+.Lact_req_done:
+    /* Record total request length (offset + 1 = byte past final LF) */
+    add     w0, w5, #1
+    str     w0, [x19, #HCONN_REQ_LEN]
+    b       .Lparse_advance
+
+.Lparse_advance:
+    add     w5, w5, #1
+    b       .Lparse_loop
+
+.Lparse_need_more:
+    /* Save state for resumption */
+    strb    w4, [x19, #HCONN_PARSE_STATE]
+    strh    w5, [x19, #HCONN_PARSE_OFF]
+    mov     w0, w4                  /* return current state */
+    b       .Lparse_ret
+
+.Lparse_terminal:
+    strb    w4, [x19, #HCONN_PARSE_STATE]
+    strh    w5, [x19, #HCONN_PARSE_OFF]
+    mov     w0, w4
+
+.Lparse_ret:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* ===================================================================
+ * FSA transition table
+ *
+ * 20 states × 8 character classes = 160 bytes
+ * Each byte: upper 4 bits = action, lower 4 bits = next state
+ *
+ * Actions: 0=none, 1=uri_start, 2=uri_end, 3=ver_minor,
+ *          4=hdr_name_start, 5=hdr_check_host, 6=req_done
+ *
+ * Encoding: (action << 5) | next_state  (3-bit action, 5-bit state)
+ *
+ * Columns: ALPHA  DIGIT  SP     CR     LF     COLON  SLASH  OTHER
+ * =================================================================== */
+.section .rodata
+.balign 4
+.global http_fsa_table
+http_fsa_table:
+/*  S_METHOD(0)  */ .byte 0x00, 0x13, 0x01, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_M_SP(1)    */ .byte 0x22, 0x22, 0x13, 0x13, 0x13, 0x22, 0x22, 0x22
+/*  S_URI(2)     */ .byte 0x02, 0x02, 0x43, 0x13, 0x13, 0x02, 0x02, 0x02
+/*  S_U_SP(3)    */ .byte 0x04, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VH(4)      */ .byte 0x05, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VT1(5)     */ .byte 0x06, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VT2(6)     */ .byte 0x07, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VP(7)      */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x08, 0x13
+/*  S_VSLASH(8)  */ .byte 0x13, 0x09, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VMAJ(9)    */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x0A
+/*  S_VDOT(10)   */ .byte 0x13, 0x6B, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+/*  S_VMIN(11)   */ .byte 0x13, 0x13, 0x13, 0x0C, 0x13, 0x13, 0x13, 0x13
+/*  S_RL_CR(12)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13
+/*  S_HDR_ST(13) */ .byte 0x8E, 0x13, 0x13, 0x11, 0x13, 0x13, 0x13, 0x13
+/*  S_HDR_NM(14) */ .byte 0x0E, 0x0E, 0x13, 0x13, 0x13, 0xAF, 0x13, 0x0E
+/*  S_HDR_VL(15) */ .byte 0x0F, 0x0F, 0x0F, 0x10, 0x13, 0x0F, 0x0F, 0x0F
+/*  S_HDR_CR(16) */ .byte 0x13, 0x13, 0x13, 0x13, 0x0D, 0x13, 0x13, 0x13
+/*  S_END_CR(17) */ .byte 0x13, 0x13, 0x13, 0x13, 0xD2, 0x13, 0x13, 0x13
+/*  S_DONE(18)   */ .byte 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12
+/*  S_ERROR(19)  */ .byte 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
