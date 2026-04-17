@@ -231,6 +231,7 @@ test_tcp:
     bl      test_tcp_start_reaper
     bl      test_tcp_start_reaper_no_pool
     bl      test_tcp_persist_cb_send
+    bl      test_tcp_persist_probe_seq
     bl      test_tcp_persist_cb_not_estab
     bl      test_tcp_persist_cb_wnd_open
     bl      test_tcp_persist_cb_no_send_fn
@@ -11081,6 +11082,70 @@ test_tcp_persist_cb_send:
     .ltorg
 
 /* ========================================================================
+ * test_tcp_persist_probe_seq — RFC 9293 §3.8.6.1: zero-window probe
+ * MUST use SEQ = SND_NXT - 1 (out-of-window) so the peer is forced
+ * to respond. A probe with SEQ = SND_NXT is a normal ACK that the
+ * peer silently ignores, making persist completely ineffective.
+ * ======================================================================== */
+test_tcp_persist_probe_seq:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_pps
+    mov     x21, x0
+
+    /* Set SND_WND = 0 */
+    str     wzr, [x21, #TCONN_SND_WND]
+    mov     w0, #1
+    strb    w0, [x21, #TCONN_PERSIST_SHIFT]
+
+    /* Record SND_NXT before probe */
+    ldr     w22, [x21, #TCONN_SND_NXT]
+
+    /* Set up mock send context */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =tcp_send_test_buf
+    ldr     x3, =ttcp_mock_send_fn
+    bl      tcp_set_send_ctx
+    ldr     x0, =ttcp_mock_send_count
+    str     wzr, [x0]
+
+    /* Fire persist callback */
+    mov     x0, x21
+    bl      tcp_persist_cb
+
+    /* Verify probe was sent */
+    ldr     x0, =ttcp_mock_send_count
+    ldr     w0, [x0]
+    cbz     w0, .Lfail_tcp_pps
+
+    /* Read SEQ from the built probe frame (NBO → host via rev) */
+    ldr     x0, =tcp_send_test_buf
+    ldr     w0, [x0, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    rev     w0, w0
+
+    /* Expected: SND_NXT - 1 */
+    sub     w1, w22, #1
+    cmp     w0, w1
+    b.ne    .Lfail_tcp_pps
+
+    ldr     x0, =name_tcp_pps
+    bl      test_pass
+    b       .Ldone_tcp_pps
+.Lfail_tcp_pps:
+    ldr     x0, =name_tcp_pps
+    bl      test_fail
+.Ldone_tcp_pps:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+    .ltorg
+
+/* ========================================================================
  * test_tcp_persist_cb_not_estab — Persist callback bails if not ESTABLISHED
  *
  * Exercises tcp_persist_cb b.ne .Lpersist_done (state != ESTABLISHED).
@@ -11651,18 +11716,20 @@ test_tcp_fin_data_bad_seq:
     cmp     w0, #54
     b.lt    .Lfail_tcp_fdbs
 
-    /* Verify state = CLOSE_WAIT (FIN was still processed) */
+    /* Verify state = ESTABLISHED (FIN NOT processed — data was
+     * bad-seq so FIN can't be accepted either. RFC 9293 §3.10:
+     * FIN is only valid at the end of in-order data.) */
     ldrb    w0, [x21, #TCONN_STATE]
-    cmp     w0, #TCPS_CLOSE_WAIT
+    cmp     w0, #TCPS_ESTABLISHED
     b.ne    .Lfail_tcp_fdbs
 
     /* Verify RXLEN = 0 (data was NOT accepted — bad SEQ) */
     ldrh    w0, [x21, #TCONN_RXLEN]
     cbnz    w0, .Lfail_tcp_fdbs
 
-    /* Verify RCV_NXT = 2 + 1(FIN only) = 3 (no data advance) */
+    /* Verify RCV_NXT = 2 (unchanged — neither data nor FIN accepted) */
     ldr     w0, [x21, #TCONN_RCV_NXT]
-    cmp     w0, #3
+    cmp     w0, #2
     b.ne    .Lfail_tcp_fdbs
 
     ldr     x0, =name_tcp_fdbs
@@ -11751,19 +11818,20 @@ test_tcp_fin_data_overflow:
     cmp     w0, #54
     b.lt    .Lfail_tcp_fdov
 
-    /* Verify CLOSE_WAIT */
+    /* Verify ESTABLISHED (FIN NOT processed — data was dropped
+     * due to overflow, so FIN can't be accepted either) */
     ldrb    w0, [x21, #TCONN_STATE]
-    cmp     w0, #TCPS_CLOSE_WAIT
+    cmp     w0, #TCPS_ESTABLISHED
     b.ne    .Lfail_tcp_fdov
 
-    /* Verify RXLEN unchanged (still TCP_RXBUF_SIZE - 2, data NOT accepted) */
+    /* Verify RXLEN unchanged (still TCP_RXBUF_SIZE - 2) */
     ldrh    w0, [x21, #TCONN_RXLEN]
     cmp     w0, #(TCP_RXBUF_SIZE - 2)
     b.ne    .Lfail_tcp_fdov
 
-    /* Verify RCV_NXT = 2 + 1(FIN only) = 3 */
+    /* Verify RCV_NXT = 2 (unchanged — neither data nor FIN) */
     ldr     w0, [x21, #TCONN_RCV_NXT]
-    cmp     w0, #3
+    cmp     w0, #2
     b.ne    .Lfail_tcp_fdov
 
     ldr     x0, =name_tcp_fdov
@@ -13748,6 +13816,7 @@ name_tcp_rfw1:      .asciz "tcp_reaper_finwait1"
 name_tcp_sr:        .asciz "tcp_start_reaper"
 name_tcp_srnp:      .asciz "tcp_start_reaper_no_pool"
 name_tcp_pcs:       .asciz "tcp_persist_cb_send"
+name_tcp_pps:       .asciz "tcp_persist_probe_seq"
 name_tcp_pcne:      .asciz "tcp_persist_cb_not_estab"
 name_tcp_pcwo:      .asciz "tcp_persist_cb_wnd_open"
 name_tcp_pcns:      .asciz "tcp_persist_cb_no_send_fn"

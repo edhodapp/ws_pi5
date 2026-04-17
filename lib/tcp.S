@@ -2044,11 +2044,35 @@ tcp_estab_fin_handler:
     add     w6, w6, w23
     str     w6, [x21, #TCONN_RCV_NXT]
 
-.Lefin_no_data:
-    /* RCV_NXT += 1 (FIN consumes one seq) */
+    /* Data accepted (or no data). FIN is next in sequence — accept it.
+     * RCV_NXT += 1 (FIN consumes one seq). */
     ldr     w5, [x21, #TCONN_RCV_NXT]
     add     w5, w5, #1
     str     w5, [x21, #TCONN_RCV_NXT]
+    b       .Lefin_accepted
+
+.Lefin_no_data:
+    /* Data was dropped (bad SEQ or overflow) OR no data in segment. */
+    cbz     w23, .Lefin_nodata_pure
+
+    /* Had data that was dropped → RFC 9293 §3.10: FIN is only valid
+     * at the end of in-order data. Rollback the FSA's state change
+     * (it already wrote CLOSE_WAIT) back to ESTABLISHED, and just
+     * ACK with current RCV_NXT to trigger retransmission. */
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x21, #TCONN_STATE]
+    /* Build ACK with current state (no FIN processing) */
+    ldr     w5, [x21, #TCONN_RCV_NXT]
+    b       .Lefin_accepted
+
+.Lefin_nodata_pure:
+    /* No data in segment, just FIN. Accept it.
+     * RCV_NXT += 1 (FIN consumes one seq). */
+    ldr     w5, [x21, #TCONN_RCV_NXT]
+    add     w5, w5, #1
+    str     w5, [x21, #TCONN_RCV_NXT]
+
+.Lefin_accepted:
 
     ldr     w19, [x21, #TCONN_SND_NXT]  /* SND_NXT (host order) */
     rev     w20, w5                     /* new RCV_NXT → NBO */
@@ -3502,7 +3526,17 @@ tcp_persist_cb:
     ldr     w1, [x19, #TCONN_SND_WND]
     cbnz    w1, .Lpersist_done
 
-    /* Build window probe using tcp_build_frame: zero-length ACK */
+    /* Build zero-window probe.
+     *
+     * RFC 9293 §3.8.6.1: the probe must elicit a response from the
+     * peer.  A pure ACK with SEQ=SND_NXT is silently processed — the
+     * peer never replies.  Using SEQ=SND_NXT-1 (one byte behind the
+     * send window) forces the peer to send an ACK with its current
+     * window, which is exactly what we need to detect window opening.
+     *
+     * We build a normal ACK via tcp_build_frame (which sets SEQ to
+     * SND_NXT), then patch the SEQ field in the built frame to
+     * SND_NXT-1 and recompute the TCP checksum. */
     ldr     x20, =tcp_send_ctx
     ldr     x1, [x20, #TSCTX_SEND_FN]
     cbz     x1, .Lpersist_done
@@ -3515,6 +3549,28 @@ tcp_persist_cb:
     mov     w4, #0
     bl      tcp_build_frame
     mov     w22, w0                 /* frame_len */
+
+    /* Patch SEQ to SND_NXT - 1 (NBO) */
+    ldr     w0, [x19, #TCONN_SND_NXT]
+    sub     w0, w0, #1
+    rev     w0, w0
+    str     w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* Recompute TCP checksum over the patched header.
+     * tcp_checksum(frame + ETH_PAYLOAD + IP_HDR_MIN, tcp_seg_len) */
+    add     w0, w22, #0             /* frame_len */
+    sub     w0, w0, #(ETH_HDR_LEN + IP_HDR_MIN) /* tcp_seg_len */
+    /* Zero the checksum field first */
+    strh    wzr, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    /* Compute */
+    add     x1, x21, #ETH_PAYLOAD  /* IP header start (for pseudo-hdr) */
+    add     x2, x21, #(ETH_PAYLOAD + IP_HDR_MIN) /* TCP segment start */
+    mov     w3, w0                  /* TCP segment length */
+    /* Use the existing tcp_checksum which takes (frame_ptr, frame_len) */
+    mov     x0, x21
+    mov     w1, w22
+    bl      tcp_checksum
+    strh    w0, [x21, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
 
     /* Send the probe */
     ldr     x0, [x20, #TSCTX_DWC2_BASE]
