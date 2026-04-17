@@ -883,3 +883,18 @@ understood, and we now have the instrumentation substrate the rest
 of the grind depends on.
 
 ---
+
+## 2026-04-16 — HTTP keep-alive baseline (commit 55c392f)
+
+First HTTP-level perf measurement. FSA parser, keep-alive enabled.
+wrk from MACH-WX9 laptop via USB Ethernet to Pi 4, 10-second runs.
+
+| Connections | Req/s | Avg Latency | P99 Latency | Transfer |
+|-------------|-------|-------------|-------------|----------|
+| 10 | 25,274 | 356μs | ~1ms | 7.01 MB/s |
+| 50 | 37,125 | 773μs | ~3ms | 10.30 MB/s |
+| 100 | 32,678 | 585μs | ~4ms | 9.07 MB/s |
+
+Peak at 50 connections. Dropoff at 100 from connection table
+contention (128 slots, some in TIME_WAIT). Zero crashes, zero
+socket errors at 10/50, 100 write errors at 100 (table full).

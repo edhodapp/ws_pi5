@@ -34,7 +34,10 @@
 .equ HCONN_HDR_LEN,     12      /* u32 — response header length */
 .equ HCONN_BODY_PTR,    16      /* u64 — pointer to body in .rodata */
 .equ HCONN_BODY_LEN,    24      /* u32 — body length */
-.equ HCONN_PAD2,        28      /* u32 — reserved */
+.equ HCONN_RECV_TICK,   28      /* u32 — timer tick when RECV_HDR started */
+
+/* Slowloris timeout: close connections in RECV_HDR for > 30 seconds */
+.equ HTTP_RECV_TIMEOUT_SECS, 30
 
 /* Parser fields (bytes 32-63, used during RECV_HDR) */
 .equ HCONN_PARSE_STATE, 32      /* u8  — FSA state (S_METHOD..S_ERROR) */

@@ -102,9 +102,24 @@ http_poll:
 .Lhp_start_recv:
     mov     w0, #HTTPS_RECV_HDR
     strb    w0, [x20, #HCONN_STATE]
+    /* Record start time for Slowloris timeout */
+    bl      timer_now
+    str     w0, [x20, #HCONN_RECV_TICK]
     /* Fall through to try_parse — data may already be in rx buffer */
 
 .Lhp_try_parse:
+    /* Slowloris check: close RECV_HDR connections older than 30s.
+     * elapsed = timer_now() - RECV_TICK
+     * threshold = timer_freq() * HTTP_RECV_TIMEOUT_SECS */
+    bl      timer_now
+    ldr     w1, [x20, #HCONN_RECV_TICK]
+    sub     w24, w0, w1             /* w24 = elapsed ticks */
+    bl      timer_freq
+    mov     w1, #HTTP_RECV_TIMEOUT_SECS
+    mul     w0, w0, w1              /* w0 = threshold ticks */
+    cmp     w24, w0
+    b.hs    .Lhp_slowloris_close
+
     /* Check if there's data in the rx buffer */
     ldrh    w0, [x19, #TCONN_RXLEN]
     cbz     w0, .Lhp_next
@@ -431,6 +446,8 @@ http_poll:
 
     b       .Lhp_next
 
+.Lhp_slowloris_close:
+    /* Slowloris timeout — close without sending a response */
 .Lhp_do_close:
     ldr     x23, =http_send_ctx
     mov     x0, x19
@@ -531,11 +548,11 @@ http_find_uri_end:
     ret
 
 /*
- * http_match_uri — Match URI against known routes
+ * http_match_uri — Match URI against route table
  *
  * x0: URI pointer, w1: URI length
- * Returns: w0 = 0 (200 OK), 1 (404 Not Found)
- * Clobbers: x0-x2
+ * Returns: x0 = route entry pointer, or 0 if no match (404)
+ * Clobbers: x0-x8, x30
  */
 http_match_uri:
     /* Scan route table for matching path.
