@@ -9,7 +9,7 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** Serving concurrent HTTP connections on real Pi 4 hardware. The full stack runs end-to-end: UART chainloader, GENET Gigabit Ethernet with HW TX checksum offload, live PHY speed renegotiation, TCP with all RFC compliance defects closed (dual Claude+Gemini audit, 8/8 resolved), and exception vectors for instant fault diagnosis. A 51-test L2 hardening integration suite plus TCP concurrent-connection tests drive the Pi from a host laptop. Head-to-head on identical hardware, ws_pi5 measured ~1.48x faster per-frame burst-drain cost than the Raspberry Pi OS reference kernel.
+**Current stage:** Complete HTTP/1.1 web server appliance running on real Pi 4 hardware. Serves 51,800 req/s with keep-alive (~5x nginx on identical hardware). Features: FSA-driven request parser, data-driven route table, dynamic `/status` page with chunked transfer encoding, RFC 5322 Date header from NTP time, Slowloris protection, exception vectors for fault diagnosis. The full network stack — from GENET Gigabit Ethernet through TCP (all 8 RFC compliance defects closed, dual Claude+Gemini audit) to HTTP — is written in AArch64 assembly with 431 unit tests.
 
 ## The Experiment
 
@@ -18,7 +18,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 412 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 431 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -58,7 +58,7 @@ boot.S          Core 0 init, EL2→EL1 drop, MMU + caches, stack, BSS zero
       http_poll          Parse requests, send responses (cooperative, non-blocking)
 ```
 
-Kernel image: 32.5 KB (33,224 bytes, including exception vector table). Runtime memory: ~32.6 MB (dominated by 128 × 256 KB TCP send buffers).
+Kernel image: 37.4 KB (38,264 bytes, including exception vector table and HTTP response templates). Runtime memory: ~32.6 MB (dominated by 128 × 256 KB TCP send buffers).
 
 ## Project Structure
 
@@ -218,7 +218,7 @@ The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-indepe
 
 ### Unit Tests
 
-412 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through the full TCP connection lifecycle (128 connections, WSCALE, SACK, timestamps/PAWS, multi-segment send, RFC 6298 RTO, congestion control with fast recovery), HTTP request/response handling, Intel HEX parsing, and the GENET RX drop-path bookkeeping. A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+431 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through TCP (128 connections, WSCALE, SACK, timestamps/PAWS, congestion control with fast recovery) and HTTP/1.1 (FSA parser with 180-vector PICT coverage, chunked encoding, date formatting with Gregorian leap years, keep-alive, route matching). A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 TCP defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
 141 Python unit tests run off-hardware: the Intel HEX library (34 tests, 100% mutation score under mutmut), the `hw_send.py` chainloader host tool (12 tests, covering ioctl DTR toggle and termios line-read deadline shaping), and the L2 hardening framework (95 tests covering `eth_frames`, `link`, and `wire` — the testable pieces of the `hw_test/` integration suite).
 

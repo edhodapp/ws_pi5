@@ -102,14 +102,27 @@ Bare-metal HTTP web server targeting Raspberry Pi 4 (AArch64, BCM2711, 8 GB). Co
 ## TCP Capabilities (current)
 - 128 concurrent connections, 256-byte TCONN, 256 KB circular send buffer each
 - WSCALE (RFC 7323), SACK (RFC 2018), RFC 6298 RTO (SRTT/RTTVAR)
-- Multi-segment send, congestion control, fast retransmit, timestamps, PAWS
+- Multi-segment send, congestion control, fast retransmit + fast recovery, timestamps, PAWS
 - 10-state FSA, OOO buffering, persist timer, idle reaper, RST rate limiting
+- Challenge ACK for blind RST (RFC 5961), all 8 RFC compliance defects closed
 
-## Next Steps
-Pi 4 hardware bringup is complete — GENET RX+TX, PHY renegotiation,
-DSB barrier integrity, HW error drop path, and the L2 hardening
-integration suite are all done. Further stages are tracked in the
-private memory, not in this file.
+## HTTP/1.1 Capabilities (current)
+- FSA-driven request parser (20-state, 9-class, 180-entry transition table)
+- Keep-alive (persistent connections, HTTP/1.1 default)
+- Data-driven route table: /, /about (static), /status (dynamic)
+- Chunked transfer encoding for dynamic responses
+- HEAD method with body suppression
+- 400/404/405 error responses with Allow header
+- Host header validation (MUST for HTTP/1.1, case-insensitive)
+- HTTP/ prefix validation, HTTP/1.0 vs 1.1 version parsing
+- Date header (RFC 5322 format, Gregorian leap years, NTP-synced)
+- Server header
+- Slowloris protection (30s RECV_HDR timeout)
+- Request counter for /status page
+- Performance: 51,800 req/s at 50 connections (~5x nginx on same hardware)
+
+## Status
+HTTP/1.1 web server appliance complete. 431 unit tests pass.
 
 ## Git
 - user.name: edhodapp
