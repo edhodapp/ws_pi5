@@ -36,6 +36,7 @@ test_http:
     bl      test_http_method_not_allowed
     bl      test_http_missing_host_11
     bl      test_http_no_host_10_ok
+    bl      test_http_head_no_body
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
@@ -734,6 +735,63 @@ test_http_no_host_10_ok:
     ret
 
 /* ========================================================================
+ * test_http_head_no_body — HEAD response: RESP_LEN == HDR_LEN (no body)
+ * ======================================================================== */
+test_http_head_no_body:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_head_request
+    ldr     w2, =thttp_head_request_len
+.Lhhnb_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhhnb_cp
+
+    ldr     w0, =thttp_head_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* RESP_LEN must equal HDR_LEN (no body for HEAD) */
+    ldr     x20, =http_conn_table
+    ldr     w0, [x20, #HCONN_RESP_LEN]
+    ldr     w1, [x20, #HCONN_HDR_LEN]
+    cmp     w0, w1
+    b.ne    .Lfail_hhnb
+
+    /* HDR_LEN must be non-zero (we sent real headers) */
+    cbz     w1, .Lfail_hhnb
+
+    ldr     x0, =name_hhnb
+    bl      test_pass
+    b       .Ldone_hhnb
+.Lfail_hhnb:
+    ldr     x0, =name_hhnb
+    bl      test_fail
+.Ldone_hhnb:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_http_send_chunk — SENDING state sends one chunk and advances ptr
  * ======================================================================== */
 test_http_send_chunk:
@@ -1004,6 +1062,7 @@ name_hv11:  .asciz "http_version_11"
 name_hmna:  .asciz "http_method_not_allowed"
 name_hmh:   .asciz "http_missing_host_11"
 name_hnh10: .asciz "http_no_host_10_ok"
+name_hhnb:  .asciz "http_head_no_body"
 name_hsc:   .asciz "http_send_chunk"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"

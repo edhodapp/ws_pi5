@@ -240,7 +240,12 @@ http_poll:
 .Lhp_setup_resp:
     str     x1, [x20, #HCONN_BODY_PTR]
     str     w2, [x20, #HCONN_BODY_LEN]
-    add     w4, w2, w3
+    /* HEAD: send headers only (Content-Length stays in header for RFC compliance).
+     * GET/errors: send headers + body. */
+    add     w4, w2, w3                  /* hdr + body */
+    ldrb    w5, [x20, #HCONN_FLAGS]
+    tst     w5, #HFLAG_HEAD
+    csel    w4, w3, w4, ne              /* HEAD → hdr only; else hdr+body */
     str     w4, [x20, #HCONN_RESP_LEN]
     str     w3, [x20, #HCONN_HDR_LEN]
     str     wzr, [x20, #HCONN_RESP_PTR]
