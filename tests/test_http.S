@@ -43,6 +43,10 @@ test_http:
     bl      test_http_fsa_head_10
     bl      test_http_fsa_incomplete
     bl      test_http_fsa_bad_method
+    bl      test_http_date_epoch
+    bl      test_http_date_2026
+    bl      test_http_leap_2000
+    bl      test_http_noleap_2100
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
@@ -1098,6 +1102,149 @@ test_http_fsa_bad_method:
     ret
 
 /* ========================================================================
+ * Helper: thttp_check_date — compare formatted date output to expected
+ *
+ * x0: expected string, x1: actual buffer, w2: length
+ * Returns: w0 = 1 if match, 0 if mismatch
+ * ======================================================================== */
+thttp_check_date:
+    mov     w3, #0
+.Ltcd_loop:
+    cmp     w3, w2
+    b.hs    .Ltcd_match
+    ldrb    w4, [x0, x3]
+    ldrb    w5, [x1, x3]
+    cmp     w4, w5
+    b.ne    .Ltcd_fail
+    add     w3, w3, #1
+    b       .Ltcd_loop
+.Ltcd_match:
+    mov     w0, #1
+    ret
+.Ltcd_fail:
+    mov     w0, #0
+    ret
+
+/* ========================================================================
+ * test_http_date_epoch — Unix 0 → "Thu, 01 Jan 1970 00:00:00 GMT"
+ * ======================================================================== */
+test_http_date_epoch:
+    stp     x29, x30, [sp, #-16]!
+
+    mov     x0, #0
+    ldr     x1, =thttp_date_buf
+    bl      http_format_date
+
+    cmp     w0, #29
+    b.ne    .Lfail_hde
+
+    ldr     x0, =thttp_date_epoch_expected
+    ldr     x1, =thttp_date_buf
+    mov     w2, #29
+    bl      thttp_check_date
+    cbz     w0, .Lfail_hde
+
+    ldr     x0, =name_hde
+    bl      test_pass
+    b       .Ldone_hde
+.Lfail_hde:
+    ldr     x0, =name_hde
+    bl      test_fail
+.Ldone_hde:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_http_date_2026 — 2026-04-16 19:45:00 → "Thu, 16 Apr 2026 19:45:00 GMT"
+ * Timestamp: 1776368700
+ * ======================================================================== */
+test_http_date_2026:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =1776368700
+    ldr     x1, =thttp_date_buf
+    bl      http_format_date
+
+    cmp     w0, #29
+    b.ne    .Lfail_hd26
+
+    ldr     x0, =thttp_date_2026_expected
+    ldr     x1, =thttp_date_buf
+    mov     w2, #29
+    bl      thttp_check_date
+    cbz     w0, .Lfail_hd26
+
+    ldr     x0, =name_hd26
+    bl      test_pass
+    b       .Ldone_hd26
+.Lfail_hd26:
+    ldr     x0, =name_hd26
+    bl      test_fail
+.Ldone_hd26:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_http_leap_2000 — 2000-02-29 00:00:00 → "Tue, 29 Feb 2000 00:00:00 GMT"
+ * Timestamp: 951782400 (leap year divisible by 400)
+ * ======================================================================== */
+test_http_leap_2000:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =951782400
+    ldr     x1, =thttp_date_buf
+    bl      http_format_date
+
+    cmp     w0, #29
+    b.ne    .Lfail_hl20
+
+    ldr     x0, =thttp_date_leap2000_expected
+    ldr     x1, =thttp_date_buf
+    mov     w2, #29
+    bl      thttp_check_date
+    cbz     w0, .Lfail_hl20
+
+    ldr     x0, =name_hl20
+    bl      test_pass
+    b       .Ldone_hl20
+.Lfail_hl20:
+    ldr     x0, =name_hl20
+    bl      test_fail
+.Ldone_hl20:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_http_noleap_2100 — 2100-02-28 12:00:00 → NOT Feb 29
+ * Timestamp: 4107499200 (century not divisible by 400 → no leap)
+ * ======================================================================== */
+test_http_noleap_2100:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =4107499200
+    ldr     x1, =thttp_date_buf
+    bl      http_format_date
+
+    cmp     w0, #29
+    b.ne    .Lfail_hn21
+
+    ldr     x0, =thttp_date_noleap2100_expected
+    ldr     x1, =thttp_date_buf
+    mov     w2, #29
+    bl      thttp_check_date
+    cbz     w0, .Lfail_hn21
+
+    ldr     x0, =name_hn21
+    bl      test_pass
+    b       .Ldone_hn21
+.Lfail_hn21:
+    ldr     x0, =name_hn21
+    bl      test_fail
+.Ldone_hn21:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * test_http_send_chunk — SENDING state sends one chunk and advances ptr
  * ======================================================================== */
 test_http_send_chunk:
@@ -1395,7 +1542,23 @@ name_fg11:  .asciz "http_fsa_get_11"
 name_fh10:  .asciz "http_fsa_head_10"
 name_ffi:   .asciz "http_fsa_incomplete"
 name_ffbm:  .asciz "http_fsa_bad_method"
+name_hde:   .asciz "http_date_epoch"
+name_hd26:  .asciz "http_date_2026"
+name_hl20:  .asciz "http_leap_2000"
+name_hn21:  .asciz "http_noleap_2100"
 name_hsc:   .asciz "http_send_chunk"
+
+thttp_date_epoch_expected:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+
+thttp_date_2026_expected:
+    .ascii  "Thu, 16 Apr 2026 19:45:00 GMT"
+
+thttp_date_leap2000_expected:
+    .ascii  "Tue, 29 Feb 2000 00:00:00 GMT"
+
+thttp_date_noleap2100_expected:
+    .ascii  "Sun, 28 Feb 2100 12:00:00 GMT"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
 
@@ -1407,3 +1570,7 @@ thttp_tx_buf:
 .balign 4
 thttp_send_count:
     .word   0
+
+.balign 4
+thttp_date_buf:
+    .space  32
