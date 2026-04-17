@@ -73,7 +73,7 @@ SHARED_OBJS = \
     $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o \
     $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o \
     $(BUILD)/ip.o $(BUILD)/ip_reasm.o $(BUILD)/icmp.o \
-    $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o \
+    $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/http_status.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
 
@@ -131,7 +131,7 @@ FUNC_TEST_OBJS = $(BUILD)/test_func_main.o $(BUILD)/test_tcp_func.o \
 FUZZ_ASM_OBJS = \
     $(BUILD)/net.o $(BUILD)/eth.o $(BUILD)/arp.o $(BUILD)/ip.o \
     $(BUILD)/ip_reasm.o $(BUILD)/icmp.o $(BUILD)/udp.o $(BUILD)/tcp.o \
-    $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/net_cfg.o $(BUILD)/timer_hw.o \
+    $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/http_status.o $(BUILD)/net_cfg.o $(BUILD)/timer_hw.o \
     $(BUILD)/timer_pool.o $(BUILD)/ntp.o $(BUILD)/md5.o
 
 # ---------------------------------------------------------------------------
@@ -315,6 +315,9 @@ $(BUILD)/http_date.o: lib/http_date.S include/http.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/http_chunk.o: lib/http_chunk.S include/http.inc include/tcp.inc include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/http_status.o: lib/http_status.S include/http.inc include/tcp.inc include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/net.o: lib/net.S include/net.inc include/perf.inc | $(BUILD)

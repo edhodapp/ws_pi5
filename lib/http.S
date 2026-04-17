@@ -218,6 +218,12 @@ http_poll:
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_conn_done:
 
+    /* Increment request counter */
+    ldr     x0, =http_request_count
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
     /* Match URI against route table */
     ldrh    w24, [x20, #HCONN_URI_START]
     ldrh    w1, [x20, #HCONN_URI_LEN]
@@ -227,12 +233,50 @@ http_poll:
 
     cbz     x0, .Lhp_resp_404
 
-    /* Route matched — load body/header from route entry.
-     * Convention: x1=body_ptr, w2=body_len, x24=hdr_ptr, w3=hdr_len */
+    /* Route matched. Check if dynamic or static. */
     mov     w1, #HSTATUS_200
     strb    w1, [x20, #HCONN_STATUS]
+    ldr     w1, [x0, #ROUTE_FLAGS]
+    cbnz    w1, .Lhp_dynamic
+
+    /* Static route: load body/header from route entry */
     ldr     x1, [x0, #ROUTE_BODY_PTR]
     ldr     w2, [x0, #ROUTE_BODY_LEN]
+    ldr     x24, [x0, #ROUTE_HDR_PTR]
+    ldr     w3, [x0, #ROUTE_HDR_LEN]
+    b       .Lhp_setup_resp
+
+.Lhp_dynamic:
+    /* Dynamic route: generate body, chunk-encode, send as one response.
+     * 1. Generate body into http_dyn_body_buf
+     * 2. Chunk-encode into http_dyn_chunk_buf
+     * 3. Append terminator "0\r\n\r\n"
+     * 4. Point HCONN body at the chunk buffer */
+    stp     x0, x22, [sp, #64]     /* save route ptr + rx buf */
+
+    /* Generate body content */
+    ldr     x0, =http_dyn_body_buf
+    mov     w1, #1024
+    bl      http_status_generate   /* w0 = body bytes */
+    mov     w23, w0                /* w23 = body_len */
+
+    /* Chunk-encode body into chunk buffer */
+    ldr     x0, =http_dyn_chunk_buf
+    ldr     x1, =http_dyn_body_buf
+    mov     w2, w23
+    bl      http_chunk_encode      /* w0 = chunk bytes */
+    mov     w23, w0                /* w23 = encoded chunk size */
+
+    /* Append terminator */
+    ldr     x0, =http_dyn_chunk_buf
+    add     x0, x0, x23            /* after chunk data */
+    bl      http_chunk_terminate   /* w0 = 5 */
+    add     w23, w23, w0           /* total = chunk + terminator */
+
+    /* Set up response from chunk buffer */
+    ldp     x0, x22, [sp, #64]     /* restore route ptr + rx buf */
+    ldr     x1, =http_dyn_chunk_buf
+    mov     w2, w23                /* body = entire chunk-encoded output */
     ldr     x24, [x0, #ROUTE_HDR_PTR]
     ldr     w3, [x0, #ROUTE_HDR_LEN]
     b       .Lhp_setup_resp
@@ -653,6 +697,10 @@ http_update_date:
     ldr     x1, =http_about_date
     bl      http_format_date
 
+    mov     x0, x19
+    ldr     x1, =http_status_date
+    bl      http_format_date
+
 .Lud_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
@@ -685,6 +733,15 @@ http_route_table:
     .word   http_about_hdr_len      /* hdr_len */
     .word   0, 0, 0                 /* pad to 48 */
 
+    /* Route 2: "/status" (dynamic — chunked encoding) */
+    .word   7                       /* path_len */
+    .word   0                       /* body_len = 0 (dynamic) */
+    .xword  http_path_status        /* path_ptr */
+    .xword  0                       /* body_ptr = unused */
+    .xword  http_status_hdr         /* hdr_ptr */
+    .word   http_status_hdr_len     /* hdr_len */
+    .word   1, 0, 0                 /* flags=1 (dynamic) + pad */
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -693,6 +750,9 @@ http_path_root:
 
 http_path_about:
     .ascii  "/about"
+
+http_path_status:
+    .ascii  "/status"
 
 /* ===================================================================
  * Response data
@@ -838,6 +898,21 @@ http_about_body:
 http_about_body_end:
 .equ http_about_body_len, http_about_body_end - http_about_body
 
+.section .data
+.balign 4
+http_status_hdr:
+    .ascii  "HTTP/1.1 200 OK\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_status_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Transfer-Encoding: chunked\r\n"
+    .ascii  "\r\n"
+http_status_hdr_end:
+.equ http_status_hdr_len, http_status_hdr_end - http_status_hdr
+
 /* ===================================================================
  * BSS
  * =================================================================== */
@@ -845,6 +920,13 @@ http_about_body_end:
 .balign 8
 http_conn_table:
     .space  HTTP_CONN_TABLE_SIZE
+
+/* Dynamic response buffers (shared — one request at a time) */
+.balign 8
+http_dyn_body_buf:
+    .space  1024                    /* raw body from generator */
+http_dyn_chunk_buf:
+    .space  1088                    /* chunk-encoded body + terminator */
 
 .section .data
 .balign 8

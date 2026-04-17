@@ -98,14 +98,21 @@
 .equ METHOD_GET,      1
 .equ METHOD_HEAD,     2
 
-/* Route table entry layout (48 bytes, 8-byte aligned) */
+/* Route table entry layout (48 bytes, 8-byte aligned)
+ *
+ * Static routes: ROUTE_HANDLER = 0, body from ROUTE_BODY_PTR.
+ * Dynamic routes: ROUTE_HANDLER = function pointer. The handler
+ * is called to generate the body into a buffer. Handler signature:
+ *   x0: output buffer, w1: max buffer size
+ *   Returns: w0 = bytes written to buffer (body content)
+ */
 .equ ROUTE_PATH_LEN,    0      /* u32 — path string length */
-.equ ROUTE_BODY_LEN,    4      /* u32 — body length */
+.equ ROUTE_BODY_LEN,    4      /* u32 — body length (0 for dynamic) */
 .equ ROUTE_PATH_PTR,    8      /* u64 — pointer to path string */
-.equ ROUTE_BODY_PTR,   16      /* u64 — pointer to body data */
+.equ ROUTE_BODY_PTR,   16      /* u64 — pointer to body (static) */
 .equ ROUTE_HDR_PTR,    24      /* u64 — pointer to header template */
 .equ ROUTE_HDR_LEN,    32      /* u32 — header template length */
-.equ ROUTE_PAD,        36      /* u32[3] — padding to 48 */
+.equ ROUTE_FLAGS,      36      /* u32 — 0=static, 1=dynamic (chunked) */
 .equ ROUTE_SIZE,       48
 
 /* HTTP send context (same layout as TSCTX) */
