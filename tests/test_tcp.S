@@ -213,6 +213,7 @@ test_tcp:
     bl      test_tcp_rst_seq_valid
     bl      test_tcp_rst_seq_invalid
     bl      test_tcp_rst_challenge_ack
+    bl      test_tcp_finwait1_finack_timewait
     bl      test_tcp_idle_estab_timeout
     bl      test_tcp_idle_estab_active
     bl      test_tcp_idle_finwait2_timeout
@@ -3213,6 +3214,12 @@ test_tcp_finwait1_fin:
     mov     x21, x0
     mov     w1, #TCPS_FIN_WAIT_1
     strb    w1, [x21, #TCONN_STATE]
+    /* Advance SND_NXT by 1 to account for our FIN being "sent".
+     * Without this, the peer's ACK of ISN+1 would falsely match
+     * SND_NXT and trigger the D4 TIME_WAIT shortcut. */
+    ldr     w1, [x21, #TCONN_SND_NXT]
+    add     w1, w1, #1
+    str     w1, [x21, #TCONN_SND_NXT]
     ldr     w22, [x21, #TCONN_RCV_NXT]  /* save RCV_NXT */
 
     /* Send FIN+ACK */
@@ -11654,6 +11661,80 @@ test_tcp_fin_with_data:
 /* ========================================================================
  * test_tcp_timewait_fin_reack — TIME_WAIT + FIN → re-ACK with frame output
  * ======================================================================== */
+/* ========================================================================
+ * test_tcp_finwait1_finack_timewait — D4: FIN+ACK in FIN_WAIT_1 where
+ * the ACK acknowledges our FIN (SEG.ACK == SND_NXT) must transition
+ * directly to TIME_WAIT, not CLOSING.
+ *
+ * Pre-seed FIN_WAIT_1 with SND_NXT=501 (our FIN was at SEQ=500).
+ * Send FIN+ACK with ACK=501 (acknowledges our FIN).
+ * Expect: state = TIME_WAIT (not CLOSING).
+ * ======================================================================== */
+test_tcp_finwait1_finack_timewait:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    bl      ttcp_do_handshake
+    cbz     x0, .Lfail_tcp_f1fat
+    mov     x21, x0
+    mov     w22, w1                 /* ISN */
+
+    /* Transition to FIN_WAIT_1 (simulate our FIN sent) */
+    mov     w0, #TCPS_FIN_WAIT_1
+    strb    w0, [x21, #TCONN_STATE]
+    mov     w0, #501                /* SND_NXT = 501 (FIN was at 500) */
+    str     w0, [x21, #TCONN_SND_NXT]
+
+    /* Build FIN+ACK from peer: ACK=501 (acknowledges our FIN) */
+    ldr     x0, =tcp_finack_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x19, =tcp_test_buf
+
+    /* Fix ACK to 501 (= our SND_NXT, acknowledges FIN) */
+    mov     w0, #501
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+
+    /* Fix SEQ to 2 (peer's RCV_NXT from our perspective) */
+    mov     w0, #2
+    rev     w0, w0
+    str     w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+
+    /* Recompute TCP checksum */
+    strh    wzr, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x19
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x19
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* Must produce a reply (ACK) */
+    cmp     w0, #54
+    b.lt    .Lfail_tcp_f1fat
+
+    /* State MUST be TIME_WAIT (not CLOSING) */
+    ldrb    w0, [x21, #TCONN_STATE]
+    cmp     w0, #TCPS_TIME_WAIT
+    b.ne    .Lfail_tcp_f1fat
+
+    ldr     x0, =name_tcp_f1fat
+    bl      test_pass
+    b       .Ldone_tcp_f1fat
+.Lfail_tcp_f1fat:
+    ldr     x0, =name_tcp_f1fat
+    bl      test_fail
+.Ldone_tcp_f1fat:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
 test_tcp_timewait_fin_reack:
     stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
@@ -13879,6 +13960,7 @@ name_tcp_sevict:    .asciz "tcp_syn_evict"
 name_tcp_rsv:       .asciz "tcp_rst_seq_valid"
 name_tcp_rsi:       .asciz "tcp_rst_seq_invalid"
 name_tcp_rca:       .asciz "tcp_rst_challenge_ack"
+name_tcp_f1fat:     .asciz "tcp_finwait1_finack_timewait"
 name_tcp_iet:       .asciz "tcp_idle_estab_timeout"
 name_tcp_iea:       .asciz "tcp_idle_estab_active"
 name_tcp_ift:       .asciz "tcp_idle_finwait2_timeout"

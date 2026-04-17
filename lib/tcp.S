@@ -2737,15 +2737,52 @@ tcp_finwait1_fin_handler:
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
 
-    mov     x21, x0                 /* x21 = conn (save for window) */
+    mov     x21, x0                 /* x21 = conn */
+    mov     x22, x1                 /* x22 = frame (saved for reply) */
 
     /* RCV_NXT += 1 (FIN consumes one seq) */
     ldr     w5, [x0, #TCONN_RCV_NXT]
     add     w5, w5, #1
     str     w5, [x0, #TCONN_RCV_NXT]
 
-    ldr     w19, [x0, #TCONN_SND_NXT]
-    rev     w20, w5                     /* new RCV_NXT → NBO */
+    /* D4 fix: if the segment also has ACK and SEG.ACK == SND_NXT,
+     * the peer is acknowledging our FIN. This is simultaneous close
+     * → go directly to TIME_WAIT (not CLOSING, which the FSA already
+     * wrote). Override the state and arm the 2MSL timer. */
+    ldrb    w6, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_FLAGS)]
+    tst     w6, #TCP_ACK_FLAG
+    b.eq    .Lfw1fin_no_ack
+    ldr     w6, [x22, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_ACK)]
+    rev     w6, w6
+    ldr     w7, [x21, #TCONN_SND_NXT]
+    cmp     w6, w7
+    b.ne    .Lfw1fin_no_ack
+
+    /* ACK acknowledges our FIN → TIME_WAIT + 2MSL timer */
+    mov     w0, #TCPS_TIME_WAIT
+    strb    w0, [x21, #TCONN_STATE]
+
+    /* Arm 2MSL timer (60 seconds) if pool available */
+    ldr     x0, =tcp_timer_pool_ptr
+    ldr     x0, [x0]
+    cbz     x0, .Lfw1fin_no_ack     /* no pool → skip timer */
+    stp     x0, x22, [sp, #-16]!    /* save pool + frame */
+    mov     x19, x0
+    bl      timer_freq
+    mov     x1, #60
+    mul     x1, x0, x1              /* delta ticks */
+    bl      timer_now
+    add     x1, x0, x1              /* expiry = now + 60s */
+    mov     x0, x19                 /* pool */
+    ldr     x2, =tcp_timewait_cb
+    mov     x3, x21                 /* context = conn */
+    bl      timer_set
+    ldp     x0, x22, [sp], #16     /* restore */
+
+.Lfw1fin_no_ack:
+    ldr     w19, [x21, #TCONN_SND_NXT]
+    ldr     w5, [x21, #TCONN_RCV_NXT]
+    rev     w20, w5                     /* RCV_NXT → NBO */
 
     /* Dynamic window */
     ldrh    w4, [x21, #TCONN_RXLEN]
@@ -2754,11 +2791,10 @@ tcp_finwait1_fin_handler:
     rev16   w4, w4
     uxth    w4, w4
 
-    mov     x0, x1                  /* frame */
+    mov     x0, x22                 /* frame */
     rev     w1, w19                 /* SEQ = rev(SND_NXT) (NBO) */
     mov     w2, w20                 /* ACK = rev(RCV_NXT) (NBO) */
     mov     w3, #TCP_ACK_FLAG
-    /* w4 = window already set */
     mov     x5, x21                 /* conn */
     bl      tcp_build_reply
 
