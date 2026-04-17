@@ -148,7 +148,7 @@ test_http_uri_match_root:
     mov     w1, #1
     bl      http_match_uri
 
-    cbnz    w0, .Lfail_umr
+    cbz     x0, .Lfail_umr         /* should return non-zero (route ptr) */
 
     ldr     x0, =name_umr
     bl      test_pass
@@ -170,8 +170,7 @@ test_http_uri_match_404:
     mov     w1, #4
     bl      http_match_uri
 
-    cmp     w0, #1
-    b.ne    .Lfail_um4
+    cbnz    x0, .Lfail_um4         /* should return 0 (no route) */
 
     ldr     x0, =name_um4
     bl      test_pass

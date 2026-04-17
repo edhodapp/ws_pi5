@@ -48,7 +48,10 @@
 .equ HCONN_METHOD_LEN,  42      /* u16 — method string length */
 .equ HCONN_REQ_LEN,     44      /* u32 — total request length (for pipelining) */
 .equ HCONN_HDR_NM_START, 48     /* u16 — header name start (temp for Host check) */
-/* bytes 50-63: reserved for future parser fields */
+/* Reused after parse completes (SENDING state): */
+.equ HCONN_HDR_SRC_PTR, 48     /* u64 — response header source pointer */
+.equ HCONN_HDR_SRC_LEN, 56     /* u32 — response header source length */
+/* bytes 60-63: reserved */
 
 .equ HCONN_SIZE,        64
 .equ HCONN_SHIFT,       6       /* log2(64) */
@@ -94,6 +97,16 @@
 .equ METHOD_UNKNOWN,  0
 .equ METHOD_GET,      1
 .equ METHOD_HEAD,     2
+
+/* Route table entry layout (48 bytes, 8-byte aligned) */
+.equ ROUTE_PATH_LEN,    0      /* u32 — path string length */
+.equ ROUTE_BODY_LEN,    4      /* u32 — body length */
+.equ ROUTE_PATH_PTR,    8      /* u64 — pointer to path string */
+.equ ROUTE_BODY_PTR,   16      /* u64 — pointer to body data */
+.equ ROUTE_HDR_PTR,    24      /* u64 — pointer to header template */
+.equ ROUTE_HDR_LEN,    32      /* u32 — header template length */
+.equ ROUTE_PAD,        36      /* u32[3] — padding to 48 */
+.equ ROUTE_SIZE,       48
 
 /* HTTP send context (same layout as TSCTX) */
 .equ HSCTX_DWC2_BASE,  0

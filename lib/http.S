@@ -218,18 +218,23 @@ http_poll:
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_conn_done:
 
-    /* Match URI from parser fields */
+    /* Match URI against route table */
     ldrh    w24, [x20, #HCONN_URI_START]
     ldrh    w1, [x20, #HCONN_URI_LEN]
     add     x0, x22, x24, uxtw
     bl      http_match_uri
+    /* x0 = route entry pointer, or 0 for 404 */
 
-    cbnz    w0, .Lhp_resp_404
-    mov     w0, #HSTATUS_200
-    strb    w0, [x20, #HCONN_STATUS]
-    ldr     x1, =http_200_body
-    ldr     w2, =http_200_body_len
-    ldr     w3, =http_200_hdr_len
+    cbz     x0, .Lhp_resp_404
+
+    /* Route matched — load body/header from route entry.
+     * Convention: x1=body_ptr, w2=body_len, x24=hdr_ptr, w3=hdr_len */
+    mov     w1, #HSTATUS_200
+    strb    w1, [x20, #HCONN_STATUS]
+    ldr     x1, [x0, #ROUTE_BODY_PTR]
+    ldr     w2, [x0, #ROUTE_BODY_LEN]
+    ldr     x24, [x0, #ROUTE_HDR_PTR]
+    ldr     w3, [x0, #ROUTE_HDR_LEN]
     b       .Lhp_setup_resp
 
 .Lhp_resp_404:
@@ -237,6 +242,7 @@ http_poll:
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_404_body
     ldr     w2, =http_404_body_len
+    ldr     x24, =http_404_hdr
     ldr     w3, =http_404_hdr_len
     b       .Lhp_setup_resp
 
@@ -245,6 +251,7 @@ http_poll:
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_405_body
     ldr     w2, =http_405_body_len
+    ldr     x24, =http_405_hdr
     ldr     w3, =http_405_hdr_len
     b       .Lhp_setup_resp
 
@@ -253,12 +260,15 @@ http_poll:
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_400_body
     ldr     w2, =http_400_body_len
+    ldr     x24, =http_400_hdr
     ldr     w3, =http_400_hdr_len
     b       .Lhp_setup_resp
 
 .Lhp_setup_resp:
     str     x1, [x20, #HCONN_BODY_PTR]
     str     w2, [x20, #HCONN_BODY_LEN]
+    str     x24, [x20, #HCONN_HDR_SRC_PTR]
+    str     w3, [x20, #HCONN_HDR_SRC_LEN]
     /* HEAD: send headers only (Content-Length stays in header for RFC compliance).
      * GET/errors: send headers + body. */
     add     w4, w2, w3                  /* hdr + body */
@@ -310,34 +320,8 @@ http_poll:
     cmp     w24, w2
     csel    w24, w24, w2, lo
 
-    /* Select header source based on status */
-    ldrb    w0, [x20, #HCONN_STATUS]
-    cbz     w0, .Lhp_hdr_200
-    cmp     w0, #HSTATUS_400
-    b.eq    .Lhp_hdr_400
-    cmp     w0, #HSTATUS_404
-    b.eq    .Lhp_hdr_404
-    cmp     w0, #HSTATUS_405
-    b.eq    .Lhp_hdr_405
-    b       .Lhp_hdr_400              /* fallback for unknown status */
-
-.Lhp_hdr_200:
-    ldr     x2, =http_200_hdr
-    add     x2, x2, x22
-    b       .Lhp_do_send
-
-.Lhp_hdr_400:
-    ldr     x2, =http_400_hdr
-    add     x2, x2, x22
-    b       .Lhp_do_send
-
-.Lhp_hdr_404:
-    ldr     x2, =http_404_hdr
-    add     x2, x2, x22
-    b       .Lhp_do_send
-
-.Lhp_hdr_405:
-    ldr     x2, =http_405_hdr
+    /* Read header source from stored pointer */
+    ldr     x2, [x20, #HCONN_HDR_SRC_PTR]
     add     x2, x2, x22
     b       .Lhp_do_send
 
@@ -510,16 +494,51 @@ http_find_uri_end:
  * Clobbers: x0-x2
  */
 http_match_uri:
-    /* Match "/" exactly */
-    cmp     w1, #1
-    b.ne    .Lmu_404
-    ldrb    w2, [x0]
-    cmp     w2, #0x2F              /* '/' */
-    b.ne    .Lmu_404
-    mov     w0, #0
+    /* Scan route table for matching path.
+     * x0: URI pointer, w1: URI length
+     * Returns: x0 = route entry pointer (or 0 if no match)
+     * Clobbers: x0-x5 */
+    stp     x29, x30, [sp, #-16]!
+    mov     x2, x0                 /* x2 = URI ptr */
+    mov     w3, w1                 /* w3 = URI len */
+
+    ldr     x4, =http_route_table
+    ldr     w5, =http_route_count
+
+.Lmu_scan:
+    cbz     w5, .Lmu_404
+    sub     w5, w5, #1
+
+    /* Compare path_len */
+    ldr     w0, [x4, #ROUTE_PATH_LEN]
+    cmp     w0, w3
+    b.ne    .Lmu_next
+
+    /* Length matches — compare bytes */
+    ldr     x1, [x4, #ROUTE_PATH_PTR]
+    mov     w6, #0
+.Lmu_cmp:
+    cmp     w6, w0
+    b.hs    .Lmu_found
+    ldrb    w7, [x2, x6]
+    ldrb    w8, [x1, x6]
+    cmp     w7, w8
+    b.ne    .Lmu_next
+    add     w6, w6, #1
+    b       .Lmu_cmp
+
+.Lmu_found:
+    mov     x0, x4                 /* return route pointer */
+    ldp     x29, x30, [sp], #16
     ret
+
+.Lmu_next:
+    add     x4, x4, #ROUTE_SIZE
+    b       .Lmu_scan
+
 .Lmu_404:
-    mov     w0, #1
+    mov     x0, #0                 /* no match */
+    ldp     x29, x30, [sp], #16
     ret
 
 /*
@@ -630,10 +649,50 @@ http_update_date:
     ldr     x1, =http_405_date
     bl      http_format_date
 
+    mov     x0, x19
+    ldr     x1, =http_about_date
+    bl      http_format_date
+
 .Lud_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
+
+/* ===================================================================
+ * Route table
+ * =================================================================== */
+.section .rodata
+.balign 8
+.global http_route_table
+.global http_route_count
+
+http_route_table:
+    /* Route 0: "/" */
+    .word   1                       /* path_len */
+    .word   http_200_body_len       /* body_len */
+    .xword  http_path_root          /* path_ptr */
+    .xword  http_200_body           /* body_ptr */
+    .xword  http_200_hdr            /* hdr_ptr */
+    .word   http_200_hdr_len        /* hdr_len */
+    .word   0, 0, 0                 /* pad to 48 */
+
+    /* Route 1: "/about" */
+    .word   6                       /* path_len */
+    .word   http_about_body_len     /* body_len */
+    .xword  http_path_about         /* path_ptr */
+    .xword  http_about_body         /* body_ptr */
+    .xword  http_about_hdr          /* hdr_ptr */
+    .word   http_about_hdr_len      /* hdr_len */
+    .word   0, 0, 0                 /* pad to 48 */
+
+http_route_table_end:
+.equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
+
+http_path_root:
+    .ascii  "/"
+
+http_path_about:
+    .ascii  "/about"
 
 /* ===================================================================
  * Response data
@@ -746,6 +805,38 @@ http_405_body:
     .ascii  "<body><h1>405 Method Not Allowed</h1></body></html>\n"
 http_405_body_end:
 .equ http_405_body_len, http_405_body_end - http_405_body
+
+.section .data
+.balign 4
+http_about_hdr:
+    .ascii  "HTTP/1.1 200 OK\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_about_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 372\r\n"
+    .ascii  "\r\n"
+http_about_hdr_end:
+.equ http_about_hdr_len, http_about_hdr_end - http_about_hdr
+
+.section .rodata
+http_about_body:
+    .ascii  "<!DOCTYPE html>\n"
+    .ascii  "<html><head><title>About ws_pi5</title></head>\n"
+    .ascii  "<body>\n"
+    .ascii  "<h1>About</h1>\n"
+    .ascii  "<p>Bare-metal AArch64 web server on Raspberry Pi 4.</p>\n"
+    .ascii  "<p>No OS. No C runtime. Just assembly.</p>\n"
+    .ascii  "<ul>\n"
+    .ascii  "<li>TCP: 128 connections, WSCALE, SACK, timestamps</li>\n"
+    .ascii  "<li>HTTP/1.1: keep-alive, FSA parser, HEAD, Date</li>\n"
+    .ascii  "<li>GENET Gigabit Ethernet with HW TX checksum</li>\n"
+    .ascii  "</ul>\n"
+    .ascii  "</body></html>\n"
+http_about_body_end:
+.equ http_about_body_len, http_about_body_end - http_about_body
 
 /* ===================================================================
  * BSS
