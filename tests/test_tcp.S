@@ -212,6 +212,7 @@ test_tcp:
     bl      test_tcp_syn_evict
     bl      test_tcp_rst_seq_valid
     bl      test_tcp_rst_seq_invalid
+    bl      test_tcp_rst_challenge_ack
     bl      test_tcp_idle_estab_timeout
     bl      test_tcp_idle_estab_active
     bl      test_tcp_idle_finwait2_timeout
@@ -9991,6 +9992,86 @@ test_tcp_rst_seq_invalid:
     ret
 
 /* ========================================================================
+ * test_tcp_rst_challenge_ack — RFC 5961 §3.2: in-window RST with
+ * SEQ != RCV_NXT must trigger a Challenge ACK and NOT reset.
+ *
+ * Pre-seed ESTABLISHED with RCV_NXT=1000. Send RST with SEQ=1001
+ * (in window: 1001-1000=1 < 2048, but != RCV_NXT). Expect:
+ *   - state stays ESTABLISHED (not CLOSED)
+ *   - tcp_handle returns >0 (Challenge ACK reply)
+ * ======================================================================== */
+test_tcp_rst_challenge_ack:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    mov     w0, #80
+    bl      tcp_listen
+
+    /* Pre-seed slot 1 as ESTABLISHED */
+    ldr     x19, =tcp_conn_table
+    add     x19, x19, #TCONN_SIZE
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+    mov     w0, #0x3930
+    strh    w0, [x19, #TCONN_RPORT]
+    movz    w0, #0x000A
+    movk    w0, #0x0202, lsl #16
+    str     w0, [x19, #TCONN_RIP]
+    mov     w0, #1000
+    str     w0, [x19, #TCONN_RCV_NXT]
+    mov     w0, #500
+    str     w0, [x19, #TCONN_SND_NXT]
+    strh    wzr, [x19, #TCONN_RXLEN]
+    mov     w0, #0xBBAA
+    movk    w0, #0xDDCC, lsl #16
+    str     w0, [x19, #TCONN_RMAC]
+    mov     w0, #0xFFEE
+    strh    w0, [x19, #(TCONN_RMAC + 4)]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Build RST with SEQ=1001 (in window but != RCV_NXT) */
+    ldr     x0, =tcp_rst_from_peer_template
+    ldr     x1, =tcp_test_buf
+    mov     w2, #54
+    bl      ttcp_fill_checksum
+    ldr     x20, =tcp_test_buf
+    mov     w0, #1001
+    rev     w0, w0
+    str     w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
+    strh    wzr, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+    mov     x0, x20
+    mov     w1, #20
+    bl      tcp_checksum
+    strh    w0, [x20, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_CHECKSUM)]
+
+    mov     x0, x20
+    mov     w1, #54
+    bl      tcp_handle
+
+    /* tcp_handle should return >0 (Challenge ACK sent) */
+    cbz     w0, .Lfail_tcp_rca
+
+    /* State MUST remain ESTABLISHED (not reset) */
+    ldrb    w0, [x19, #TCONN_STATE]
+    cmp     w0, #TCPS_ESTABLISHED
+    b.ne    .Lfail_tcp_rca
+
+    ldr     x0, =name_tcp_rca
+    bl      test_pass
+    b       .Ldone_tcp_rca
+.Lfail_tcp_rca:
+    ldr     x0, =name_tcp_rca
+    bl      test_fail
+.Ldone_tcp_rca:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * test_tcp_idle_estab_timeout — Reaper closes idle ESTABLISHED connection
  *
  * Pre-seed ESTABLISHED with LAST_ACTIVE = now - 121*freq.
@@ -13797,6 +13878,7 @@ name_tcp_rf:        .asciz "tcp_rst_refill"
 name_tcp_sevict:    .asciz "tcp_syn_evict"
 name_tcp_rsv:       .asciz "tcp_rst_seq_valid"
 name_tcp_rsi:       .asciz "tcp_rst_seq_invalid"
+name_tcp_rca:       .asciz "tcp_rst_challenge_ack"
 name_tcp_iet:       .asciz "tcp_idle_estab_timeout"
 name_tcp_iea:       .asciz "tcp_idle_estab_active"
 name_tcp_ift:       .asciz "tcp_idle_finwait2_timeout"

@@ -1245,17 +1245,42 @@ tcp_handle:
     cmp     w0, #TCP_EVT_RST
     b.ne    .Ltcp_fsa_lookup
 
-    /* Check: (SEG.SEQ - RCV_NXT) < RCV_WND (unsigned) */
+    /* RFC 5961 §3.2: RST validation.
+     * 1. SEQ == RCV_NXT (exact match) → accept RST immediately
+     * 2. (SEQ - RCV_NXT) < RCV_WND (in window) → Challenge ACK, don't reset
+     * 3. otherwise → silently drop */
     ldr     w4, [x19, #(ETH_PAYLOAD + IP_HDR_MIN + TCP_SEQ)]
     rev     w4, w4
     ldr     w5, [x23, #TCONN_RCV_NXT]
-    /* Compute dynamic RCV_WND = RXBUF_SIZE - RXLEN */
+
+    /* Exact match? → accept immediately (falls through to FSA) */
+    cmp     w4, w5
+    b.eq    .Ltcp_fsa_lookup
+
+    /* In window? */
     ldrh    w6, [x23, #TCONN_RXLEN]
     mov     w7, #TCP_RXBUF_SIZE
     sub     w6, w7, w6
     sub     w4, w4, w5
     cmp     w4, w6
     b.hs    .Ltcp_drop              /* out of window → silently drop */
+
+    /* In window but not exact match → RFC 5961 Challenge ACK.
+     * Send an ACK with our current SEQ/ACK and do NOT reset. */
+    mov     x0, x19                 /* frame */
+    ldr     w1, [x23, #TCONN_SND_NXT]
+    rev     w1, w1                  /* SEQ = SND_NXT (NBO) */
+    rev     w2, w5                  /* ACK = RCV_NXT (NBO) */
+    mov     w3, #TCP_ACK_FLAG
+    /* Dynamic window */
+    ldrh    w4, [x23, #TCONN_RXLEN]
+    mov     w6, #TCP_RXBUF_SIZE
+    sub     w4, w6, w4
+    rev16   w4, w4
+    uxth    w4, w4
+    mov     x5, x23                /* conn */
+    bl      tcp_build_reply
+    b       .Ltcp_done
 
 .Ltcp_fsa_lookup:
     /* Table lookup: index = state * TCP_N_EVENTS + evt */
