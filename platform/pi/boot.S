@@ -184,6 +184,11 @@ _start:
     dsb     sy
     isb
 
+    /* Install exception vector table */
+    ldr     x0, =_vectors
+    msr     VBAR_EL1, x0
+    isb
+
     /* Enable MMU + data cache + instruction cache */
     mrs     x0, SCTLR_EL1
     orr     x0, x0, #(1 << 0)     /* M: MMU enable */
@@ -202,3 +207,149 @@ _start:
 .Lnet_loop:
     bl      net_loop
     b       .Lpark
+
+/* ================================================================
+ * Exception vector table — catches faults and prints diagnostics.
+ * Each entry is 128 bytes (0x80). 16 entries total = 2048 bytes.
+ * ================================================================ */
+.balign 2048
+_vectors:
+    /* --- Current EL, SP_EL0 --- */
+    b       _exc_sync       /* Synchronous */
+    .balign 0x80
+    b       _exc_irq        /* IRQ */
+    .balign 0x80
+    b       _exc_fiq        /* FIQ */
+    .balign 0x80
+    b       _exc_serror     /* SError */
+    .balign 0x80
+
+    /* --- Current EL, SP_ELx --- */
+    b       _exc_sync       /* Synchronous */
+    .balign 0x80
+    b       _exc_irq        /* IRQ */
+    .balign 0x80
+    b       _exc_fiq        /* FIQ */
+    .balign 0x80
+    b       _exc_serror     /* SError */
+    .balign 0x80
+
+    /* --- Lower EL, AArch64 --- */
+    b       _exc_sync
+    .balign 0x80
+    b       _exc_irq
+    .balign 0x80
+    b       _exc_fiq
+    .balign 0x80
+    b       _exc_serror
+    .balign 0x80
+
+    /* --- Lower EL, AArch32 --- */
+    b       _exc_sync
+    .balign 0x80
+    b       _exc_irq
+    .balign 0x80
+    b       _exc_fiq
+    .balign 0x80
+    b       _exc_serror
+    .balign 0x80
+
+/* Minimal exception handler: print fault info via UART polling */
+_exc_sync:
+    /* Use UART directly — we can't trust the stack or bl */
+.ifdef PLATFORM_PI4
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+.else
+    movz    x9, #0x3F20, lsl #16
+    movk    x9, #0x1000
+.endif
+    /* Print "\r\nEXC:" */
+    mov     w10, #'\r'
+    bl      _exc_putc
+    mov     w10, #'\n'
+    bl      _exc_putc
+    mov     w10, #'E'
+    bl      _exc_putc
+    mov     w10, #'X'
+    bl      _exc_putc
+    mov     w10, #'C'
+    bl      _exc_putc
+    mov     w10, #':'
+    bl      _exc_putc
+
+    /* Print ESR_EL1 (exception syndrome).
+     * Save x30 in x16 across _exc_hex64 calls (they clobber x30). */
+    mov     x16, x30
+    mrs     x11, ESR_EL1
+    bl      _exc_hex64
+
+    /* Print " ELR:" */
+    mov     w10, #' '
+    bl      _exc_putc
+    mov     w10, #'E'
+    bl      _exc_putc
+    mov     w10, #'L'
+    bl      _exc_putc
+    mov     w10, #'R'
+    bl      _exc_putc
+    mov     w10, #':'
+    bl      _exc_putc
+
+    /* Print ELR_EL1 (faulting address) */
+    mrs     x11, ELR_EL1
+    bl      _exc_hex64
+
+    /* Print " FAR:" */
+    mov     w10, #' '
+    bl      _exc_putc
+    mov     w10, #'F'
+    bl      _exc_putc
+    mov     w10, #'A'
+    bl      _exc_putc
+    mov     w10, #'R'
+    bl      _exc_putc
+    mov     w10, #':'
+    bl      _exc_putc
+
+    /* Print FAR_EL1 (fault address register) */
+    mrs     x11, FAR_EL1
+    bl      _exc_hex64
+
+    mov     w10, #'\r'
+    bl      _exc_putc
+    mov     w10, #'\n'
+    bl      _exc_putc
+
+    b       .Lpark
+
+_exc_irq:
+_exc_fiq:
+_exc_serror:
+    b       .Lpark
+
+/* _exc_putc: print w10 via UART polling (x9 = UART base) */
+_exc_putc:
+1:  ldr     w12, [x9, #0x18]       /* UARTFR */
+    tst     w12, #0x20              /* TXFF */
+    b.ne    1b
+    str     w10, [x9]
+    ret
+
+/* _exc_hex64: print x11 as 16 hex chars via UART
+ * Saves x30 in x15 since we call _exc_putc via bl. */
+_exc_hex64:
+    mov     x15, x30               /* save LR */
+    mov     x13, #60               /* shift start (60 = 15*4) */
+2:  lsr     x14, x11, x13
+    and     w14, w14, #0xF
+    cmp     w14, #10
+    b.lt    3f
+    add     w10, w14, #('A' - 10)
+    b       4f
+3:  add     w10, w14, #'0'
+4:  bl      _exc_putc
+    subs    x13, x13, #4
+    b.ge    2b
+    mov     x30, x15               /* restore LR */
+    ret

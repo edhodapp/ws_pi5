@@ -200,6 +200,7 @@ net_loop:
 .endif
     cbnz    w0, .Lnet_idle          /* recv returned no frame → idle path */
 
+
     /* w1 = actual frame length. On the drop path (no reply) go
      * straight back to recv — batch drain: while frames are
      * available we do nothing but recv/dispatch/send. Background
@@ -246,6 +247,7 @@ net_loop:
     ldr     x0, =NET_BASE_SYM
     ldr     x1, =NET_STATE_SYM
     bl      genet_phy_check
+
 .endif
 
     bl      timer_now

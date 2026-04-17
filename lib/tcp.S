@@ -454,8 +454,12 @@ tcp_sndbuf_build_frame:
     cmp     w21, w0
     csel    w21, w21, w0, lo        /* w21 = segment size */
 
-    /* Copy from send buffer to a temp area on stack */
-    sub     sp, sp, w21, uxtw       /* allocate stack space for payload */
+    /* Copy from send buffer to a temp area on stack.
+     * Round up to 16-byte alignment to maintain SP alignment
+     * (AArch64 requires 16-byte aligned SP for stp/ldp). */
+    add     w0, w21, #15
+    and     w0, w0, #~15            /* w0 = align16(w21) */
+    sub     sp, sp, w0, uxtw       /* allocate aligned stack space */
     mov     x22, sp                 /* x22 = payload temp */
 
     /* Compute send buffer base + tail */
@@ -497,8 +501,10 @@ tcp_sndbuf_build_frame:
     /* Restore SND_NXT */
     str     w24, [x19, #TCONN_SND_NXT]
 
-    /* Deallocate stack payload temp */
-    add     sp, sp, w21, uxtw
+    /* Deallocate stack payload temp (aligned size) */
+    add     w0, w21, #15
+    and     w0, w0, #~15
+    add     sp, sp, w0, uxtw
 
     mov     w0, w22
     b       .Lsbf_done
@@ -545,8 +551,11 @@ tcp_sndbuf_build_frame_at:
     cmp     w21, w0
     csel    w21, w21, w0, lo
 
-    /* Copy from send buffer to stack temp */
-    sub     sp, sp, w21, uxtw
+    /* Copy from send buffer to stack temp.
+     * Round up to 16-byte alignment for SP. */
+    add     w0, w21, #15
+    and     w0, w0, #~15
+    sub     sp, sp, w0, uxtw
     mov     x22, sp
 
     ldr     x0, =tcp_conn_table
@@ -585,7 +594,9 @@ tcp_sndbuf_build_frame_at:
 
     mov     w22, w0
     str     w20, [x19, #TCONN_SND_NXT]   /* restore */
-    add     sp, sp, w21, uxtw
+    add     w0, w21, #15
+    and     w0, w0, #~15
+    add     sp, sp, w0, uxtw
 
     mov     w0, w22
     b       .Lsbfa_done
