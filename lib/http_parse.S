@@ -273,6 +273,13 @@ http_parse_request:
     b       .Lhdr_cl_cmp
 
 .Lhdr_cl_match:
+    /* Duplicate Content-Length is a smuggling risk (RFC 7230 §3.3.3).
+     * If the flag is already set, transition the FSA to S_ERROR so
+     * the request is rejected as 400 Bad Request. */
+    ldrb    w3, [x19, #HCONN_FLAGS]
+    tst     w3, #HFLAG_CL_SEEN
+    b.ne    .Lhdr_cl_dup
+
     /* Name matches. Parse decimal value from w5+1 (past colon), skip
      * leading OWS, accumulate digits. Non-digit terminates. */
     add     w0, w5, #1
@@ -314,6 +321,13 @@ http_parse_request:
     ldrb    w3, [x19, #HCONN_FLAGS]
     orr     w3, w3, #HFLAG_CL_SEEN
     strb    w3, [x19, #HCONN_FLAGS]
+    b       .Lparse_advance
+
+.Lhdr_cl_dup:
+    /* Second Content-Length header — force parser into S_ERROR; the
+     * main loop's next iteration will terminate and http_poll emits
+     * 400 Bad Request. */
+    mov     w4, #S_ERROR
     b       .Lparse_advance
 
 .Lact_req_done:

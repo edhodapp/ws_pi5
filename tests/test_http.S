@@ -61,6 +61,7 @@ test_http:
     bl      test_http_post_oversize_413
     bl      test_http_post_cl_overflow_413
     bl      test_http_post_no_cl_411
+    bl      test_http_post_dup_cl_400
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2154,6 +2155,65 @@ test_http_post_no_cl_411:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_dup_cl_400 — two Content-Length headers in the same
+ * request must cause a parse error, handled as 400 Bad Request.
+ *
+ * Duplicate Content-Length is classic request-smuggling bait: the
+ * front proxy and the backend may disagree on which value is
+ * authoritative. RFC 7230 §3.3.3 requires the server to reject the
+ * message. Today the parser silently overwrites HCONN_CONTENT_LEN
+ * with the second value; after the fix it transitions to S_ERROR,
+ * which the dispatcher translates to 400.
+ * ======================================================================== */
+test_http_post_dup_cl_400:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_dup_cl_request
+    ldr     w2, =thttp_post_dup_cl_request_len
+.Lhpdc_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpdc_cp
+    ldr     w0, =thttp_post_dup_cl_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_400
+    b.ne    .Lfail_hpdc
+
+    ldr     x0, =name_hpdc
+    bl      test_pass
+    b       .Ldone_hpdc
+.Lfail_hpdc:
+    ldr     x0, =name_hpdc
+    bl      test_fail
+.Ldone_hpdc:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2227,6 +2287,11 @@ thttp_post_no_cl_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_post_no_cl_request_end:
 .equ thttp_post_no_cl_request_len, thttp_post_no_cl_request_end - thttp_post_no_cl_request
+
+thttp_post_dup_cl_request:
+    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\nContent-Length: 99\r\n\r\n"
+thttp_post_dup_cl_request_end:
+.equ thttp_post_dup_cl_request_len, thttp_post_dup_cl_request_end - thttp_post_dup_cl_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2339,6 +2404,7 @@ name_hpeh:  .asciz "http_post_body_to_handler"
 name_hpo4:  .asciz "http_post_oversize_413"
 name_hpco:  .asciz "http_post_cl_overflow_413"
 name_hpnc:  .asciz "http_post_no_cl_411"
+name_hpdc:  .asciz "http_post_dup_cl_400"
 
 .section .data
 .balign 16
