@@ -54,14 +54,14 @@ http_set_send_ctx:
  * http_poll — Scan connections: parse requests, send responses
  *
  * Called from net_loop on every iteration.
- * Clobbers: x0-x6, x19-x24, x30
+ * Clobbers: x0-x8, x19-x24, x30 (x7, x8 are scratch for dynamic dispatch)
  */
 http_poll:
-    stp     x29, x30, [sp, #-80]!
+    stp     x29, x30, [sp, #-96]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
-    /* sp+64..79: scratch space for request parsing */
+    /* sp+64..95: scratch space for request parsing */
 
     ldr     x19, =tcp_conn_table
     ldr     x20, =http_conn_table
@@ -263,35 +263,59 @@ http_poll:
 
 .Lhp_dynamic:
     /* Dynamic route: generate body, chunk-encode, send as one response.
-     * 1. Generate body into http_dyn_body_buf
-     * 2. Chunk-encode into http_dyn_chunk_buf
-     * 3. Append terminator "0\r\n\r\n"
-     * 4. Point HCONN body at the chunk buffer */
-    stp     x0, x22, [sp, #64]     /* save route ptr + rx buf */
+     * Each HCONN owns its own body/chunk scratch, so two concurrent
+     * dynamic responses cannot stomp each other's bytes.
+     *
+     * 1. Compute this HCONN's per-way body_buf and chunk_buf addresses
+     * 2. Generate body into per-way body_buf
+     * 3. Chunk-encode into per-way chunk_buf
+     * 4. Append terminator "0\r\n\r\n"
+     * 5. Point HCONN body at the per-way chunk_buf */
 
-    /* Generate body content */
-    ldr     x0, =http_dyn_body_buf
-    mov     w1, #1024
-    bl      http_status_generate   /* w0 = body bytes */
-    mov     w23, w0                /* w23 = body_len */
+    /* Compute hconn index = (x20 - http_conn_table) >> HCONN_SHIFT.
+     * Invariant: x20 walks http_conn_table in HCONN_SIZE strides driven
+     * by the poll loop at .Lhp_next, so x5 is always in [0, HTTP_MAX_CONNS). */
+    ldr     x5, =http_conn_table
+    sub     x5, x20, x5
+    lsr     x5, x5, #HCONN_SHIFT    /* x5 = hconn_index */
 
-    /* Chunk-encode body into chunk buffer */
-    ldr     x0, =http_dyn_chunk_buf
-    ldr     x1, =http_dyn_body_buf
+    /* body_buf = http_dyn_body_bufs + (index * HTTP_DYN_BODY_SIZE) */
+    ldr     x6, =http_dyn_body_bufs
+    add     x6, x6, x5, lsl #HTTP_DYN_BODY_SHIFT
+
+    /* chunk_buf = http_dyn_chunk_bufs + (index * HTTP_DYN_CHUNK_SIZE) */
+    mov     w7, #HTTP_DYN_CHUNK_SIZE
+    umull   x7, w5, w7
+    ldr     x8, =http_dyn_chunk_bufs
+    add     x7, x8, x7              /* x7 = per-way chunk_buf */
+
+    /* Save route ptr, rx buf, body_buf, chunk_buf across function calls */
+    stp     x0, x22, [sp, #64]
+    stp     x6, x7, [sp, #80]
+
+    /* Generate body content into per-way body_buf */
+    mov     x0, x6                  /* body_buf */
+    mov     w1, #HTTP_DYN_BODY_SIZE
+    bl      http_status_generate    /* w0 = body bytes */
+    mov     w23, w0                 /* w23 = body_len */
+
+    /* Chunk-encode body into per-way chunk_buf */
+    ldr     x0, [sp, #88]           /* chunk_buf */
+    ldr     x1, [sp, #80]           /* body_buf */
     mov     w2, w23
-    bl      http_chunk_encode      /* w0 = chunk bytes */
-    mov     w23, w0                /* w23 = encoded chunk size */
+    bl      http_chunk_encode       /* w0 = chunk bytes */
+    mov     w23, w0                 /* w23 = encoded chunk size */
 
     /* Append terminator */
-    ldr     x0, =http_dyn_chunk_buf
-    add     x0, x0, x23            /* after chunk data */
-    bl      http_chunk_terminate   /* w0 = 5 */
-    add     w23, w23, w0           /* total = chunk + terminator */
+    ldr     x0, [sp, #88]           /* chunk_buf */
+    add     x0, x0, x23             /* after chunk data */
+    bl      http_chunk_terminate    /* w0 = 5 */
+    add     w23, w23, w0            /* total = chunk + terminator */
 
-    /* Set up response from chunk buffer */
-    ldp     x0, x22, [sp, #64]     /* restore route ptr + rx buf */
-    ldr     x1, =http_dyn_chunk_buf
-    mov     w2, w23                /* body = entire chunk-encoded output */
+    /* Set up response from per-way chunk_buf */
+    ldp     x0, x22, [sp, #64]      /* restore route ptr + rx buf */
+    ldr     x1, [sp, #88]           /* body_ptr = per-way chunk_buf */
+    mov     w2, w23
     ldr     x24, [x0, #ROUTE_HDR_PTR]
     ldr     w3, [x0, #ROUTE_HDR_LEN]
     b       .Lhp_setup_resp
@@ -477,7 +501,7 @@ http_poll:
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #80
+    ldp     x29, x30, [sp], #96
     ret
 
 /*
@@ -938,12 +962,13 @@ http_status_hdr_end:
 http_conn_table:
     .space  HTTP_CONN_TABLE_SIZE
 
-/* Dynamic response buffers (shared — one request at a time) */
+/* Per-HCONN dynamic response buffers — each way owns its own scratch
+ * so concurrent dynamic responses cannot corrupt each other. */
 .balign 8
-http_dyn_body_buf:
-    .space  1024                    /* raw body from generator */
-http_dyn_chunk_buf:
-    .space  1088                    /* chunk-encoded body + terminator */
+http_dyn_body_bufs:
+    .space  HTTP_MAX_CONNS * HTTP_DYN_BODY_SIZE
+http_dyn_chunk_bufs:
+    .space  HTTP_MAX_CONNS * HTTP_DYN_CHUNK_SIZE
 
 .section .data
 .balign 8

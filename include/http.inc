@@ -137,3 +137,11 @@
 
 /* Peek buffer for request parsing */
 .equ HTTP_PEEK_BUF_SIZE, 512
+
+/* Per-HCONN dynamic response scratch sizes.
+ * Body buf holds raw handler output; chunk buf holds chunk-encoded output
+ * plus the 5-byte "0\r\n\r\n" terminator.
+ * Body size must be a power of 2 so the per-HCONN offset can use a shift. */
+.equ HTTP_DYN_BODY_SIZE,  1024
+.equ HTTP_DYN_BODY_SHIFT, 10
+.equ HTTP_DYN_CHUNK_SIZE, 1088

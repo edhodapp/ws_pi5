@@ -52,6 +52,7 @@ test_http:
     bl      test_http_send_chunk
     bl      test_http_send_close
     bl      test_http_reset_during_send
+    bl      test_http_resp_isolation
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1527,6 +1528,106 @@ test_http_reset_during_send:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ========================================================================
+ * test_http_resp_isolation — two concurrent dynamic requests on slots 0 and
+ * 1 must each get their own response buffer (per-way ownership).
+ *
+ * Sets up both TCONNs as ESTABLISHED with a GET /status request in their
+ * rx buffers. Calls http_poll once, which walks both slots through
+ * RECV_HDR → FSA_DONE → dynamic dispatch → SENDING. Both HCONNs then have
+ * HCONN_BODY_PTR set.
+ *
+ * Today the dynamic dispatch path writes body_ptr = &http_dyn_chunk_buf
+ * for every dynamic response. Two HCONNs end up pointing at the same
+ * bytes — a shared buffer corruption the moment handler output varies per
+ * request. This test fails now (body_ptrs equal); it will pass when the
+ * response path gives each way its own scratch.
+ * ======================================================================== */
+test_http_resp_isolation:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* --- TCONN slot 0: ESTABLISHED, GET /status in rx buffer --- */
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_status_request
+    ldr     w2, =thttp_status_request_len
+.Lhri_cp0:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhri_cp0
+    ldr     w0, =thttp_status_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    /* --- TCONN slot 1: ESTABLISHED, same request in its rx buffer --- */
+    ldr     x20, =tcp_conn_table
+    add     x20, x20, #TCONN_SIZE
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x20, #TCONN_STATE]
+    mov     w0, #0x5001
+    strh    w0, [x20, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    mov     w1, #TCP_RXBUF_SIZE
+    add     x0, x0, x1, uxtw             /* slot 1 rx buffer */
+    ldr     x1, =thttp_status_request
+    ldr     w2, =thttp_status_request_len
+.Lhri_cp1:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhri_cp1
+    ldr     w0, =thttp_status_request_len
+    strh    w0, [x20, #TCONN_RXLEN]
+
+    /* Mock send; TCP not set up for real sends, so send_chunk is a no-op
+     * and both HCONNs stay in SENDING with body_ptr populated. */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Both HCONNs must have reached SENDING */
+    ldr     x19, =http_conn_table
+    ldrb    w0, [x19, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hri
+
+    ldr     x20, =http_conn_table
+    add     x20, x20, #HCONN_SIZE
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hri
+
+    /* The assertion: body_ptrs must differ (per-way buffers) */
+    ldr     x0, [x19, #HCONN_BODY_PTR]
+    ldr     x1, [x20, #HCONN_BODY_PTR]
+    cmp     x0, x1
+    b.eq    .Lfail_hri                   /* shared buffer → FAIL */
+
+    ldr     x0, =name_hri
+    bl      test_pass
+    b       .Ldone_hri
+.Lfail_hri:
+    ldr     x0, =name_hri
+    bl      test_fail
+.Ldone_hri:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1606,6 +1707,11 @@ thttp_host_lower_request:
 thttp_host_lower_request_end:
 .equ thttp_host_lower_request_len, thttp_host_lower_request_end - thttp_host_lower_request
 
+thttp_status_request:
+    .ascii  "GET /status HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_status_request_end:
+.equ thttp_status_request_len, thttp_status_request_end - thttp_status_request
+
 thttp_uri_root:
     .ascii  "/"
 
@@ -1658,6 +1764,7 @@ thttp_date_noleap2100_expected:
     .ascii  "Sun, 28 Feb 2100 12:00:00 GMT"
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
+name_hri:   .asciz "http_resp_isolation"
 
 .section .data
 .balign 16
