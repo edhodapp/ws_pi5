@@ -370,10 +370,27 @@ http_poll:
 
     cbz     x0, .Lhp_resp_404
 
-    /* Route matched. Check if dynamic or static. */
+    /* Method allow-list: route declares a bitmask of accepted methods.
+     * Derive the HM_* bit for this request from HCONN_FLAGS and bail to
+     * the 405 path if the route doesn't list it. */
+    ldrb    w1, [x20, #HCONN_FLAGS]
+    mov     w2, #HM_GET
+    tst     w1, #HFLAG_HEAD
+    b.eq    .Lhp_mth_post_check
+    mov     w2, #HM_HEAD
+.Lhp_mth_post_check:
+    tst     w1, #HFLAG_POST
+    b.eq    .Lhp_mth_check
+    mov     w2, #HM_POST
+.Lhp_mth_check:
+    ldrb    w1, [x0, #ROUTE_METHODS]
+    tst     w1, w2
+    b.eq    .Lhp_bad_method
+
+    /* Route matched + method allowed. Check if dynamic or static. */
     mov     w1, #HSTATUS_200
     strb    w1, [x20, #HCONN_STATUS]
-    ldr     w1, [x0, #ROUTE_FLAGS]
+    ldrb    w1, [x0, #ROUTE_FLAGS]
     cbnz    w1, .Lhp_dynamic
 
     /* Static route: load body/header from route entry */
@@ -1002,105 +1019,113 @@ http_test_dispatch_handler:
 .global http_route_count
 
 http_route_table:
-    /* Route 0: "/" (static) */
+    /* Route 0: "/" (static, GET+HEAD) */
     .word   1                       /* path_len */
     .word   http_200_body_len       /* body_len */
     .xword  http_path_root          /* path_ptr */
     .xword  http_200_body           /* body_ptr */
     .xword  http_200_hdr            /* hdr_ptr */
     .word   http_200_hdr_len        /* hdr_len */
-    .word   0                       /* flags=0 (static) */
+    .byte   0                       /* flags=0 (static) */
+    .byte   HM_GET | HM_HEAD        /* methods */
+    .byte   0, 0                    /* pad */
     .xword  0                       /* ROUTE_HANDLER unused */
 
-    /* Route 1: "/about" (static) */
-    .word   6                       /* path_len */
-    .word   http_about_body_len     /* body_len */
-    .xword  http_path_about         /* path_ptr */
-    .xword  http_about_body         /* body_ptr */
-    .xword  http_about_hdr          /* hdr_ptr */
-    .word   http_about_hdr_len      /* hdr_len */
-    .word   0                       /* flags=0 (static) */
-    .xword  0                       /* ROUTE_HANDLER unused */
+    /* Route 1: "/about" (static, GET+HEAD) */
+    .word   6
+    .word   http_about_body_len
+    .xword  http_path_about
+    .xword  http_about_body
+    .xword  http_about_hdr
+    .word   http_about_hdr_len
+    .byte   0
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
+    .xword  0
 
-    /* Route 2: "/status" (dynamic — chunked encoding) */
-    .word   7                       /* path_len */
-    .word   0                       /* body_len = 0 (dynamic) */
-    .xword  http_path_status        /* path_ptr */
-    .xword  0                       /* body_ptr = unused */
-    .xword  http_status_hdr         /* hdr_ptr */
-    .word   http_status_hdr_len     /* hdr_len */
-    .word   1                       /* flags=1 (dynamic) */
-    .xword  http_status_generate    /* ROUTE_HANDLER */
+    /* Route 2: "/status" (dynamic, GET+HEAD) */
+    .word   7
+    .word   0
+    .xword  http_path_status
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .byte   1                       /* dynamic */
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
+    .xword  http_status_generate
 
-    /* Route 3: "/_test_dispatch" (dynamic, test-only sentinel).
-     * Baked into production because exercising route dispatch from
-     * tests requires a second handler; impact is 48 B of rodata plus
-     * a short handler. Not exposed via the packager. */
-    .word   15                      /* path_len = len("/_test_dispatch") */
-    .word   0                       /* body_len = 0 (dynamic) */
-    .xword  http_path_test_dispatch /* path_ptr */
-    .xword  0                       /* body_ptr = unused */
-    .xword  http_status_hdr         /* hdr_ptr — reuse chunked header */
-    .word   http_status_hdr_len     /* hdr_len */
-    .word   1                       /* flags=1 (dynamic) */
-    .xword  http_test_dispatch_handler /* ROUTE_HANDLER */
+    /* Route 3: "/_test_dispatch" (dynamic, test-only, GET+HEAD) */
+    .word   15
+    .word   0
+    .xword  http_path_test_dispatch
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .byte   1
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
+    .xword  http_test_dispatch_handler
 
-    /* Route 4: "/_test_echo" (dynamic, test-only). Echoes POST body
-     * back. Like /_test_dispatch, test scaffolding compiled into
-     * production; overwritten by the appliance packager. */
-    .word   11                      /* path_len = len("/_test_echo") */
+    /* Route 4: "/_test_echo" (dynamic, test-only). POST-only — the
+     * generic POST-infrastructure tests aim their requests here. */
+    .word   11
     .word   0
     .xword  http_path_test_echo
     .xword  0
     .xword  http_status_hdr
     .word   http_status_hdr_len
-    .word   1
+    .byte   1
+    .byte   HM_POST
+    .byte   0, 0
     .xword  http_test_echo_handler
 
-    /* Route 5: "/_test_css" (static, test-only). Proves the runtime
-     * supports Content-Type other than text/html — the packager will
-     * rely on this for .css / .png / image/* assets. */
-    .word   10                      /* path_len = len("/_test_css") */
+    /* Route 5: "/_test_css" (static, GET+HEAD) */
+    .word   10
     .word   http_test_css_body_len
     .xword  http_path_test_css
     .xword  http_test_css_body
     .xword  http_test_css_hdr
     .word   http_test_css_hdr_len
-    .word   0
+    .byte   0
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
     .xword  0
 
-    /* Route 6: "/counter" (dynamic). Real handler — increments a
-     * store on each GET and emits the running count. First real
-     * appliance feature that uses the store API. */
-    .word   8                       /* path_len = len("/counter") */
+    /* Route 6: "/counter" (dynamic, GET+HEAD). */
+    .word   8
     .word   0
     .xword  http_path_counter
     .xword  0
-    .xword  http_status_hdr         /* reuse chunked header template */
+    .xword  http_status_hdr
     .word   http_status_hdr_len
-    .word   1                       /* dynamic */
+    .byte   1
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
     .xword  http_counter_handler
 
-    /* Route 7: "/guestbook" (dynamic). POST appends to a ring store;
-     * GET will later render the entries as HTML. */
-    .word   10                      /* path_len = len("/guestbook") */
+    /* Route 7: "/guestbook" (dynamic, GET+HEAD+POST). */
+    .word   10
     .word   0
     .xword  http_path_guestbook
     .xword  0
     .xword  http_status_hdr
     .word   http_status_hdr_len
-    .word   1
+    .byte   1
+    .byte   HM_GET | HM_HEAD | HM_POST
+    .byte   0, 0
     .xword  http_guestbook_handler
 
-    /* Route 8: "/form_log" (dynamic). POST appends the raw body to a
-     * larger ring store; GET returns the current entry count. */
-    .word   9                       /* path_len = len("/form_log") */
+    /* Route 8: "/form_log" (dynamic, GET+HEAD+POST). */
+    .word   9
     .word   0
     .xword  http_path_form_log
     .xword  0
     .xword  http_status_hdr
     .word   http_status_hdr_len
-    .word   1
+    .byte   1
+    .byte   HM_GET | HM_HEAD | HM_POST
+    .byte   0, 0
     .xword  http_form_log_handler
 
 http_route_table_end:

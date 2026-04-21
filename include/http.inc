@@ -131,9 +131,17 @@
 .equ ROUTE_BODY_PTR,   16      /* u64 — pointer to body (static) */
 .equ ROUTE_HDR_PTR,    24      /* u64 — pointer to header template */
 .equ ROUTE_HDR_LEN,    32      /* u32 — header template length */
-.equ ROUTE_FLAGS,      36      /* u32 — 0=static, 1=dynamic (chunked) */
+.equ ROUTE_FLAGS,      36      /* u8  — 0=static, 1=dynamic (chunked) */
+.equ ROUTE_METHODS,    37      /* u8  — bitmask of HM_* methods this route accepts */
+/* bytes 38-39: pad */
 .equ ROUTE_HANDLER,    40      /* u64 — handler fn ptr (unused for static) */
 .equ ROUTE_SIZE,       48
+
+/* Route method bitmask values. Stored in ROUTE_METHODS; the dispatcher
+ * rejects mismatched methods with 405 before invoking the handler. */
+.equ HM_GET,            0x01
+.equ HM_HEAD,           0x02
+.equ HM_POST,           0x04
 
 /* HTTP send context (same layout as TSCTX) */
 .equ HSCTX_DWC2_BASE,  0

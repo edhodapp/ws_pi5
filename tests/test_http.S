@@ -71,6 +71,7 @@ test_http:
     bl      test_http_form_log_post
     bl      test_http_query_string_split
     bl      test_http_guestbook_html_escape
+    bl      test_http_route_method_405
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2969,6 +2970,62 @@ test_http_guestbook_html_escape:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_route_method_405 — a POST to a route that declares only
+ * GET/HEAD must return 405, not 200 or the handler's output.
+ *
+ * Route "/about" is static and only serves reads. Today any method
+ * accepted by the parser dispatches — this test asserts the
+ * per-route methods bitmask gates the call.
+ * ======================================================================== */
+test_http_route_method_405:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_about_request
+    ldr     w2, =thttp_post_about_request_len
+.Lhrm4_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhrm4_cp
+    ldr     w0, =thttp_post_about_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_405
+    b.ne    .Lfail_hrm4
+
+    ldr     x0, =name_hrm4
+    bl      test_pass
+    b       .Ldone_hrm4
+.Lfail_hrm4:
+    ldr     x0, =name_hrm4
+    bl      test_fail
+.Ldone_hrm4:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3004,7 +3061,7 @@ thttp_404_request_end:
 .equ thttp_404_request_len, thttp_404_request_end - thttp_404_request
 
 thttp_post_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 0\r\n\r\n"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 0\r\n\r\n"
 thttp_post_request_end:
 .equ thttp_post_request_len, thttp_post_request_end - thttp_post_request
 
@@ -3019,7 +3076,7 @@ thttp_post_cl42_request_end:
 .equ thttp_post_cl42_request_len, thttp_post_cl42_request_end - thttp_post_cl42_request
 
 thttp_post_body_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
 thttp_post_body_request_end:
 .equ thttp_post_body_request_len, thttp_post_body_request_end - thttp_post_body_request
 
@@ -3029,27 +3086,27 @@ thttp_post_echo_request_end:
 .equ thttp_post_echo_request_len, thttp_post_echo_request_end - thttp_post_echo_request
 
 thttp_post_oversize_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 2000\r\n\r\n"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 2000\r\n\r\n"
 thttp_post_oversize_request_end:
 .equ thttp_post_oversize_request_len, thttp_post_oversize_request_end - thttp_post_oversize_request
 
 thttp_post_cl_overflow_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 4294967396\r\n\r\n"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 4294967396\r\n\r\n"
 thttp_post_cl_overflow_request_end:
 .equ thttp_post_cl_overflow_request_len, thttp_post_cl_overflow_request_end - thttp_post_cl_overflow_request
 
 thttp_post_no_cl_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_post_no_cl_request_end:
 .equ thttp_post_no_cl_request_len, thttp_post_no_cl_request_end - thttp_post_no_cl_request
 
 thttp_post_dup_cl_request:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\nContent-Length: 99\r\n\r\n"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\nContent-Length: 99\r\n\r\n"
 thttp_post_dup_cl_request_end:
 .equ thttp_post_dup_cl_request_len, thttp_post_dup_cl_request_end - thttp_post_dup_cl_request
 
 thttp_post_mp_part1:
-    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhe"
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhe"
 thttp_post_mp_part1_end:
 .equ thttp_post_mp_part1_len, thttp_post_mp_part1_end - thttp_post_mp_part1
 
@@ -3107,6 +3164,11 @@ thttp_get_counter_q_request:
     .ascii  "GET /counter?foo=bar HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_get_counter_q_request_end:
 .equ thttp_get_counter_q_request_len, thttp_get_counter_q_request_end - thttp_get_counter_q_request
+
+thttp_post_about_request:
+    .ascii  "POST /about HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 0\r\n\r\n"
+thttp_post_about_request_end:
+.equ thttp_post_about_request_len, thttp_post_about_request_end - thttp_post_about_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -3228,6 +3290,7 @@ name_hgr:   .asciz "http_guestbook_get_render"
 name_hfl:   .asciz "http_form_log_post"
 name_hqs:   .asciz "http_query_string_split"
 name_hgesc: .asciz "http_guestbook_html_escape"
+name_hrm4:  .asciz "http_route_method_405"
 
 .section .data
 .balign 16
