@@ -11,8 +11,9 @@
 .equ HSTATUS_400,       1       /* 400 Bad Request */
 .equ HSTATUS_404,       2       /* 404 Not Found */
 .equ HSTATUS_405,       3       /* 405 Method Not Allowed */
-.equ HSTATUS_414,       4       /* 414 URI Too Long */
-.equ HSTATUS_431,       5       /* 431 Request Header Fields Too Large */
+.equ HSTATUS_413,       4       /* 413 Payload Too Large */
+.equ HSTATUS_414,       5       /* 414 URI Too Long */
+.equ HSTATUS_431,       6       /* 431 Request Header Fields Too Large */
 
 /* HTTP connection flags (stored in HCONN_FLAGS) */
 .equ HFLAG_HTTP11,      0x01    /* bit 0: HTTP/1.1 (vs 1.0) */

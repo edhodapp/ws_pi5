@@ -255,11 +255,11 @@ http_poll:
     ldr     w0, [x20, #HCONN_CONTENT_LEN]
     cbz     w0, .Lhp_body_done
     cmp     w0, #HTTP_MAX_RECV_BODY
-    b.hi    .Lhp_body_done
+    b.hi    .Lhp_resp_413           /* oversize → reject */
     ldr     w1, [x20, #HCONN_REQ_LEN]
     add     w2, w1, w0
     cmp     w2, w23
-    b.hi    .Lhp_body_done
+    b.hi    .Lhp_body_done          /* partial — deferred (multi-packet) */
 
     /* source = rx buffer + REQ_LEN */
     add     x2, x22, x1, uxtw
@@ -403,6 +403,23 @@ http_poll:
     ldr     w2, =http_400_body_len
     ldr     x24, =http_400_hdr
     ldr     w3, =http_400_hdr_len
+    b       .Lhp_setup_resp
+
+.Lhp_resp_413:
+    /* Oversize request body. Reject before body copy / dispatch.
+     * Force connection close: the request body protocol is compromised
+     * on this connection, so keep-alive would let a malicious client
+     * keep sending more oversize POSTs. Matches the "Connection: close"
+     * line baked into the 413 response header. */
+    mov     w0, #HSTATUS_413
+    strb    w0, [x20, #HCONN_STATUS]
+    ldrb    w1, [x20, #HCONN_FLAGS]
+    orr     w1, w1, #HFLAG_CLOSE
+    strb    w1, [x20, #HCONN_FLAGS]
+    ldr     x1, =http_413_body
+    ldr     w2, =http_413_body_len
+    ldr     x24, =http_413_hdr
+    ldr     w3, =http_413_hdr_len
     b       .Lhp_setup_resp
 
 .Lhp_setup_resp:
@@ -793,6 +810,10 @@ http_update_date:
     bl      http_format_date
 
     mov     x0, x19
+    ldr     x1, =http_413_date
+    bl      http_format_date
+
+    mov     x0, x19
     ldr     x1, =http_about_date
     bl      http_format_date
 
@@ -1062,6 +1083,37 @@ http_405_body:
     .ascii  "<body><h1>405 Method Not Allowed</h1></body></html>\n"
 http_405_body_end:
 .equ http_405_body_len, http_405_body_end - http_405_body
+
+.section .data
+.balign 4
+http_413_hdr:
+    .ascii  "HTTP/1.1 413 Payload Too Large\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_413_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 105\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_413_hdr_end:
+.equ http_413_hdr_len, http_413_hdr_end - http_413_hdr
+
+.section .rodata
+http_413_body:
+    .ascii  "<!DOCTYPE html>\n"
+    .ascii  "<html><head><title>413</title></head>\n"
+    .ascii  "<body><h1>413 Payload Too Large</h1></body></html>\n"
+http_413_body_end:
+.equ http_413_body_len, http_413_body_end - http_413_body
+
+/* Lock the Content-Length string in http_413_hdr to the actual body
+ * size at assembly time. If the body changes, the .equ computes a new
+ * length and this .if fires before the binary is built. */
+.if http_413_body_len != 105
+.error "http_413_body_len drifted from the 105 hardcoded in http_413_hdr"
+.endif
 
 .section .data
 .balign 4
