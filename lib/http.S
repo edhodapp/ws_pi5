@@ -280,6 +280,35 @@ http_poll:
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_conn_done:
 
+    /* Split the URI at the first '?', if any. The path half (bytes
+     * before '?') is what route matching sees; the query half stays
+     * accessible via HCONN_QUERY_START/LEN for handlers that care. */
+    strh    wzr, [x20, #HCONN_QUERY_START]
+    strh    wzr, [x20, #HCONN_QUERY_LEN]
+    ldrh    w0, [x20, #HCONN_URI_START]
+    ldrh    w1, [x20, #HCONN_URI_LEN]
+    add     x3, x22, w0, uxtw       /* URI ptr in rx buffer */
+    mov     w4, #0                  /* cursor through URI */
+.Lhp_qs_scan:
+    cmp     w4, w1
+    b.hs    .Lhp_qs_done
+    ldrb    w5, [x3, w4, uxtw]
+    cmp     w5, #'?'
+    b.eq    .Lhp_qs_split
+    add     w4, w4, #1
+    b       .Lhp_qs_scan
+
+.Lhp_qs_split:
+    strh    w4, [x20, #HCONN_URI_LEN]       /* path = bytes before '?' */
+    add     w5, w0, w4
+    add     w5, w5, #1                       /* skip the '?' */
+    strh    w5, [x20, #HCONN_QUERY_START]
+    sub     w5, w1, w4
+    sub     w5, w5, #1                       /* query_len = orig_uri_len - path_len - 1 */
+    strh    w5, [x20, #HCONN_QUERY_LEN]
+
+.Lhp_qs_done:
+
     /* POST requires Content-Length per RFC 7230 §3.3.3. If HFLAG_POST
      * is set but HFLAG_CL_SEEN is not, reject with 411 before any
      * body handling. */

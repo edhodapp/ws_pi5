@@ -56,6 +56,8 @@
 .equ HCONN_METHOD_LEN,  42      /* u16 — method string length */
 .equ HCONN_REQ_LEN,     44      /* u32 — total request length (for pipelining) */
 .equ HCONN_HDR_NM_START, 48     /* u16 — header name start (temp for Host check) */
+.equ HCONN_QUERY_START, 50      /* u16 — offset in rx buffer where query string starts (0 = absent) */
+.equ HCONN_QUERY_LEN,   52      /* u16 — query string length (0 = absent) */
 /* Reused after parse completes (SENDING state): */
 .equ HCONN_HDR_SRC_PTR, 48     /* u64 — response header source pointer */
 .equ HCONN_HDR_SRC_LEN, 56     /* u32 — response header source length */

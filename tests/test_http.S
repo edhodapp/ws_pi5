@@ -69,6 +69,7 @@ test_http:
     bl      test_http_guestbook_post
     bl      test_http_guestbook_get_render
     bl      test_http_form_log_post
+    bl      test_http_query_string_split
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2815,6 +2816,78 @@ test_http_form_log_post:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_query_string_split — a URI containing a query string
+ * still dispatches to the path's route.
+ *
+ * GET /counter?foo=bar should match the /counter route and run the
+ * counter handler. Today the route matcher compares the entire URI
+ * verbatim, so /counter?foo=bar → 404. After the fix, the URI gets
+ * split at the first '?'; the path half ("/counter") is what route
+ * matching sees, and the query half is recorded separately on HCONN
+ * for later handler access.
+ *
+ * Asserted via counter_store advance (the handler ran) and 200
+ * status (not 404).
+ * ======================================================================== */
+test_http_query_string_split:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* Baseline counter value */
+    ldr     x0, =counter_store
+    ldr     w20, [x0, #STORE_WRITTEN]
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_counter_q_request
+    ldr     w2, =thttp_get_counter_q_request_len
+.Lhqs_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhqs_cp
+    ldr     w0, =thttp_get_counter_q_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hqs
+
+    /* Counter handler must have run — records_written advanced */
+    ldr     x0, =counter_store
+    ldr     w1, [x0, #STORE_WRITTEN]
+    cmp     w1, w20
+    b.eq    .Lfail_hqs               /* no advance → handler didn't run */
+
+    ldr     x0, =name_hqs
+    bl      test_pass
+    b       .Ldone_hqs
+.Lfail_hqs:
+    ldr     x0, =name_hqs
+    bl      test_fail
+.Ldone_hqs:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2938,6 +3011,11 @@ thttp_post_form_log_request_end:
 thttp_fl_needle:
     .ascii  "name=alice"
 
+thttp_get_counter_q_request:
+    .ascii  "GET /counter?foo=bar HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_get_counter_q_request_end:
+.equ thttp_get_counter_q_request_len, thttp_get_counter_q_request_end - thttp_get_counter_q_request
+
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_head_request_end:
@@ -3056,6 +3134,7 @@ name_hci:   .asciz "http_counter_increments"
 name_hgp:   .asciz "http_guestbook_post"
 name_hgr:   .asciz "http_guestbook_get_render"
 name_hfl:   .asciz "http_form_log_post"
+name_hqs:   .asciz "http_query_string_split"
 
 .section .data
 .balign 16
