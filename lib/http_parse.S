@@ -297,6 +297,12 @@ http_parse_request:
     mov     w8, #10
     mul     w2, w2, w8
     add     w2, w2, w1
+    /* Stop once the accumulator exceeds HTTP_MAX_RECV_BODY. This keeps
+     * w2 well under 2^32 so the next multiply can never wrap silently,
+     * and the stored value still exceeds the 413 threshold downstream.
+     * Remaining digits in the value are left for the FSA to consume. */
+    cmp     w2, #HTTP_MAX_RECV_BODY
+    b.hi    .Lhdr_cl_store
     add     w0, w0, #1
     b       .Lhdr_cl_loop
 

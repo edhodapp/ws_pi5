@@ -59,6 +59,7 @@ test_http:
     bl      test_http_post_body_copied
     bl      test_http_post_body_to_handler
     bl      test_http_post_oversize_413
+    bl      test_http_post_cl_overflow_413
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2033,6 +2034,66 @@ test_http_post_oversize_413:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_cl_overflow_413 — a Content-Length that would wrap
+ * around u32 to a small value must still be rejected with 413.
+ *
+ * "4294967396" decimal = 2^32 + 100. Without clamping, the digit
+ * accumulator silently wraps to 100 — which is below
+ * HTTP_MAX_RECV_BODY (1024), so the oversize check in the body-copy
+ * block lets the request through and the handler sees 100 bytes of
+ * whatever was after the headers. With clamping, the accumulator
+ * stops once it crosses HTTP_MAX_RECV_BODY (four digits in: 4294),
+ * and the 413 path fires.
+ * ======================================================================== */
+test_http_post_cl_overflow_413:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_cl_overflow_request
+    ldr     w2, =thttp_post_cl_overflow_request_len
+.Lhpco_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpco_cp
+    ldr     w0, =thttp_post_cl_overflow_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_413
+    b.ne    .Lfail_hpco
+
+    ldr     x0, =name_hpco
+    bl      test_pass
+    b       .Ldone_hpco
+.Lfail_hpco:
+    ldr     x0, =name_hpco
+    bl      test_fail
+.Ldone_hpco:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2096,6 +2157,11 @@ thttp_post_oversize_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 2000\r\n\r\n"
 thttp_post_oversize_request_end:
 .equ thttp_post_oversize_request_len, thttp_post_oversize_request_end - thttp_post_oversize_request
+
+thttp_post_cl_overflow_request:
+    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 4294967396\r\n\r\n"
+thttp_post_cl_overflow_request_end:
+.equ thttp_post_cl_overflow_request_len, thttp_post_cl_overflow_request_end - thttp_post_cl_overflow_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2206,6 +2272,7 @@ name_hclp:  .asciz "http_content_length_parsed"
 name_hpbc:  .asciz "http_post_body_copied"
 name_hpeh:  .asciz "http_post_body_to_handler"
 name_hpo4:  .asciz "http_post_oversize_413"
+name_hpco:  .asciz "http_post_cl_overflow_413"
 
 .section .data
 .balign 16
