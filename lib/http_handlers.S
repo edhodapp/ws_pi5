@@ -207,7 +207,10 @@ http_guestbook_handler:
     bl      store_read
     /* w0 = bytes copied (= GUESTBOOK_REC_BYTES for a valid entry) */
 
-    /* Emit bytes from slot until NUL or GUESTBOOK_REC_BYTES */
+    /* Emit bytes from slot until NUL or GUESTBOOK_REC_BYTES.
+     * HTML-escape the three characters that can break list structure
+     * or inject elements: '<' → "&lt;", '>' → "&gt;", '&' → "&amp;".
+     * Other bytes pass through. */
     ldr     x0, =guestbook_slot_buf
     mov     w1, #0                  /* byte index */
 .Lhgh_entry_bytes:
@@ -215,10 +218,39 @@ http_guestbook_handler:
     b.hs    .Lhgh_entry_done
     ldrb    w2, [x0, w1, uxtw]
     cbz     w2, .Lhgh_entry_done
-    /* Skip if we'd exceed max_len */
+
+    cmp     w2, #'<'
+    b.eq    .Lhgh_esc_lt
+    cmp     w2, #'>'
+    b.eq    .Lhgh_esc_gt
+    cmp     w2, #'&'
+    b.eq    .Lhgh_esc_amp
+
+    /* plain byte */
     cbz     w20, .Lhgh_close
     strb    w2, [x22], #1
     sub     w20, w20, #1
+    add     w1, w1, #1
+    b       .Lhgh_entry_bytes
+
+.Lhgh_esc_lt:
+    ldr     x2, =http_gb_esc_lt
+    mov     w3, #4                  /* "&lt;" */
+    bl      gb_emit_escape
+    add     w1, w1, #1
+    b       .Lhgh_entry_bytes
+
+.Lhgh_esc_gt:
+    ldr     x2, =http_gb_esc_gt
+    mov     w3, #4                  /* "&gt;" */
+    bl      gb_emit_escape
+    add     w1, w1, #1
+    b       .Lhgh_entry_bytes
+
+.Lhgh_esc_amp:
+    ldr     x2, =http_gb_esc_amp
+    mov     w3, #5                  /* "&amp;" */
+    bl      gb_emit_escape
     add     w1, w1, #1
     b       .Lhgh_entry_bytes
 
@@ -265,6 +297,24 @@ gb_emit_literal:
     sub     w20, w20, #1
     b       .Lgbe_loop
 .Lgbe_done:
+    ret
+
+/*
+ * gb_emit_escape — copy w3 bytes from x2 into the output cursor x22,
+ * advancing x22 and decrementing w20. Used for HTML entity replacement
+ * from the per-entry emit loop; does not disturb w1 (byte index) or
+ * x0 (slot base). Clobbers x4, x5.
+ */
+gb_emit_escape:
+.Lgbes_loop:
+    cbz     w3, .Lgbes_done
+    cbz     w20, .Lgbes_done
+    ldrb    w4, [x2], #1
+    strb    w4, [x22], #1
+    sub     w3, w3, #1
+    sub     w20, w20, #1
+    b       .Lgbes_loop
+.Lgbes_done:
     ret
 
 /*
@@ -399,6 +449,13 @@ http_gb_li_open:
     .ascii  "<li>"
 http_gb_li_close:
     .ascii  "</li>\n"
+
+http_gb_esc_lt:
+    .ascii  "&lt;"
+http_gb_esc_gt:
+    .ascii  "&gt;"
+http_gb_esc_amp:
+    .ascii  "&amp;"
 
 /*
  * guestbook_slot_buf — scratch used by the guestbook handler to zero-

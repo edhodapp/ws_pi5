@@ -70,6 +70,7 @@ test_http:
     bl      test_http_guestbook_get_render
     bl      test_http_form_log_post
     bl      test_http_query_string_split
+    bl      test_http_guestbook_html_escape
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2888,6 +2889,86 @@ test_http_query_string_split:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_guestbook_html_escape — guestbook render must HTML-escape
+ * user content so stored "<script>" cannot break out of the list.
+ *
+ * Seeds a 128-byte record containing the raw bytes "<script>x" and
+ * GETs /guestbook. Asserts two things:
+ *   - The escaped literal "&lt;script&gt;" appears in the body.
+ *   - The raw "<script>" bytes do NOT appear in the body.
+ *
+ * Together these prove the renderer transforms dangerous characters
+ * rather than emitting them verbatim.
+ * ======================================================================== */
+test_http_guestbook_html_escape:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x0, =guestbook_store
+    ldr     x1, =thttp_gb_script_padded
+    bl      store_append
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_guestbook_request
+    ldr     w2, =thttp_get_guestbook_request_len
+.Lhgesc_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhgesc_cp
+    ldr     w0, =thttp_get_guestbook_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hgesc
+
+    /* body must contain the escaped form "&lt;script&gt;" */
+    ldr     x0, [x20, #HCONN_BODY_PTR]
+    ldr     w1, [x20, #HCONN_BODY_LEN]
+    ldr     x2, =thttp_gb_needle_esc_script
+    mov     w3, #13                 /* strlen("&lt;script&gt;") */
+    bl      thttp_find_bytes
+    cbz     w0, .Lfail_hgesc
+
+    /* body must NOT contain raw "<script>" */
+    ldr     x0, [x20, #HCONN_BODY_PTR]
+    ldr     w1, [x20, #HCONN_BODY_LEN]
+    ldr     x2, =thttp_gb_needle_raw_script
+    mov     w3, #8                  /* strlen("<script>") */
+    bl      thttp_find_bytes
+    cbnz    w0, .Lfail_hgesc
+
+    ldr     x0, =name_hgesc
+    bl      test_pass
+    b       .Ldone_hgesc
+.Lfail_hgesc:
+    ldr     x0, =name_hgesc
+    bl      test_fail
+.Ldone_hgesc:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3002,6 +3083,17 @@ thttp_gb_hello_padded:
 
 thttp_gb_needle_hello:
     .ascii  "hello"
+
+.balign 16
+thttp_gb_script_padded:
+    .ascii  "<script>x"
+    .skip   119                     /* pad to 128 bytes */
+
+thttp_gb_needle_esc_script:
+    .ascii  "&lt;script&gt;"
+
+thttp_gb_needle_raw_script:
+    .ascii  "<script>"
 
 thttp_post_form_log_request:
     .ascii  "POST /form_log HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 23\r\n\r\nname=alice&msg=hi+there"
@@ -3135,6 +3227,7 @@ name_hgp:   .asciz "http_guestbook_post"
 name_hgr:   .asciz "http_guestbook_get_render"
 name_hfl:   .asciz "http_form_log_post"
 name_hqs:   .asciz "http_query_string_split"
+name_hgesc: .asciz "http_guestbook_html_escape"
 
 .section .data
 .balign 16
