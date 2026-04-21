@@ -286,7 +286,7 @@ $(BUILD)/vmio_engine.o: lib/vmio_engine.S include/vmio.inc | $(BUILD)
 $(BUILD)/store.o: lib/store.S include/store.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/http_handlers.o: lib/http_handlers.S include/store.inc | $(BUILD)
+$(BUILD)/http_handlers.o: lib/http_handlers.S include/store.inc include/http.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/net_cfg.o: lib/net_cfg.S include/net.inc | $(BUILD)

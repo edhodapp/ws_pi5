@@ -1052,6 +1052,17 @@ http_route_table:
     .word   1                       /* dynamic */
     .xword  http_counter_handler
 
+    /* Route 7: "/guestbook" (dynamic). POST appends to a ring store;
+     * GET will later render the entries as HTML. */
+    .word   10                      /* path_len = len("/guestbook") */
+    .word   0
+    .xword  http_path_guestbook
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .word   1
+    .xword  http_guestbook_handler
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -1075,6 +1086,9 @@ http_path_test_css:
 
 http_path_counter:
     .ascii  "/counter"
+
+http_path_guestbook:
+    .ascii  "/guestbook"
 
 http_test_dispatch_sentinel:
     .ascii  "DISPATCH_OK\n"

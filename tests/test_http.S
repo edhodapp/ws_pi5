@@ -66,6 +66,7 @@ test_http:
     bl      test_http_post_multi_packet_body
     bl      test_http_route_css_content_type
     bl      test_http_counter_increments
+    bl      test_http_guestbook_post
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2527,6 +2528,100 @@ test_http_counter_increments:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_guestbook_post — POSTing to /guestbook appends the body
+ * to guestbook_store. Asserts store_count increments and the stored
+ * entry's first 5 bytes equal "hello".
+ *
+ * Entries are zero-padded to rec_bytes (128). Only the first 5 bytes
+ * are asserted here; the rest are zero-init'd on the handler side so
+ * renderings can stop at the first NUL.
+ * ======================================================================== */
+test_http_guestbook_post:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* Record pre-state count (in case earlier tests posted here) */
+    ldr     x0, =guestbook_store
+    bl      store_count
+    mov     w20, w0
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_guestbook_request
+    ldr     w2, =thttp_post_guestbook_request_len
+.Lhgp_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhgp_cp
+    ldr     w0, =thttp_post_guestbook_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Count must have advanced by one */
+    ldr     x0, =guestbook_store
+    bl      store_count
+    sub     w0, w0, w20
+    cmp     w0, #1
+    b.ne    .Lfail_hgp
+
+    /* Read the newest entry (index = count - 1) into tstore_gb_out */
+    ldr     x0, =guestbook_store
+    bl      store_count
+    sub     w1, w0, #1
+    ldr     x0, =guestbook_store
+    ldr     x2, =tstore_gb_out
+    bl      store_read
+
+    /* First 5 bytes should be "hello" */
+    ldr     x0, =tstore_gb_out
+    ldrb    w1, [x0]
+    cmp     w1, #'h'
+    b.ne    .Lfail_hgp
+    ldrb    w1, [x0, #1]
+    cmp     w1, #'e'
+    b.ne    .Lfail_hgp
+    ldrb    w1, [x0, #2]
+    cmp     w1, #'l'
+    b.ne    .Lfail_hgp
+    ldrb    w1, [x0, #3]
+    cmp     w1, #'l'
+    b.ne    .Lfail_hgp
+    ldrb    w1, [x0, #4]
+    cmp     w1, #'o'
+    b.ne    .Lfail_hgp
+
+    /* Byte 5 should be 0 (zero-padded) */
+    ldrb    w1, [x0, #5]
+    cbnz    w1, .Lfail_hgp
+
+    ldr     x0, =name_hgp
+    bl      test_pass
+    b       .Ldone_hgp
+.Lfail_hgp:
+    ldr     x0, =name_hgp
+    bl      test_fail
+.Ldone_hgp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2623,6 +2718,11 @@ thttp_get_counter_request:
     .ascii  "GET /counter HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_get_counter_request_end:
 .equ thttp_get_counter_request_len, thttp_get_counter_request_end - thttp_get_counter_request
+
+thttp_post_guestbook_request:
+    .ascii  "POST /guestbook HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
+thttp_post_guestbook_request_end:
+.equ thttp_post_guestbook_request_len, thttp_post_guestbook_request_end - thttp_post_guestbook_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2739,6 +2839,7 @@ name_hpdc:  .asciz "http_post_dup_cl_400"
 name_hpmp:  .asciz "http_post_multi_packet_body"
 name_hcss:  .asciz "http_route_css_content_type"
 name_hci:   .asciz "http_counter_increments"
+name_hgp:   .asciz "http_guestbook_post"
 
 .section .data
 .balign 16
@@ -2756,3 +2857,7 @@ thttp_chunk_buf:
 .balign 4
 thttp_date_buf:
     .space  32
+
+.balign 16
+tstore_gb_out:
+    .space  128
