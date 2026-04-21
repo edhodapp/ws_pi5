@@ -54,7 +54,7 @@
 /* Reused after parse completes (SENDING state): */
 .equ HCONN_HDR_SRC_PTR, 48     /* u64 — response header source pointer */
 .equ HCONN_HDR_SRC_LEN, 56     /* u32 — response header source length */
-/* bytes 60-63: reserved */
+.equ HCONN_CONTENT_LEN, 60     /* u32 — parsed Content-Length header (0 if absent) */
 
 .equ HCONN_SIZE,        64
 .equ HCONN_SHIFT,       6       /* log2(64) */

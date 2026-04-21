@@ -160,6 +160,8 @@ http_parse_request:
     b.eq    .Lhdr_check_host_4
     cmp     w1, #10
     b.eq    .Lhdr_check_conn_10
+    cmp     w1, #14
+    b.eq    .Lhdr_check_cl_14
     b       .Lparse_advance
 
 .Lhdr_check_host_4:
@@ -255,6 +257,53 @@ http_parse_request:
     strb    w0, [x19, #HCONN_CLOSE_FOUND]
     b       .Lparse_advance
 
+.Lhdr_check_cl_14:
+    /* Case-insensitive compare against "content-length". */
+    ldr     x1, =http_content_length_name
+    mov     w2, #14
+.Lhdr_cl_cmp:
+    cbz     w2, .Lhdr_cl_match
+    ldrb    w7, [x20, w0, uxtw]
+    orr     w7, w7, #0x20
+    ldrb    w8, [x1], #1
+    cmp     w7, w8
+    b.ne    .Lparse_advance
+    add     w0, w0, #1
+    sub     w2, w2, #1
+    b       .Lhdr_cl_cmp
+
+.Lhdr_cl_match:
+    /* Name matches. Parse decimal value from w5+1 (past colon), skip
+     * leading OWS, accumulate digits. Non-digit terminates. */
+    add     w0, w5, #1
+.Lhdr_cl_skip_sp:
+    cmp     w0, w21
+    b.hs    .Lparse_advance
+    ldrb    w1, [x20, w0, uxtw]
+    cmp     w1, #' '
+    b.ne    .Lhdr_cl_digits
+    add     w0, w0, #1
+    b       .Lhdr_cl_skip_sp
+
+.Lhdr_cl_digits:
+    mov     w2, #0                  /* accumulator */
+.Lhdr_cl_loop:
+    cmp     w0, w21
+    b.hs    .Lhdr_cl_store
+    ldrb    w1, [x20, w0, uxtw]
+    sub     w1, w1, #'0'
+    cmp     w1, #9
+    b.hi    .Lhdr_cl_store
+    mov     w8, #10
+    mul     w2, w2, w8
+    add     w2, w2, w1
+    add     w0, w0, #1
+    b       .Lhdr_cl_loop
+
+.Lhdr_cl_store:
+    str     w2, [x19, #HCONN_CONTENT_LEN]
+    b       .Lparse_advance
+
 .Lact_req_done:
     /* Record total request length (offset + 1 = byte past final LF) */
     add     w0, w5, #1
@@ -324,6 +373,10 @@ http_fsa_table:
 /* Reference string for case-insensitive "connection" header match */
 http_conn_name:
     .ascii  "connection"
+
+/* Reference string for case-insensitive "content-length" header match */
+http_content_length_name:
+    .ascii  "content-length"
 
 /* ===================================================================
  * Character classification lookup table (256 bytes)

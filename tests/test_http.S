@@ -55,6 +55,7 @@ test_http:
     bl      test_http_resp_isolation
     bl      test_http_route_handler_dispatch
     bl      test_http_post_accepted
+    bl      test_http_content_length_parsed
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1768,6 +1769,53 @@ test_http_post_accepted:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_content_length_parsed — parser extracts Content-Length
+ * from the headers and stores the numeric value on HCONN.
+ *
+ * Feeds a POST with "Content-Length: 42" (no body required; parser
+ * terminates at \r\n\r\n regardless) and asserts HCONN_CONTENT_LEN
+ * is 42 afterward. This value drives future body accumulation.
+ * ======================================================================== */
+test_http_content_length_parsed:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      http_init
+
+    /* Zero HCONN[0] for a clean parse state */
+    ldr     x19, =http_conn_table
+    mov     w1, #HCONN_SIZE / 8
+    mov     x0, x19
+.Lhclp_z:
+    str     xzr, [x0], #8
+    subs    w1, w1, #1
+    b.ne    .Lhclp_z
+
+    /* Parse request with Content-Length: 42 */
+    mov     x0, x19
+    ldr     x1, =thttp_post_cl42_request
+    ldr     w2, =thttp_post_cl42_request_len
+    bl      http_parse_request
+
+    cmp     w0, #S_DONE
+    b.ne    .Lfail_hclp
+
+    ldr     w0, [x19, #HCONN_CONTENT_LEN]
+    cmp     w0, #42
+    b.ne    .Lfail_hclp
+
+    ldr     x0, =name_hclp
+    bl      test_pass
+    b       .Ldone_hclp
+.Lfail_hclp:
+    ldr     x0, =name_hclp
+    bl      test_fail
+.Ldone_hclp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1811,6 +1859,11 @@ thttp_put_request:
     .ascii  "PUT / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_put_request_end:
 .equ thttp_put_request_len, thttp_put_request_end - thttp_put_request
+
+thttp_post_cl42_request:
+    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 42\r\n\r\n"
+thttp_post_cl42_request_end:
+.equ thttp_post_cl42_request_len, thttp_post_cl42_request_end - thttp_post_cl42_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -1917,6 +1970,7 @@ name_hrds:  .asciz "http_reset_during_send"
 name_hri:   .asciz "http_resp_isolation"
 name_hrhd:  .asciz "http_route_handler_dispatch"
 name_hpa:   .asciz "http_post_accepted"
+name_hclp:  .asciz "http_content_length_parsed"
 
 .section .data
 .balign 16
