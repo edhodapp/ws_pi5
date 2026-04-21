@@ -5,6 +5,7 @@
 .equ HTTPS_RECV_HDR,    1       /* accumulating request headers */
 .equ HTTPS_SENDING,     2       /* sending response (headers + body) */
 .equ HTTPS_DONE,        3       /* response complete, close pending */
+.equ HTTPS_RECV_BODY,   4       /* parsed headers, waiting for rest of body */
 
 /* HTTP response status codes (stored in HCONN_STATUS) */
 .equ HSTATUS_200,       0       /* 200 OK */

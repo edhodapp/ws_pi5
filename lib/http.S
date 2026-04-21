@@ -93,6 +93,10 @@ http_poll:
     cmp     w0, #HTTPS_SENDING
     b.eq    .Lhp_send_chunk
 
+    /* RECV_BODY → resume body accumulation */
+    cmp     w0, #HTTPS_RECV_BODY
+    b.eq    .Lhp_resume_body
+
     b       .Lhp_next
 
 .Lhp_not_estab:
@@ -145,6 +149,31 @@ http_poll:
     cmp     w0, #S_ERROR
     b.eq    .Lhp_bad_request
     b       .Lhp_next                   /* need more data */
+
+.Lhp_resume_body:
+    /* Slowloris also applies to RECV_BODY: a client that trickles the
+     * body across packets must still complete within the total recv
+     * window (measured from when RECV_HDR started). Same timer, same
+     * threshold. */
+    bl      timer_now
+    ldr     w1, [x20, #HCONN_RECV_TICK]
+    sub     w24, w0, w1
+    bl      timer_freq
+    mov     w1, #HTTP_RECV_TIMEOUT_SECS
+    mul     w0, w0, w1
+    cmp     w24, w0
+    b.hs    .Lhp_slowloris_close
+
+    /* If no new data, stay in RECV_BODY */
+    ldrh    w0, [x19, #TCONN_RXLEN]
+    cbz     w0, .Lhp_next
+    mov     x0, x19
+    bl      tcp_rx_peek
+    mov     x22, x0
+    mov     w23, w1
+    /* Re-enter the body-check block; header fields on HCONN are
+     * unchanged since the first time we reached S_DONE. */
+    b       .Lhp_body_check
 
 .Lhp_fsa_done:
     /* --- FSA completed: extract fields and set up response ---
@@ -259,12 +288,13 @@ http_poll:
     cmp     w1, #HFLAG_POST
     b.eq    .Lhp_resp_411
 
-    /* If Content-Length > 0, copy body bytes from the rx buffer into
-     * this HCONN's slot of http_body_recv_bufs. Bounds:
+    /* Body check. Reachable from fresh-dispatch (fall-through from the
+     * 411 check above) and from .Lhp_resume_body when a HTTPS_RECV_BODY
+     * connection sees new rx data. Bounds:
      *   - CL must fit the per-slot buffer (HTTP_MAX_RECV_BODY)
-     *   - REQ_LEN + CL must fit the rx data we've peeked (w23)
-     * Either miss → skip copy; 413 / multi-packet handling is a
-     * later step, so handlers simply see no body for now. */
+     *   - REQ_LEN + CL must fit the rx peek (w23); otherwise wait for
+     *     more data via HTTPS_RECV_BODY. */
+.Lhp_body_check:
     ldr     w0, [x20, #HCONN_CONTENT_LEN]
     cbz     w0, .Lhp_body_done
     cmp     w0, #HTTP_MAX_RECV_BODY
@@ -272,7 +302,7 @@ http_poll:
     ldr     w1, [x20, #HCONN_REQ_LEN]
     add     w2, w1, w0
     cmp     w2, w23
-    b.hi    .Lhp_body_done          /* partial — deferred (multi-packet) */
+    b.hi    .Lhp_wait_body          /* partial → wait for more rx */
 
     /* source = rx buffer + REQ_LEN */
     add     x2, x22, x1, uxtw
@@ -597,6 +627,13 @@ http_poll:
     strb    wzr, [x20, #HCONN_STATE]
     strb    wzr, [x20, #HCONN_FLAGS]
     str     wzr, [x20, #HCONN_CONTENT_LEN]
+    b       .Lhp_next
+
+.Lhp_wait_body:
+    /* Body incomplete — park in HTTPS_RECV_BODY and let the next poll
+     * iteration resume via .Lhp_resume_body when more rx arrives. */
+    mov     w0, #HTTPS_RECV_BODY
+    strb    w0, [x20, #HCONN_STATE]
     b       .Lhp_next
 
 .Lhp_next:

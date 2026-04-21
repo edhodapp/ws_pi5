@@ -62,6 +62,7 @@ test_http:
     bl      test_http_post_cl_overflow_413
     bl      test_http_post_no_cl_411
     bl      test_http_post_dup_cl_400
+    bl      test_http_post_multi_packet_body
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2214,6 +2215,108 @@ test_http_post_dup_cl_400:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_multi_packet_body — a body that arrives across two
+ * TCP segments must accumulate into http_body_recv_bufs and dispatch
+ * only when complete.
+ *
+ * Puts the request headers plus the first 2 body bytes in rx and
+ * calls http_poll. State must transition to HTTPS_RECV_BODY (parser
+ * reached S_DONE, body not complete). Appends the remaining 3 body
+ * bytes, calls http_poll again. State must transition to
+ * HTTPS_SENDING and http_body_recv_bufs[0] must contain the full
+ * "hello".
+ * ======================================================================== */
+test_http_post_multi_packet_body:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    /* Copy headers + first 2 body bytes ("he") into rx */
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_mp_part1
+    ldr     w2, =thttp_post_mp_part1_len
+.Lhpmp_cp1:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpmp_cp1
+    ldr     w0, =thttp_post_mp_part1_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    /* First poll: should transition to HTTPS_RECV_BODY */
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_RECV_BODY
+    b.ne    .Lfail_hpmp
+
+    /* Append the remaining 3 body bytes ("llo") to rx */
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     w1, =thttp_post_mp_part1_len
+    add     x0, x0, x1, uxtw
+    ldr     x1, =thttp_post_mp_part2
+    mov     w2, #3
+.Lhpmp_cp2:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpmp_cp2
+    ldr     w0, =thttp_post_mp_part1_len
+    add     w0, w0, #3
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    /* Second poll: should dispatch (state → SENDING, body complete) */
+    bl      http_poll
+
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hpmp
+
+    /* http_body_recv_bufs[0..5] == "hello" */
+    ldr     x1, =http_body_recv_bufs
+    ldrb    w0, [x1]
+    cmp     w0, #'h'
+    b.ne    .Lfail_hpmp
+    ldrb    w0, [x1, #1]
+    cmp     w0, #'e'
+    b.ne    .Lfail_hpmp
+    ldrb    w0, [x1, #2]
+    cmp     w0, #'l'
+    b.ne    .Lfail_hpmp
+    ldrb    w0, [x1, #3]
+    cmp     w0, #'l'
+    b.ne    .Lfail_hpmp
+    ldrb    w0, [x1, #4]
+    cmp     w0, #'o'
+    b.ne    .Lfail_hpmp
+
+    ldr     x0, =name_hpmp
+    bl      test_pass
+    b       .Ldone_hpmp
+.Lfail_hpmp:
+    ldr     x0, =name_hpmp
+    bl      test_fail
+.Ldone_hpmp:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2292,6 +2395,14 @@ thttp_post_dup_cl_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\nContent-Length: 99\r\n\r\n"
 thttp_post_dup_cl_request_end:
 .equ thttp_post_dup_cl_request_len, thttp_post_dup_cl_request_end - thttp_post_dup_cl_request
+
+thttp_post_mp_part1:
+    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhe"
+thttp_post_mp_part1_end:
+.equ thttp_post_mp_part1_len, thttp_post_mp_part1_end - thttp_post_mp_part1
+
+thttp_post_mp_part2:
+    .ascii  "llo"
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2405,6 +2516,7 @@ name_hpo4:  .asciz "http_post_oversize_413"
 name_hpco:  .asciz "http_post_cl_overflow_413"
 name_hpnc:  .asciz "http_post_no_cl_411"
 name_hpdc:  .asciz "http_post_dup_cl_400"
+name_hpmp:  .asciz "http_post_multi_packet_body"
 
 .section .data
 .balign 16
