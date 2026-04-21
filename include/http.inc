@@ -58,6 +58,15 @@
 
 .equ HCONN_SIZE,        64
 .equ HCONN_SHIFT,       6       /* log2(64) */
+
+/* Invariant lock: .Lhp_dynamic uses `lsr #HCONN_SHIFT` to derive the
+ * HCONN index from a byte offset into http_conn_table. If HCONN_SIZE
+ * ever drifts from (1 << HCONN_SHIFT), that addressing silently yields
+ * wrong buffer offsets. Catch it at assembly time. */
+.if HCONN_SIZE != (1 << HCONN_SHIFT)
+.error "HCONN_SIZE must equal (1 << HCONN_SHIFT)"
+.endif
+
 .equ HTTP_MAX_CONNS,    128
 .equ HTTP_CONN_TABLE_SIZE, 8192 /* 128 * 64 */
 
@@ -116,6 +125,7 @@
 .equ ROUTE_HDR_PTR,    24      /* u64 — pointer to header template */
 .equ ROUTE_HDR_LEN,    32      /* u32 — header template length */
 .equ ROUTE_FLAGS,      36      /* u32 — 0=static, 1=dynamic (chunked) */
+.equ ROUTE_HANDLER,    40      /* u64 — handler fn ptr (unused for static) */
 .equ ROUTE_SIZE,       48
 
 /* HTTP send context (same layout as TSCTX) */

@@ -53,6 +53,7 @@ test_http:
     bl      test_http_send_close
     bl      test_http_reset_during_send
     bl      test_http_resp_isolation
+    bl      test_http_route_handler_dispatch
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1625,6 +1626,88 @@ test_http_resp_isolation:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_route_handler_dispatch — the dispatch path invokes the
+ * handler pointer stored in the route entry's ROUTE_HANDLER field.
+ *
+ * Sets up HCONN[0] as ESTABLISHED with GET /_test_dispatch. That route's
+ * ROUTE_HANDLER points at http_test_dispatch_handler, which emits the
+ * sentinel "DISPATCH_OK\n" (12 bytes). The chunk encoder wraps it as
+ * "C\r\nDISPATCH_OK\n\r\n", so body_ptr[3] onward spells the sentinel.
+ *
+ * Asserts: body_ptr[3..5] == "DIS". This is only possible if the
+ * dispatcher loads the handler from ROUTE_HANDLER — a hardcoded
+ * http_status_generate would emit the status page instead, and a
+ * missing route would 404 with the static error body.
+ * ======================================================================== */
+test_http_route_handler_dispatch:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* TCONN slot 0: ESTABLISHED, GET /_test_dispatch */
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_test_dispatch_request
+    ldr     w2, =thttp_test_dispatch_request_len
+.Lhrhd_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhrhd_cp
+    ldr     w0, =thttp_test_dispatch_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    /* Mock send — dispatch runs, no real transmit */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Must reach SENDING with 200 status */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hrhd
+
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hrhd
+
+    /* body_ptr[3..5] should be 'D','I','S' from "DISPATCH_OK\n" after
+     * chunk framing "C\r\n..." */
+    ldr     x1, [x20, #HCONN_BODY_PTR]
+    ldrb    w0, [x1, #3]
+    cmp     w0, #'D'
+    b.ne    .Lfail_hrhd
+    ldrb    w0, [x1, #4]
+    cmp     w0, #'I'
+    b.ne    .Lfail_hrhd
+    ldrb    w0, [x1, #5]
+    cmp     w0, #'S'
+    b.ne    .Lfail_hrhd
+
+    ldr     x0, =name_hrhd
+    bl      test_pass
+    b       .Ldone_hrhd
+.Lfail_hrhd:
+    ldr     x0, =name_hrhd
+    bl      test_fail
+.Ldone_hrhd:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1709,6 +1792,11 @@ thttp_status_request:
 thttp_status_request_end:
 .equ thttp_status_request_len, thttp_status_request_end - thttp_status_request
 
+thttp_test_dispatch_request:
+    .ascii  "GET /_test_dispatch HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_test_dispatch_request_end:
+.equ thttp_test_dispatch_request_len, thttp_test_dispatch_request_end - thttp_test_dispatch_request
+
 thttp_uri_root:
     .ascii  "/"
 
@@ -1762,6 +1850,7 @@ thttp_date_noleap2100_expected:
 name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
 name_hri:   .asciz "http_resp_isolation"
+name_hrhd:  .asciz "http_route_handler_dispatch"
 
 .section .data
 .balign 16

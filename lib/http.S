@@ -20,6 +20,7 @@
 .global http_match_uri
 .global http_find_host_header
 .global http_update_date
+.global http_test_dispatch_handler
 
 .section .text
 
@@ -54,7 +55,7 @@ http_set_send_ctx:
  * http_poll — Scan connections: parse requests, send responses
  *
  * Called from net_loop on every iteration.
- * Clobbers: x0-x8, x19-x24, x30 (x7, x8 are scratch for dynamic dispatch)
+ * Clobbers: x0-x9, x19-x24, x30 (x7-x9 scratch for dynamic dispatch)
  */
 http_poll:
     stp     x29, x30, [sp, #-96]!
@@ -289,14 +290,18 @@ http_poll:
     ldr     x8, =http_dyn_chunk_bufs
     add     x7, x8, x7              /* x7 = per-way chunk_buf */
 
+    /* Load the route's handler before saving x0, so the handler load
+     * doesn't depend on the stp ordering. */
+    ldr     x9, [x0, #ROUTE_HANDLER]
+
     /* Save route ptr, rx buf, body_buf, chunk_buf across function calls */
     stp     x0, x22, [sp, #64]
     stp     x6, x7, [sp, #80]
 
-    /* Generate body content into per-way body_buf */
+    /* Invoke handler(body_buf, max_len) → bytes written */
     mov     x0, x6                  /* body_buf */
     mov     w1, #HTTP_DYN_BODY_SIZE
-    bl      http_status_generate    /* w0 = body bytes */
+    blr     x9                      /* w0 = body bytes */
     mov     w23, w0                 /* w23 = body_len */
 
     /* Chunk-encode body into per-way chunk_buf */
@@ -747,6 +752,32 @@ http_update_date:
     ldp     x29, x30, [sp], #32
     ret
 
+/*
+ * http_test_dispatch_handler — Emits the sentinel "DISPATCH_OK\n"
+ * for the /_test_dispatch route. Used by
+ * test_http_route_handler_dispatch to verify the dispatch path loads
+ * handlers from ROUTE_HANDLER rather than hardcoding one function.
+ *
+ * x0: output buffer, w1: max buffer size
+ * Returns: w0 = 12 on success, 0 if buffer is too small
+ * Clobbers: x0-x4
+ */
+http_test_dispatch_handler:
+    cmp     w1, #12
+    b.lo    .Lhtd_short
+    ldr     x2, =http_test_dispatch_sentinel
+    mov     w3, #12
+.Lhtd_cp:
+    ldrb    w4, [x2], #1
+    strb    w4, [x0], #1
+    subs    w3, w3, #1
+    b.ne    .Lhtd_cp
+    mov     w0, #12
+    ret
+.Lhtd_short:
+    mov     w0, #0
+    ret
+
 /* ===================================================================
  * Route table
  * =================================================================== */
@@ -756,23 +787,25 @@ http_update_date:
 .global http_route_count
 
 http_route_table:
-    /* Route 0: "/" */
+    /* Route 0: "/" (static) */
     .word   1                       /* path_len */
     .word   http_200_body_len       /* body_len */
     .xword  http_path_root          /* path_ptr */
     .xword  http_200_body           /* body_ptr */
     .xword  http_200_hdr            /* hdr_ptr */
     .word   http_200_hdr_len        /* hdr_len */
-    .word   0, 0, 0                 /* pad to 48 */
+    .word   0                       /* flags=0 (static) */
+    .xword  0                       /* ROUTE_HANDLER unused */
 
-    /* Route 1: "/about" */
+    /* Route 1: "/about" (static) */
     .word   6                       /* path_len */
     .word   http_about_body_len     /* body_len */
     .xword  http_path_about         /* path_ptr */
     .xword  http_about_body         /* body_ptr */
     .xword  http_about_hdr          /* hdr_ptr */
     .word   http_about_hdr_len      /* hdr_len */
-    .word   0, 0, 0                 /* pad to 48 */
+    .word   0                       /* flags=0 (static) */
+    .xword  0                       /* ROUTE_HANDLER unused */
 
     /* Route 2: "/status" (dynamic — chunked encoding) */
     .word   7                       /* path_len */
@@ -781,7 +814,21 @@ http_route_table:
     .xword  0                       /* body_ptr = unused */
     .xword  http_status_hdr         /* hdr_ptr */
     .word   http_status_hdr_len     /* hdr_len */
-    .word   1, 0, 0                 /* flags=1 (dynamic) + pad */
+    .word   1                       /* flags=1 (dynamic) */
+    .xword  http_status_generate    /* ROUTE_HANDLER */
+
+    /* Route 3: "/_test_dispatch" (dynamic, test-only sentinel).
+     * Baked into production because exercising route dispatch from
+     * tests requires a second handler; impact is 48 B of rodata plus
+     * a short handler. Not exposed via the packager. */
+    .word   15                      /* path_len = len("/_test_dispatch") */
+    .word   0                       /* body_len = 0 (dynamic) */
+    .xword  http_path_test_dispatch /* path_ptr */
+    .xword  0                       /* body_ptr = unused */
+    .xword  http_status_hdr         /* hdr_ptr — reuse chunked header */
+    .word   http_status_hdr_len     /* hdr_len */
+    .word   1                       /* flags=1 (dynamic) */
+    .xword  http_test_dispatch_handler /* ROUTE_HANDLER */
 
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
@@ -794,6 +841,12 @@ http_path_about:
 
 http_path_status:
     .ascii  "/status"
+
+http_path_test_dispatch:
+    .ascii  "/_test_dispatch"
+
+http_test_dispatch_sentinel:
+    .ascii  "DISPATCH_OK\n"
 
 /* ===================================================================
  * Response data
