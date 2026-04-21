@@ -113,24 +113,23 @@ http_counter_handler:
 .equ GUESTBOOK_CAP,       16
 
 http_guestbook_handler:
-    stp     x29, x30, [sp, #-48]!
+    stp     x29, x30, [sp, #-64]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
 
-    mov     x19, x0                 /* save out */
+    mov     x19, x0                 /* save out base */
     mov     w20, w1                 /* save max_len */
     mov     x21, x2                 /* save HCONN */
 
     /* GET vs POST: HFLAG_POST set iff method was POST */
     ldrb    w0, [x21, #HCONN_FLAGS]
     tst     w0, #HFLAG_POST
-    b.eq    .Lhgh_emit
+    b.eq    .Lhgh_get
 
     /* --- POST path: copy body into guestbook_slot_buf (zero-padded),
-     * then store_append. The slot buffer is static BSS shared across
-     * all handler invocations — safe because http_poll runs handlers
-     * serially within a single poll tick, and the slot buffer is no
-     * longer needed after store_append returns. */
+     * then store_append. Serialized use of the shared slot buffer is
+     * safe under the single-threaded poll loop. */
     ldr     x22, =guestbook_slot_buf
     mov     x0, x22
     mov     w3, #GUESTBOOK_REC_BYTES / 8
@@ -146,7 +145,6 @@ http_guestbook_handler:
     ldr     x1, =http_body_recv_bufs
     add     x0, x1, x0, lsl #HTTP_MAX_RECV_BODY_SHIFT
 
-    /* Copy min(CL, GUESTBOOK_REC_BYTES) bytes */
     ldr     w3, [x21, #HCONN_CONTENT_LEN]
     mov     w4, #GUESTBOOK_REC_BYTES
     cmp     w3, w4
@@ -165,17 +163,106 @@ http_guestbook_handler:
     mov     x1, x22
     bl      store_append
 
-.Lhgh_emit:
-    /* Minimal response: "OK" (2 bytes). Phase B will render entries. */
+    /* POST response: "OK" */
     mov     w0, #'O'
     strb    w0, [x19]
     mov     w0, #'K'
     strb    w0, [x19, #1]
     mov     w0, #2
+    b       .Lhgh_ret
 
+.Lhgh_get:
+    /* --- GET path: render "<ul>\n<li>ENTRY</li>\n...</ul>\n".
+     * x22 = output cursor (advances through the out buffer).
+     * x23 = count; x24 = current entry index.
+     * The handler keeps a running count of remaining max_len via w20
+     * and truncates if it would overflow. */
+
+    mov     x22, x19                /* cursor = out base */
+
+    ldr     x0, =http_gb_ul_open
+    mov     w1, #5                  /* "<ul>\n" */
+    bl      gb_emit_literal
+
+    ldr     x0, =guestbook_store
+    bl      store_count
+    mov     w23, w0
+    mov     w24, #0
+
+.Lhgh_entry_loop:
+    cmp     w24, w23
+    b.hs    .Lhgh_close
+
+    /* "<li>" (4 bytes) */
+    ldr     x0, =http_gb_li_open
+    mov     w1, #4
+    bl      gb_emit_literal
+
+    /* Read entry index=w24 into guestbook_slot_buf */
+    ldr     x0, =guestbook_store
+    mov     w1, w24
+    ldr     x2, =guestbook_slot_buf
+    bl      store_read
+    /* w0 = bytes copied (= GUESTBOOK_REC_BYTES for a valid entry) */
+
+    /* Emit bytes from slot until NUL or GUESTBOOK_REC_BYTES */
+    ldr     x0, =guestbook_slot_buf
+    mov     w1, #0                  /* byte index */
+.Lhgh_entry_bytes:
+    cmp     w1, #GUESTBOOK_REC_BYTES
+    b.hs    .Lhgh_entry_done
+    ldrb    w2, [x0, w1, uxtw]
+    cbz     w2, .Lhgh_entry_done
+    /* Skip if we'd exceed max_len */
+    cbz     w20, .Lhgh_close
+    strb    w2, [x22], #1
+    sub     w20, w20, #1
+    add     w1, w1, #1
+    b       .Lhgh_entry_bytes
+
+.Lhgh_entry_done:
+    /* "</li>\n" (6 bytes) */
+    ldr     x0, =http_gb_li_close
+    mov     w1, #6
+    bl      gb_emit_literal
+
+    add     w24, w24, #1
+    b       .Lhgh_entry_loop
+
+.Lhgh_close:
+    /* "</ul>\n" (6 bytes) */
+    ldr     x0, =http_gb_ul_close
+    mov     w1, #6
+    bl      gb_emit_literal
+
+    /* Return bytes written = cursor - base */
+    sub     x0, x22, x19
+
+.Lhgh_ret:
+    ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #48
+    ldp     x29, x30, [sp], #64
+    ret
+
+/*
+ * gb_emit_literal — copy w1 bytes from x0 into the output cursor x22,
+ * advancing x22 and decrementing w20 (remaining capacity). Truncates
+ * silently if w20 reaches 0.
+ *
+ * Private helper for http_guestbook_handler; reads/writes x22 and w20.
+ * Clobbers x0, w1, w2.
+ */
+gb_emit_literal:
+.Lgbe_loop:
+    cbz     w1, .Lgbe_done
+    cbz     w20, .Lgbe_done
+    ldrb    w2, [x0], #1
+    strb    w2, [x22], #1
+    sub     w1, w1, #1
+    sub     w20, w20, #1
+    b       .Lgbe_loop
+.Lgbe_done:
     ret
 
 /*
@@ -206,9 +293,25 @@ guestbook_store:
     .space  GUESTBOOK_CAP * GUESTBOOK_REC_BYTES
 
 /*
+ * HTML fragments for guestbook rendering. Kept as plain ASCII in
+ * .rodata; the handler copies them through the per-HCONN output
+ * buffer via gb_emit_literal.
+ */
+.section .rodata
+http_gb_ul_open:
+    .ascii  "<ul>\n"
+http_gb_ul_close:
+    .ascii  "</ul>\n"
+http_gb_li_open:
+    .ascii  "<li>"
+http_gb_li_close:
+    .ascii  "</li>\n"
+
+/*
  * guestbook_slot_buf — scratch used by the guestbook handler to zero-
- * pad a request body before store_append. Shared across handler
- * invocations (serialized by the single-threaded poll loop).
+ * pad a request body before store_append (POST), and to read entries
+ * into during rendering (GET). Shared across handler invocations
+ * (serialized by the single-threaded poll loop).
  */
 .section .bss
 .balign 16

@@ -67,6 +67,7 @@ test_http:
     bl      test_http_route_css_content_type
     bl      test_http_counter_increments
     bl      test_http_guestbook_post
+    bl      test_http_guestbook_get_render
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2622,6 +2623,121 @@ test_http_guestbook_post:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_guestbook_get_render — GET /guestbook renders stored
+ * entries as an HTML list. Seeds a 128-byte "hello" record directly
+ * via store_append, fires GET, then scans the chunk-encoded response
+ * body for the literal bytes "hello".
+ *
+ * Scanning for a substring makes the test robust across chunk-prefix
+ * length variations — the handler output's exact byte size may shift
+ * with other content changes.
+ * ======================================================================== */
+test_http_guestbook_get_render:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* Pre-seed a "hello" entry directly into guestbook_store. The
+     * source is a 128-byte rodata record so store_append reads a
+     * known, properly-sized buffer. */
+    ldr     x0, =guestbook_store
+    ldr     x1, =thttp_gb_hello_padded
+    bl      store_append
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_guestbook_request
+    ldr     w2, =thttp_get_guestbook_request_len
+.Lhgr_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhgr_cp
+    ldr     w0, =thttp_get_guestbook_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Reach SENDING with status 200 */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hgr
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hgr
+
+    /* Scan body_ptr[0..body_len] for the literal bytes "hello" */
+    ldr     x0, [x20, #HCONN_BODY_PTR]
+    ldr     w1, [x20, #HCONN_BODY_LEN]
+    ldr     x2, =thttp_gb_needle_hello
+    mov     w3, #5
+    bl      thttp_find_bytes
+    cbz     w0, .Lfail_hgr
+
+    ldr     x0, =name_hgr
+    bl      test_pass
+    b       .Ldone_hgr
+.Lfail_hgr:
+    ldr     x0, =name_hgr
+    bl      test_fail
+.Ldone_hgr:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * thttp_find_bytes(x0: haystack, w1: hay_len, x2: needle, w3: needle_len)
+ * Returns w0 = 1 if the needle appears anywhere in the haystack, 0 otherwise.
+ * Leaf; clobbers x0-x9.
+ */
+thttp_find_bytes:
+    cbz     w3, .Ltfb_yes            /* empty needle trivially matches */
+    cmp     w1, w3
+    b.lo    .Ltfb_no                 /* haystack shorter than needle */
+
+    sub     w4, w1, w3               /* last valid start offset */
+    mov     w5, #0                   /* cursor */
+.Ltfb_outer:
+    cmp     w5, w4
+    b.hi    .Ltfb_no
+    mov     w6, #0
+.Ltfb_inner:
+    cmp     w6, w3
+    b.hs    .Ltfb_yes
+    add     w7, w5, w6
+    ldrb    w8, [x0, w7, uxtw]
+    ldrb    w9, [x2, w6, uxtw]
+    cmp     w8, w9
+    b.ne    .Ltfb_advance
+    add     w6, w6, #1
+    b       .Ltfb_inner
+
+.Ltfb_advance:
+    add     w5, w5, #1
+    b       .Ltfb_outer
+
+.Ltfb_yes:
+    mov     w0, #1
+    ret
+.Ltfb_no:
+    mov     w0, #0
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2723,6 +2839,19 @@ thttp_post_guestbook_request:
     .ascii  "POST /guestbook HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
 thttp_post_guestbook_request_end:
 .equ thttp_post_guestbook_request_len, thttp_post_guestbook_request_end - thttp_post_guestbook_request
+
+thttp_get_guestbook_request:
+    .ascii  "GET /guestbook HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_get_guestbook_request_end:
+.equ thttp_get_guestbook_request_len, thttp_get_guestbook_request_end - thttp_get_guestbook_request
+
+.balign 16
+thttp_gb_hello_padded:
+    .ascii  "hello"
+    .skip   123                     /* pad to 128 bytes for store_append */
+
+thttp_gb_needle_hello:
+    .ascii  "hello"
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2840,6 +2969,7 @@ name_hpmp:  .asciz "http_post_multi_packet_body"
 name_hcss:  .asciz "http_route_css_content_type"
 name_hci:   .asciz "http_counter_increments"
 name_hgp:   .asciz "http_guestbook_post"
+name_hgr:   .asciz "http_guestbook_get_render"
 
 .section .data
 .balign 16
