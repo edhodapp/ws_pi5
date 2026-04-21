@@ -63,6 +63,7 @@ test_http:
     bl      test_http_post_no_cl_411
     bl      test_http_post_dup_cl_400
     bl      test_http_post_multi_packet_body
+    bl      test_http_route_css_content_type
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2317,6 +2318,119 @@ test_http_post_multi_packet_body:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_route_css_content_type — a static route with Content-Type
+ * other than text/html is served correctly end-to-end.
+ *
+ * GETs /_test_css. That route's header template declares
+ * "Content-Type: text/css". After dispatch, HCONN_HDR_SRC_PTR should
+ * point at http_test_css_hdr, and the bytes at that address should
+ * contain "Content-Type: text/css".
+ *
+ * Validates that the runtime supports per-route Content-Type (the
+ * packager will lean on this for CSS/images/favicon); a hardcoded
+ * text/html assumption anywhere would cause the assertion to fail.
+ * ======================================================================== */
+test_http_route_css_content_type:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_test_css_request
+    ldr     w2, =thttp_get_test_css_request_len
+.Lhcss_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhcss_cp
+    ldr     w0, =thttp_get_test_css_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Must reach SENDING with 200 status */
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hcss
+
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hcss
+
+    /* Scan the selected header block for "text/css" (8 bytes).
+     * HCONN_HDR_SRC_PTR points at http_test_css_hdr; scan from there. */
+    ldr     x1, [x20, #HCONN_HDR_SRC_PTR]
+    ldr     w2, [x20, #HCONN_HDR_SRC_LEN]
+    /* sentinel bytes to find: 't','e','x','t','/','c','s','s' */
+    mov     w3, #0                      /* cursor */
+.Lhcss_scan:
+    add     w4, w3, #8
+    cmp     w4, w2
+    b.hi    .Lfail_hcss                 /* walked past end → not found */
+    ldrb    w4, [x1, w3, uxtw]
+    cmp     w4, #'t'
+    b.ne    .Lhcss_next
+    add     w4, w3, #1
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'e'
+    b.ne    .Lhcss_next
+    add     w4, w3, #2
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'x'
+    b.ne    .Lhcss_next
+    add     w4, w3, #3
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'t'
+    b.ne    .Lhcss_next
+    add     w4, w3, #4
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'/'
+    b.ne    .Lhcss_next
+    add     w4, w3, #5
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'c'
+    b.ne    .Lhcss_next
+    add     w4, w3, #6
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'s'
+    b.ne    .Lhcss_next
+    add     w4, w3, #7
+    ldrb    w4, [x1, w4, uxtw]
+    cmp     w4, #'s'
+    b.eq    .Lhcss_found
+
+.Lhcss_next:
+    add     w3, w3, #1
+    b       .Lhcss_scan
+
+.Lhcss_found:
+    ldr     x0, =name_hcss
+    bl      test_pass
+    b       .Ldone_hcss
+.Lfail_hcss:
+    ldr     x0, =name_hcss
+    bl      test_fail
+.Ldone_hcss:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2403,6 +2517,11 @@ thttp_post_mp_part1_end:
 
 thttp_post_mp_part2:
     .ascii  "llo"
+
+thttp_get_test_css_request:
+    .ascii  "GET /_test_css HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_get_test_css_request_end:
+.equ thttp_get_test_css_request_len, thttp_get_test_css_request_end - thttp_get_test_css_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2517,6 +2636,7 @@ name_hpco:  .asciz "http_post_cl_overflow_413"
 name_hpnc:  .asciz "http_post_no_cl_411"
 name_hpdc:  .asciz "http_post_dup_cl_400"
 name_hpmp:  .asciz "http_post_multi_packet_body"
+name_hcss:  .asciz "http_route_css_content_type"
 
 .section .data
 .balign 16

@@ -894,6 +894,10 @@ http_update_date:
     ldr     x1, =http_status_date
     bl      http_format_date
 
+    mov     x0, x19
+    ldr     x1, =http_test_css_date
+    bl      http_format_date
+
 .Lud_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
@@ -1024,6 +1028,18 @@ http_route_table:
     .word   1
     .xword  http_test_echo_handler
 
+    /* Route 5: "/_test_css" (static, test-only). Proves the runtime
+     * supports Content-Type other than text/html — the packager will
+     * rely on this for .css / .png / image/* assets. */
+    .word   10                      /* path_len = len("/_test_css") */
+    .word   http_test_css_body_len
+    .xword  http_path_test_css
+    .xword  http_test_css_body
+    .xword  http_test_css_hdr
+    .word   http_test_css_hdr_len
+    .word   0
+    .xword  0
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -1041,6 +1057,9 @@ http_path_test_dispatch:
 
 http_path_test_echo:
     .ascii  "/_test_echo"
+
+http_path_test_css:
+    .ascii  "/_test_css"
 
 http_test_dispatch_sentinel:
     .ascii  "DISPATCH_OK\n"
@@ -1156,6 +1175,31 @@ http_405_body:
     .ascii  "<body><h1>405 Method Not Allowed</h1></body></html>\n"
 http_405_body_end:
 .equ http_405_body_len, http_405_body_end - http_405_body
+
+.section .data
+.balign 4
+http_test_css_hdr:
+    .ascii  "HTTP/1.1 200 OK\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_test_css_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Content-Type: text/css\r\n"
+    .ascii  "Content-Length: 18\r\n"
+    .ascii  "\r\n"
+http_test_css_hdr_end:
+.equ http_test_css_hdr_len, http_test_css_hdr_end - http_test_css_hdr
+
+.section .rodata
+http_test_css_body:
+    .ascii  "body{color:#333;}\n"
+http_test_css_body_end:
+.equ http_test_css_body_len, http_test_css_body_end - http_test_css_body
+
+.if http_test_css_body_len != 18
+.error "http_test_css_body_len drifted from the 18 hardcoded in http_test_css_hdr"
+.endif
 
 .section .data
 .balign 4
