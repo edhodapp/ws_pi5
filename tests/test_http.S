@@ -73,6 +73,7 @@ test_http:
     bl      test_http_guestbook_html_escape
     bl      test_http_route_method_405
     bl      test_http_405_allow_per_route
+    bl      test_http_recv_body_slowloris
     ldp     x29, x30, [sp], #16
     ret
 
@@ -3101,6 +3102,70 @@ test_http_405_allow_per_route:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_recv_body_slowloris — a connection stuck in RECV_BODY
+ * past HTTP_RECV_TIMEOUT_SECS gets closed by the Slowloris check.
+ *
+ * Seeds HCONN[0] in HTTPS_RECV_BODY with HCONN_RECV_TICK shifted
+ * (freq * 31) ticks into the past, so http_poll's Slowloris gate
+ * fires immediately. The test asserts HCONN_STATE is back to
+ * HTTPS_IDLE after the poll, which is what the close path leaves
+ * behind — whether tcp_close itself succeeds or not, the reset
+ * path lands on IDLE.
+ * ======================================================================== */
+test_http_recv_body_slowloris:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    /* HCONN[0] in RECV_BODY */
+    ldr     x20, =http_conn_table
+    mov     w0, #HTTPS_RECV_BODY
+    strb    w0, [x20, #HCONN_STATE]
+
+    /* Push RECV_TICK (timer_freq * 31) ticks into the past so the
+     * Slowloris gate computes elapsed > threshold regardless of
+     * the actual timer_now reading. */
+    bl      timer_now
+    mov     w1, w0                   /* w1 = now */
+    bl      timer_freq
+    mov     w2, w0                   /* w2 = freq */
+    mov     w3, #31
+    mul     w2, w2, w3               /* freq * 31 seconds */
+    sub     w1, w1, w2               /* now - (freq*31) */
+    str     w1, [x20, #HCONN_RECV_TICK]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Slowloris close resets state → IDLE */
+    ldrb    w0, [x20, #HCONN_STATE]
+    cbnz    w0, .Lfail_hslb
+
+    ldr     x0, =name_hslb
+    bl      test_pass
+    b       .Ldone_hslb
+.Lfail_hslb:
+    ldr     x0, =name_hslb
+    bl      test_fail
+.Ldone_hslb:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3373,6 +3438,7 @@ name_hqs:   .asciz "http_query_string_split"
 name_hgesc: .asciz "http_guestbook_html_escape"
 name_hrm4:  .asciz "http_route_method_405"
 name_h4apr: .asciz "http_405_allow_per_route"
+name_hslb:  .asciz "http_recv_body_slowloris"
 
 .section .data
 .balign 16
