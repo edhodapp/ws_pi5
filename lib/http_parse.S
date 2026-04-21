@@ -308,6 +308,12 @@ http_parse_request:
 
 .Lhdr_cl_store:
     str     w2, [x19, #HCONN_CONTENT_LEN]
+    /* Mark the header as seen so http_poll can distinguish an explicit
+     * "Content-Length: 0" from a missing Content-Length — the POST/411
+     * check needs to know which case this is. */
+    ldrb    w3, [x19, #HCONN_FLAGS]
+    orr     w3, w3, #HFLAG_CL_SEEN
+    strb    w3, [x19, #HCONN_FLAGS]
     b       .Lparse_advance
 
 .Lact_req_done:

@@ -176,9 +176,10 @@ http_poll:
     cmp     w1, #'P'
     b.ne    .Lhp_bad_request
 
-    /* Set flags from parsed fields */
-    mov     w0, #0
-    strb    w0, [x20, #HCONN_FLAGS]
+    /* HCONN_FLAGS is cleared at request-start boundaries
+     * (.Lhp_close keep-alive and .Lhp_reset_hconn), and the parser
+     * may have set HFLAG_CL_SEEN during header processing. Preserve
+     * what's there; OR in the bits the dispatcher owns below. */
 
     /* HTTP/1.1 if VER_MINOR == '1' */
     ldrb    w0, [x20, #HCONN_VER_MINOR]
@@ -215,7 +216,11 @@ http_poll:
     ldrb    w1, [x22, #4]
     cmp     w1, #HTTP_HEAD_SPACE
     b.ne    .Lhp_bad_method
-    /* POST method — no flag set; body handling is a follow-on step */
+    /* POST method — mark so the 411 check downstream can distinguish
+     * from GET/HEAD (which don't require Content-Length). */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    orr     w0, w0, #HFLAG_POST
+    strb    w0, [x20, #HCONN_FLAGS]
     b       .Lhp_method_done
 
 .Lhp_method_get:
@@ -245,6 +250,14 @@ http_poll:
     orr     w0, w0, #HFLAG_CLOSE
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_conn_done:
+
+    /* POST requires Content-Length per RFC 7230 §3.3.3. If HFLAG_POST
+     * is set but HFLAG_CL_SEEN is not, reject with 411 before any
+     * body handling. */
+    ldrb    w0, [x20, #HCONN_FLAGS]
+    and     w1, w0, #(HFLAG_POST | HFLAG_CL_SEEN)
+    cmp     w1, #HFLAG_POST
+    b.eq    .Lhp_resp_411
 
     /* If Content-Length > 0, copy body bytes from the rx buffer into
      * this HCONN's slot of http_body_recv_bufs. Bounds:
@@ -405,6 +418,21 @@ http_poll:
     ldr     w3, =http_400_hdr_len
     b       .Lhp_setup_resp
 
+.Lhp_resp_411:
+    /* POST without Content-Length. Force close — we don't know how
+     * many body bytes (if any) the client is sending, so keep-alive
+     * can't safely resume on this connection. */
+    mov     w0, #HSTATUS_411
+    strb    w0, [x20, #HCONN_STATUS]
+    ldrb    w1, [x20, #HCONN_FLAGS]
+    orr     w1, w1, #HFLAG_CLOSE
+    strb    w1, [x20, #HCONN_FLAGS]
+    ldr     x1, =http_411_body
+    ldr     w2, =http_411_body_len
+    ldr     x24, =http_411_hdr
+    ldr     w3, =http_411_hdr_len
+    b       .Lhp_setup_resp
+
 .Lhp_resp_413:
     /* Oversize request body. Reject before body copy / dispatch.
      * Force connection close: the request body protocol is compromised
@@ -536,6 +564,8 @@ http_poll:
     strb    wzr, [x20, #HCONN_HOST_FOUND]
     strb    wzr, [x20, #HCONN_CLOSE_FOUND]
     strb    wzr, [x20, #HCONN_VER_MINOR]
+    strb    wzr, [x20, #HCONN_FLAGS]
+    str     wzr, [x20, #HCONN_CONTENT_LEN]
 
     /* Partial rx flush: consume only REQ_LEN bytes, preserving
      * any pipelined data after the current request.
@@ -565,6 +595,8 @@ http_poll:
 
 .Lhp_reset_hconn:
     strb    wzr, [x20, #HCONN_STATE]
+    strb    wzr, [x20, #HCONN_FLAGS]
+    str     wzr, [x20, #HCONN_CONTENT_LEN]
     b       .Lhp_next
 
 .Lhp_next:
@@ -807,6 +839,10 @@ http_update_date:
 
     mov     x0, x19
     ldr     x1, =http_405_date
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_411_date
     bl      http_format_date
 
     mov     x0, x19
@@ -1083,6 +1119,34 @@ http_405_body:
     .ascii  "<body><h1>405 Method Not Allowed</h1></body></html>\n"
 http_405_body_end:
 .equ http_405_body_len, http_405_body_end - http_405_body
+
+.section .data
+.balign 4
+http_411_hdr:
+    .ascii  "HTTP/1.1 411 Length Required\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_411_date:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 103\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_411_hdr_end:
+.equ http_411_hdr_len, http_411_hdr_end - http_411_hdr
+
+.section .rodata
+http_411_body:
+    .ascii  "<!DOCTYPE html>\n"
+    .ascii  "<html><head><title>411</title></head>\n"
+    .ascii  "<body><h1>411 Length Required</h1></body></html>\n"
+http_411_body_end:
+.equ http_411_body_len, http_411_body_end - http_411_body
+
+.if http_411_body_len != 103
+.error "http_411_body_len drifted from the 103 hardcoded in http_411_hdr"
+.endif
 
 .section .data
 .balign 4

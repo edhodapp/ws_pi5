@@ -11,14 +11,17 @@
 .equ HSTATUS_400,       1       /* 400 Bad Request */
 .equ HSTATUS_404,       2       /* 404 Not Found */
 .equ HSTATUS_405,       3       /* 405 Method Not Allowed */
-.equ HSTATUS_413,       4       /* 413 Payload Too Large */
-.equ HSTATUS_414,       5       /* 414 URI Too Long */
-.equ HSTATUS_431,       6       /* 431 Request Header Fields Too Large */
+.equ HSTATUS_411,       4       /* 411 Length Required */
+.equ HSTATUS_413,       5       /* 413 Payload Too Large */
+.equ HSTATUS_414,       6       /* 414 URI Too Long */
+.equ HSTATUS_431,       7       /* 431 Request Header Fields Too Large */
 
 /* HTTP connection flags (stored in HCONN_FLAGS) */
 .equ HFLAG_HTTP11,      0x01    /* bit 0: HTTP/1.1 (vs 1.0) */
 .equ HFLAG_HEAD,        0x02    /* bit 1: HEAD method (suppress body) */
 .equ HFLAG_CLOSE,       0x04    /* bit 2: send Connection: close (close after response) */
+.equ HFLAG_POST,        0x08    /* bit 3: POST method (for 411 check) */
+.equ HFLAG_CL_SEEN,     0x10    /* bit 4: Content-Length header present (distinguishes absent from "CL: 0") */
 
 /* HTTP connection struct (64 bytes per slot)
  *
