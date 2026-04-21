@@ -68,6 +68,7 @@ test_http:
     bl      test_http_counter_increments
     bl      test_http_guestbook_post
     bl      test_http_guestbook_get_render
+    bl      test_http_form_log_post
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2738,6 +2739,82 @@ thttp_find_bytes:
     mov     w0, #0
     ret
 
+/* ========================================================================
+ * test_http_form_log_post — POST /form_log appends body to
+ * form_log_store. Store entries are 256 bytes (FORM_LOG_REC_BYTES),
+ * large enough for typical form submissions.
+ * ======================================================================== */
+test_http_form_log_post:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    /* Baseline count in case earlier tests touched this store */
+    ldr     x0, =form_log_store
+    bl      store_count
+    mov     w20, w0
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_form_log_request
+    ldr     w2, =thttp_post_form_log_request_len
+.Lhfl_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhfl_cp
+    ldr     w0, =thttp_post_form_log_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Count should have advanced by one */
+    ldr     x0, =form_log_store
+    bl      store_count
+    sub     w0, w0, w20
+    cmp     w0, #1
+    b.ne    .Lfail_hfl
+
+    /* Read the newest entry into tstore_gb_out (128 bytes — we only
+     * need to check the first bytes). Then scan for "name=alice". */
+    ldr     x0, =form_log_store
+    bl      store_count
+    sub     w1, w0, #1
+    ldr     x0, =form_log_store
+    ldr     x2, =tstore_fl_out
+    bl      store_read
+
+    ldr     x0, =tstore_fl_out
+    mov     w1, #256                /* FORM_LOG_REC_BYTES */
+    ldr     x2, =thttp_fl_needle
+    mov     w3, #10                 /* strlen("name=alice") */
+    bl      thttp_find_bytes
+    cbz     w0, .Lfail_hfl
+
+    ldr     x0, =name_hfl
+    bl      test_pass
+    b       .Ldone_hfl
+.Lfail_hfl:
+    ldr     x0, =name_hfl
+    bl      test_fail
+.Ldone_hfl:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2852,6 +2929,14 @@ thttp_gb_hello_padded:
 
 thttp_gb_needle_hello:
     .ascii  "hello"
+
+thttp_post_form_log_request:
+    .ascii  "POST /form_log HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 23\r\n\r\nname=alice&msg=hi+there"
+thttp_post_form_log_request_end:
+.equ thttp_post_form_log_request_len, thttp_post_form_log_request_end - thttp_post_form_log_request
+
+thttp_fl_needle:
+    .ascii  "name=alice"
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2970,6 +3055,7 @@ name_hcss:  .asciz "http_route_css_content_type"
 name_hci:   .asciz "http_counter_increments"
 name_hgp:   .asciz "http_guestbook_post"
 name_hgr:   .asciz "http_guestbook_get_render"
+name_hfl:   .asciz "http_form_log_post"
 
 .section .data
 .balign 16
@@ -2991,3 +3077,7 @@ thttp_date_buf:
 .balign 16
 tstore_gb_out:
     .space  128
+
+.balign 16
+tstore_fl_out:
+    .space  256

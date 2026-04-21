@@ -17,6 +17,8 @@
 .global counter_store
 .global http_guestbook_handler
 .global guestbook_store
+.global http_form_log_handler
+.global form_log_store
 
 .section .text
 
@@ -292,6 +294,97 @@ guestbook_store:
     .word   0                       /* pad */
     .space  GUESTBOOK_CAP * GUESTBOOK_REC_BYTES
 
+.balign 16
+form_log_store:
+    .word   0
+    .word   FORM_LOG_REC_BYTES      /* record_bytes = 256 */
+    .word   FORM_LOG_CAP            /* capacity = 8 */
+    .word   0
+    .space  FORM_LOG_CAP * FORM_LOG_REC_BYTES
+
+/*
+ * http_form_log_handler — POST: append body to form_log_store, emit
+ * "OK". GET: emit the current log count as decimal.
+ *
+ * x0: output, w1: max_len, x2: HCONN
+ * Returns: w0 = bytes written
+ *
+ * form_log_store uses 256-byte records to fit typical form bodies.
+ * POST body is zero-padded via a shared scratch (form_log_slot_buf),
+ * analogous to the guestbook handler.
+ */
+.equ FORM_LOG_REC_BYTES, 256
+.equ FORM_LOG_CAP,       8
+
+http_form_log_handler:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                 /* save out */
+    mov     w20, w1                 /* save max_len */
+    mov     x21, x2                 /* save HCONN */
+
+    ldrb    w0, [x21, #HCONN_FLAGS]
+    tst     w0, #HFLAG_POST
+    b.eq    .Lhfh_get
+
+    /* POST: zero-pad body into form_log_slot_buf, then store_append */
+    ldr     x22, =form_log_slot_buf
+    mov     x0, x22
+    mov     w3, #FORM_LOG_REC_BYTES / 8
+.Lhfh_zero:
+    str     xzr, [x0], #8
+    sub     w3, w3, #1
+    cbnz    w3, .Lhfh_zero
+
+    ldr     x0, =http_conn_table
+    sub     x0, x21, x0
+    lsr     x0, x0, #HCONN_SHIFT
+    ldr     x1, =http_body_recv_bufs
+    add     x0, x1, x0, lsl #HTTP_MAX_RECV_BODY_SHIFT
+
+    ldr     w3, [x21, #HCONN_CONTENT_LEN]
+    mov     w4, #FORM_LOG_REC_BYTES
+    cmp     w3, w4
+    csel    w3, w3, w4, ls
+
+    mov     x4, x22
+.Lhfh_cp:
+    cbz     w3, .Lhfh_store
+    ldrb    w5, [x0], #1
+    strb    w5, [x4], #1
+    sub     w3, w3, #1
+    b       .Lhfh_cp
+
+.Lhfh_store:
+    ldr     x0, =form_log_store
+    mov     x1, x22
+    bl      store_append
+
+    /* Emit "OK" */
+    mov     w0, #'O'
+    strb    w0, [x19]
+    mov     w0, #'K'
+    strb    w0, [x19, #1]
+    mov     w0, #2
+    b       .Lhfh_ret
+
+.Lhfh_get:
+    /* GET: emit the store's current count as decimal ASCII. */
+    ldr     x0, =form_log_store
+    bl      store_count
+    mov     w1, w0
+    mov     x0, x19
+    bl      fmt_u32_decimal
+    /* w0 = bytes written, propagates */
+
+.Lhfh_ret:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
 /*
  * HTML fragments for guestbook rendering. Kept as plain ASCII in
  * .rodata; the handler copies them through the per-HCONN output
@@ -317,3 +410,7 @@ http_gb_li_close:
 .balign 16
 guestbook_slot_buf:
     .space  GUESTBOOK_REC_BYTES
+
+.balign 16
+form_log_slot_buf:
+    .space  FORM_LOG_REC_BYTES

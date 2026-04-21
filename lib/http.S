@@ -1063,6 +1063,17 @@ http_route_table:
     .word   1
     .xword  http_guestbook_handler
 
+    /* Route 8: "/form_log" (dynamic). POST appends the raw body to a
+     * larger ring store; GET returns the current entry count. */
+    .word   9                       /* path_len = len("/form_log") */
+    .word   0
+    .xword  http_path_form_log
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .word   1
+    .xword  http_form_log_handler
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -1089,6 +1100,9 @@ http_path_counter:
 
 http_path_guestbook:
     .ascii  "/guestbook"
+
+http_path_form_log:
+    .ascii  "/form_log"
 
 http_test_dispatch_sentinel:
     .ascii  "DISPATCH_OK\n"
