@@ -1529,19 +1529,16 @@ test_http_reset_during_send:
     ret
 
 /* ========================================================================
- * test_http_resp_isolation — two concurrent dynamic requests on slots 0 and
- * 1 must each get their own response buffer (per-way ownership).
+ * test_http_resp_isolation — two concurrent dynamic responses must use
+ * distinct buffers.
  *
- * Sets up both TCONNs as ESTABLISHED with a GET /status request in their
- * rx buffers. Calls http_poll once, which walks both slots through
- * RECV_HDR → FSA_DONE → dynamic dispatch → SENDING. Both HCONNs then have
- * HCONN_BODY_PTR set.
+ * Sets up HCONNs 0 and 1 as ESTABLISHED with GET /status requests in
+ * their rx buffers. http_poll walks both through dispatch; both land in
+ * SENDING with HCONN_BODY_PTR populated.
  *
- * Today the dynamic dispatch path writes body_ptr = &http_dyn_chunk_buf
- * for every dynamic response. Two HCONNs end up pointing at the same
- * bytes — a shared buffer corruption the moment handler output varies per
- * request. This test fails now (body_ptrs equal); it will pass when the
- * response path gives each way its own scratch.
+ * Asserts: the two body_ptr values differ. This holds because
+ * .Lhp_dynamic derives each HCONN's scratch address from its index in
+ * http_conn_table — a shared-buffer dispatch would violate it.
  * ======================================================================== */
 test_http_resp_isolation:
     stp     x29, x30, [sp, #-32]!
