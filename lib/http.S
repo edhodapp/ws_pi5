@@ -16,9 +16,7 @@
 .global http_conn_table
 .global http_send_ctx
 .global http_find_end_of_headers
-.global http_find_uri_end
 .global http_match_uri
-.global http_find_host_header
 .global http_update_date
 .global http_test_dispatch_handler
 .global http_test_echo_handler
@@ -770,27 +768,6 @@ http_find_end_of_headers:
     ret
 
 /*
- * http_find_uri_end — Find end of URI (next space after start)
- *
- * x0: URI start pointer, w1: max length
- * Returns: w0 = URI length (up to first space)
- * Clobbers: x0-x2
- */
-http_find_uri_end:
-    mov     w2, #0
-.Lfue_scan:
-    cmp     w2, w1
-    b.hs    .Lfue_done
-    ldrb    w3, [x0, x2]
-    cmp     w3, #0x20              /* space */
-    b.eq    .Lfue_done
-    add     w2, w2, #1
-    b       .Lfue_scan
-.Lfue_done:
-    mov     w0, w2
-    ret
-
-/*
  * http_match_uri — Match URI against route table
  *
  * x0: URI pointer, w1: URI length
@@ -843,78 +820,6 @@ http_match_uri:
 .Lmu_404:
     mov     x0, #0                 /* no match */
     ldp     x29, x30, [sp], #16
-    ret
-
-/*
- * http_find_host_header — Scan headers for "Host:" field
- *
- * x0: buffer start (beginning of request)
- * w2: header section length (up to \r\n\r\n)
- * Returns: w0 = 1 if Host: found, 0 if not
- * Clobbers: x0-x4
- *
- * Scans for "\r\nHost:" (case-sensitive) after the request-line.
- * The first \r\n in the buffer ends the request-line; Host: must
- * appear after that as a header field.
- */
-http_find_host_header:
-    cmp     w2, #10                 /* minimum: "X\r\nHost:Y" */
-    b.lt    .Lfhh_no
-
-    /* Scan for "\r\nHost:" (6 bytes) */
-    mov     w3, #0
-.Lfhh_scan:
-    sub     w4, w2, #6
-    cmp     w3, w4
-    b.hs    .Lfhh_no
-
-    ldrb    w4, [x0, x3]
-    cmp     w4, #0x0D               /* \r */
-    b.ne    .Lfhh_next
-
-    add     w4, w3, #1
-    ldrb    w4, [x0, x4]
-    cmp     w4, #0x0A               /* \n */
-    b.ne    .Lfhh_next
-
-    /* Check "Host:" at offset +2 (case-insensitive per RFC 9110 §5.1:
-     * header field names are case-insensitive). OR with 0x20 folds
-     * uppercase ASCII to lowercase before comparison. */
-    add     w4, w3, #2
-    ldrb    w1, [x0, x4]
-    orr     w1, w1, #0x20           /* fold to lowercase */
-    cmp     w1, #'h'
-    b.ne    .Lfhh_next
-    add     w4, w4, #1
-    ldrb    w1, [x0, x4]
-    orr     w1, w1, #0x20
-    cmp     w1, #'o'
-    b.ne    .Lfhh_next
-    add     w4, w4, #1
-    ldrb    w1, [x0, x4]
-    orr     w1, w1, #0x20
-    cmp     w1, #'s'
-    b.ne    .Lfhh_next
-    add     w4, w4, #1
-    ldrb    w1, [x0, x4]
-    orr     w1, w1, #0x20
-    cmp     w1, #'t'
-    b.ne    .Lfhh_next
-    add     w4, w4, #1
-    ldrb    w1, [x0, x4]
-    cmp     w1, #':'                /* colon is not alpha — exact match */
-    b.ne    .Lfhh_next
-
-    /* Found "\r\nHost:" */
-    mov     w0, #1
-    ret
-
-.Lfhh_next:
-    add     w3, w3, #1
-    b       .Lfhh_scan
-
-.Lfhh_no:
-    mov     w0, #0
     ret
 
 /* ===================================================================
