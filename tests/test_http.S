@@ -56,6 +56,7 @@ test_http:
     bl      test_http_route_handler_dispatch
     bl      test_http_post_accepted
     bl      test_http_content_length_parsed
+    bl      test_http_post_body_copied
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1816,6 +1817,86 @@ test_http_content_length_parsed:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_body_copied — POST body bytes land in the per-HCONN
+ * receive buffer.
+ *
+ * Sends POST / with Content-Length: 5 and body "hello" (headers + body
+ * in a single rx write). After http_poll, the first 5 bytes of
+ * http_body_recv_bufs (HCONN[0]'s slot) must equal "hello".
+ *
+ * Exercises single-shot body copy: the rx buffer has the entire
+ * request before the parser reaches S_DONE, so the body is reachable
+ * at rx_buffer + HCONN_REQ_LEN and gets copied into HCONN[0]'s slot
+ * of http_body_recv_bufs before tcp_rx_flush wipes the rx data.
+ * ======================================================================== */
+test_http_post_body_copied:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_body_request
+    ldr     w2, =thttp_post_body_request_len
+.Lhpbc_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpbc_cp
+    ldr     w0, =thttp_post_body_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* HCONN[0] should have CONTENT_LEN == 5 */
+    ldr     x20, =http_conn_table
+    ldr     w0, [x20, #HCONN_CONTENT_LEN]
+    cmp     w0, #5
+    b.ne    .Lfail_hpbc
+
+    /* http_body_recv_bufs[0] should start with "hello" */
+    ldr     x1, =http_body_recv_bufs
+    ldrb    w0, [x1]
+    cmp     w0, #'h'
+    b.ne    .Lfail_hpbc
+    ldrb    w0, [x1, #1]
+    cmp     w0, #'e'
+    b.ne    .Lfail_hpbc
+    ldrb    w0, [x1, #2]
+    cmp     w0, #'l'
+    b.ne    .Lfail_hpbc
+    ldrb    w0, [x1, #3]
+    cmp     w0, #'l'
+    b.ne    .Lfail_hpbc
+    ldrb    w0, [x1, #4]
+    cmp     w0, #'o'
+    b.ne    .Lfail_hpbc
+
+    ldr     x0, =name_hpbc
+    bl      test_pass
+    b       .Ldone_hpbc
+.Lfail_hpbc:
+    ldr     x0, =name_hpbc
+    bl      test_fail
+.Ldone_hpbc:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1864,6 +1945,11 @@ thttp_post_cl42_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 42\r\n\r\n"
 thttp_post_cl42_request_end:
 .equ thttp_post_cl42_request_len, thttp_post_cl42_request_end - thttp_post_cl42_request
+
+thttp_post_body_request:
+    .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
+thttp_post_body_request_end:
+.equ thttp_post_body_request_len, thttp_post_body_request_end - thttp_post_body_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -1971,6 +2057,7 @@ name_hri:   .asciz "http_resp_isolation"
 name_hrhd:  .asciz "http_route_handler_dispatch"
 name_hpa:   .asciz "http_post_accepted"
 name_hclp:  .asciz "http_content_length_parsed"
+name_hpbc:  .asciz "http_post_body_copied"
 
 .section .data
 .balign 16

@@ -156,3 +156,11 @@
 .equ HTTP_DYN_BODY_SIZE,  1024
 .equ HTTP_DYN_BODY_SHIFT, 10
 .equ HTTP_DYN_CHUNK_SIZE, 1088
+
+/* Per-HCONN request body scratch. Used for POST / PUT-style bodies that
+ * arrive with a Content-Length. Single-shot only: the whole body must
+ * already be in the rx buffer when the parser reaches S_DONE. Multi-
+ * packet accumulation will need its own state. Size must be a power of
+ * 2 for shift-indexing. */
+.equ HTTP_MAX_RECV_BODY,  1024
+.equ HTTP_MAX_RECV_BODY_SHIFT, 10

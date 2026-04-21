@@ -21,6 +21,7 @@
 .global http_find_host_header
 .global http_update_date
 .global http_test_dispatch_handler
+.global http_body_recv_bufs
 
 .section .text
 
@@ -243,6 +244,43 @@ http_poll:
     orr     w0, w0, #HFLAG_CLOSE
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_conn_done:
+
+    /* If Content-Length > 0, copy body bytes from the rx buffer into
+     * this HCONN's slot of http_body_recv_bufs. Bounds:
+     *   - CL must fit the per-slot buffer (HTTP_MAX_RECV_BODY)
+     *   - REQ_LEN + CL must fit the rx data we've peeked (w23)
+     * Either miss → skip copy; 413 / multi-packet handling is a
+     * later step, so handlers simply see no body for now. */
+    ldr     w0, [x20, #HCONN_CONTENT_LEN]
+    cbz     w0, .Lhp_body_done
+    cmp     w0, #HTTP_MAX_RECV_BODY
+    b.hi    .Lhp_body_done
+    ldr     w1, [x20, #HCONN_REQ_LEN]
+    add     w2, w1, w0
+    cmp     w2, w23
+    b.hi    .Lhp_body_done
+
+    /* source = rx buffer + REQ_LEN */
+    add     x2, x22, x1, uxtw
+
+    /* dest = http_body_recv_bufs + (hconn_index << HTTP_MAX_RECV_BODY_SHIFT) */
+    ldr     x3, =http_conn_table
+    sub     x3, x20, x3
+    lsr     x3, x3, #HCONN_SHIFT
+    ldr     x4, =http_body_recv_bufs
+    add     x3, x4, x3, lsl #HTTP_MAX_RECV_BODY_SHIFT
+
+    /* Counter in w6 (not w4) to keep the base pointer in x4 live and
+     * unambiguous above. */
+    mov     w6, w0
+.Lhp_body_cp:
+    cbz     w6, .Lhp_body_done
+    ldrb    w5, [x2], #1
+    strb    w5, [x3], #1
+    sub     w6, w6, #1
+    b       .Lhp_body_cp
+
+.Lhp_body_done:
 
     /* Increment request counter */
     ldr     x0, =http_request_count
@@ -1032,6 +1070,14 @@ http_dyn_body_bufs:
     .space  HTTP_MAX_CONNS * HTTP_DYN_BODY_SIZE
 http_dyn_chunk_bufs:
     .space  HTTP_MAX_CONNS * HTTP_DYN_CHUNK_SIZE
+
+/* Per-HCONN request body receive buffers. Populated by http_poll when
+ * a POST/PUT request has Content-Length > 0 and the whole body is
+ * already in the TCP rx buffer. Handlers that consume bodies will read
+ * from their own slot here. */
+.balign 8
+http_body_recv_bufs:
+    .space  HTTP_MAX_CONNS * HTTP_MAX_RECV_BODY
 
 .section .data
 .balign 8
