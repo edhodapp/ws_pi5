@@ -21,6 +21,7 @@
 .global http_find_host_header
 .global http_update_date
 .global http_test_dispatch_handler
+.global http_test_echo_handler
 .global http_body_recv_bufs
 
 .section .text
@@ -346,9 +347,13 @@ http_poll:
     stp     x0, x22, [sp, #64]
     stp     x6, x7, [sp, #80]
 
-    /* Invoke handler(body_buf, max_len) → bytes written */
+    /* Invoke handler(body_buf, max_len, hconn) → bytes written.
+     * Handlers may read the POST body from http_body_recv_bufs at the
+     * index derived from HCONN. Handlers that don't need HCONN simply
+     * ignore x2 per AAPCS64. */
     mov     x0, x6                  /* body_buf */
     mov     w1, #HTTP_DYN_BODY_SIZE
+    mov     x2, x20                 /* hconn */
     blr     x9                      /* w0 = body bytes */
     mov     w23, w0                 /* w23 = body_len */
 
@@ -801,14 +806,49 @@ http_update_date:
     ret
 
 /*
+ * http_test_echo_handler — Copies the request body from this HCONN's
+ * slot of http_body_recv_bufs into the output buffer. Demonstrates
+ * the handler ABI's HCONN access for POST body processing.
+ *
+ * x0: output buffer, w1: max buffer size, x2: HCONN pointer
+ * Returns: w0 = bytes written (= HCONN_CONTENT_LEN, clamped to max)
+ * Inputs x0, w1, x2 are used then overwritten; scratch is x3-x7.
+ * Precondition: x2 is a valid pointer inside http_conn_table.
+ */
+http_test_echo_handler:
+    /* body_src = http_body_recv_bufs + (hconn_index << SHIFT) */
+    ldr     x3, =http_conn_table
+    sub     x3, x2, x3
+    lsr     x3, x3, #HCONN_SHIFT
+    ldr     x4, =http_body_recv_bufs
+    add     x3, x4, x3, lsl #HTTP_MAX_RECV_BODY_SHIFT
+
+    ldr     w5, [x2, #HCONN_CONTENT_LEN]
+
+    /* Clamp body length to max output buffer */
+    cmp     w5, w1
+    csel    w5, w5, w1, ls
+
+    mov     w6, w5
+.Lteh_cp:
+    cbz     w6, .Lteh_done
+    ldrb    w7, [x3], #1
+    strb    w7, [x0], #1
+    sub     w6, w6, #1
+    b       .Lteh_cp
+.Lteh_done:
+    mov     w0, w5
+    ret
+
+/*
  * http_test_dispatch_handler — Emits the sentinel "DISPATCH_OK\n"
  * for the /_test_dispatch route. Used by
  * test_http_route_handler_dispatch to verify the dispatch path loads
  * handlers from ROUTE_HANDLER rather than hardcoding one function.
  *
- * x0: output buffer, w1: max buffer size
+ * x0: output buffer, w1: max buffer size, x2: HCONN (unused)
  * Returns: w0 = 12 on success, 0 if buffer is too small
- * Clobbers: x0-x4
+ * Scratch: x2-x4 (x0 is consumed by the copy; x2 is an unused input).
  */
 http_test_dispatch_handler:
     cmp     w1, #12
@@ -878,6 +918,18 @@ http_route_table:
     .word   1                       /* flags=1 (dynamic) */
     .xword  http_test_dispatch_handler /* ROUTE_HANDLER */
 
+    /* Route 4: "/_test_echo" (dynamic, test-only). Echoes POST body
+     * back. Like /_test_dispatch, test scaffolding compiled into
+     * production; overwritten by the appliance packager. */
+    .word   11                      /* path_len = len("/_test_echo") */
+    .word   0
+    .xword  http_path_test_echo
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .word   1
+    .xword  http_test_echo_handler
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -892,6 +944,9 @@ http_path_status:
 
 http_path_test_dispatch:
     .ascii  "/_test_dispatch"
+
+http_path_test_echo:
+    .ascii  "/_test_echo"
 
 http_test_dispatch_sentinel:
     .ascii  "DISPATCH_OK\n"

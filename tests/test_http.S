@@ -57,6 +57,7 @@ test_http:
     bl      test_http_post_accepted
     bl      test_http_content_length_parsed
     bl      test_http_post_body_copied
+    bl      test_http_post_body_to_handler
     ldp     x29, x30, [sp], #16
     ret
 
@@ -1897,6 +1898,83 @@ test_http_post_body_copied:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_body_to_handler — a handler can read the POST body
+ * from HCONN and echo it in the response.
+ *
+ * POSTs "ping" to /_test_echo. That route's handler reads the request
+ * body from http_body_recv_bufs[hconn_index] (computed via the HCONN
+ * pointer it now receives as its third argument) and copies those
+ * bytes into the output. The chunked wrapper puts "4\r\n" before the
+ * data, so body_ptr[3..6] should spell "ping".
+ * ======================================================================== */
+test_http_post_body_to_handler:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_echo_request
+    ldr     w2, =thttp_post_echo_request_len
+.Lhpeh_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpeh_cp
+    ldr     w0, =thttp_post_echo_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.ne    .Lfail_hpeh
+
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hpeh
+
+    /* body_ptr[3..6] should be "ping" after the "4\r\n" chunk prefix */
+    ldr     x1, [x20, #HCONN_BODY_PTR]
+    ldrb    w0, [x1, #3]
+    cmp     w0, #'p'
+    b.ne    .Lfail_hpeh
+    ldrb    w0, [x1, #4]
+    cmp     w0, #'i'
+    b.ne    .Lfail_hpeh
+    ldrb    w0, [x1, #5]
+    cmp     w0, #'n'
+    b.ne    .Lfail_hpeh
+    ldrb    w0, [x1, #6]
+    cmp     w0, #'g'
+    b.ne    .Lfail_hpeh
+
+    ldr     x0, =name_hpeh
+    bl      test_pass
+    b       .Ldone_hpeh
+.Lfail_hpeh:
+    ldr     x0, =name_hpeh
+    bl      test_fail
+.Ldone_hpeh:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1950,6 +2028,11 @@ thttp_post_body_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 5\r\n\r\nhello"
 thttp_post_body_request_end:
 .equ thttp_post_body_request_len, thttp_post_body_request_end - thttp_post_body_request
+
+thttp_post_echo_request:
+    .ascii  "POST /_test_echo HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 4\r\n\r\nping"
+thttp_post_echo_request_end:
+.equ thttp_post_echo_request_len, thttp_post_echo_request_end - thttp_post_echo_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2058,6 +2141,7 @@ name_hrhd:  .asciz "http_route_handler_dispatch"
 name_hpa:   .asciz "http_post_accepted"
 name_hclp:  .asciz "http_content_length_parsed"
 name_hpbc:  .asciz "http_post_body_copied"
+name_hpeh:  .asciz "http_post_body_to_handler"
 
 .section .data
 .balign 16
