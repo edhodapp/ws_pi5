@@ -14,6 +14,7 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "http.inc"
+.include "store.inc"
 
 .global test_http
 
@@ -64,6 +65,7 @@ test_http:
     bl      test_http_post_dup_cl_400
     bl      test_http_post_multi_packet_body
     bl      test_http_route_css_content_type
+    bl      test_http_counter_increments
     ldp     x29, x30, [sp], #16
     ret
 
@@ -2431,6 +2433,100 @@ test_http_route_css_content_type:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_counter_increments — /counter advances by one per request.
+ *
+ * GETs /counter twice (resetting conn state between, simulating fresh
+ * connections). Records counter_store.records_written after each. The
+ * delta must be exactly 1.
+ *
+ * Intentionally observes the store directly rather than parsing the
+ * response body — this isolates the handler's state mutation from
+ * response formatting. A formatting-specific test can follow.
+ * ======================================================================== */
+test_http_counter_increments:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    /* First GET /counter */
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_counter_request
+    ldr     w2, =thttp_get_counter_request_len
+.Lhci_cp1:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhci_cp1
+    ldr     w0, =thttp_get_counter_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* Capture the counter value after the first request */
+    ldr     x0, =counter_store
+    ldr     w20, [x0, #STORE_WRITTEN]
+
+    /* Second GET /counter */
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_get_counter_request
+    ldr     w2, =thttp_get_counter_request_len
+.Lhci_cp2:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhci_cp2
+    ldr     w0, =thttp_get_counter_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x0, =counter_store
+    ldr     w1, [x0, #STORE_WRITTEN]
+    sub     w0, w1, w20
+    cmp     w0, #1
+    b.ne    .Lfail_hci
+
+    ldr     x0, =name_hci
+    bl      test_pass
+    b       .Ldone_hci
+.Lfail_hci:
+    ldr     x0, =name_hci
+    bl      test_fail
+.Ldone_hci:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -2522,6 +2618,11 @@ thttp_get_test_css_request:
     .ascii  "GET /_test_css HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_get_test_css_request_end:
 .equ thttp_get_test_css_request_len, thttp_get_test_css_request_end - thttp_get_test_css_request
+
+thttp_get_counter_request:
+    .ascii  "GET /counter HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_get_counter_request_end:
+.equ thttp_get_counter_request_len, thttp_get_counter_request_end - thttp_get_counter_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -2637,6 +2738,7 @@ name_hpnc:  .asciz "http_post_no_cl_411"
 name_hpdc:  .asciz "http_post_dup_cl_400"
 name_hpmp:  .asciz "http_post_multi_packet_body"
 name_hcss:  .asciz "http_route_css_content_type"
+name_hci:   .asciz "http_counter_increments"
 
 .section .data
 .balign 16

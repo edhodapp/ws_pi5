@@ -73,7 +73,7 @@ SHARED_OBJS = \
     $(BUILD)/vmio_queue.o $(BUILD)/vmio_engine.o \
     $(BUILD)/net_cfg.o $(BUILD)/eth.o $(BUILD)/arp.o \
     $(BUILD)/ip.o $(BUILD)/ip_reasm.o $(BUILD)/icmp.o \
-    $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/http_status.o \
+    $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/http_status.o $(BUILD)/http_handlers.o \
     $(BUILD)/store.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
@@ -286,6 +286,9 @@ $(BUILD)/vmio_engine.o: lib/vmio_engine.S include/vmio.inc | $(BUILD)
 $(BUILD)/store.o: lib/store.S include/store.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/http_handlers.o: lib/http_handlers.S include/store.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 $(BUILD)/net_cfg.o: lib/net_cfg.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
@@ -421,7 +424,7 @@ $(BUILD)/test_ntp.o: tests/test_ntp.S include/ntp.inc include/net.inc include/ti
 $(BUILD)/test_md5.o: tests/test_md5.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(BUILD)/test_http.o: tests/test_http.S include/http.inc include/tcp.inc include/net.inc | $(BUILD)
+$(BUILD)/test_http.o: tests/test_http.S include/http.inc include/tcp.inc include/net.inc include/store.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_hex_parse.o: tests/test_hex_parse.S | $(BUILD)

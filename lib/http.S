@@ -1040,6 +1040,18 @@ http_route_table:
     .word   0
     .xword  0
 
+    /* Route 6: "/counter" (dynamic). Real handler — increments a
+     * store on each GET and emits the running count. First real
+     * appliance feature that uses the store API. */
+    .word   8                       /* path_len = len("/counter") */
+    .word   0
+    .xword  http_path_counter
+    .xword  0
+    .xword  http_status_hdr         /* reuse chunked header template */
+    .word   http_status_hdr_len
+    .word   1                       /* dynamic */
+    .xword  http_counter_handler
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 
@@ -1060,6 +1072,9 @@ http_path_test_echo:
 
 http_path_test_css:
     .ascii  "/_test_css"
+
+http_path_counter:
+    .ascii  "/counter"
 
 http_test_dispatch_sentinel:
     .ascii  "DISPATCH_OK\n"
