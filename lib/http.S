@@ -187,7 +187,7 @@ http_poll:
     strb    w0, [x20, #HCONN_FLAGS]
 .Lhp_ver_done:
 
-    /* Identify method: "GET " or "HEAD " */
+    /* Identify method: "GET ", "HEAD ", or "POST " */
     ldr     w0, [x22]
     ldr     w1, =HTTP_GET_MARKER
     cmp     w0, w1
@@ -195,7 +195,7 @@ http_poll:
 
     ldr     w1, =HTTP_HEAD_MARK_LO
     cmp     w0, w1
-    b.ne    .Lhp_bad_method
+    b.ne    .Lhp_check_post
     ldrb    w1, [x22, #4]
     cmp     w1, #HTTP_HEAD_SPACE
     b.ne    .Lhp_bad_method
@@ -204,6 +204,16 @@ http_poll:
     ldrb    w0, [x20, #HCONN_FLAGS]
     orr     w0, w0, #HFLAG_HEAD
     strb    w0, [x20, #HCONN_FLAGS]
+    b       .Lhp_method_done
+
+.Lhp_check_post:
+    ldr     w1, =HTTP_POST_MARKER
+    cmp     w0, w1
+    b.ne    .Lhp_bad_method
+    ldrb    w1, [x22, #4]
+    cmp     w1, #HTTP_HEAD_SPACE
+    b.ne    .Lhp_bad_method
+    /* POST method — no flag set; body handling is a follow-on step */
     b       .Lhp_method_done
 
 .Lhp_method_get:
@@ -944,7 +954,7 @@ http_405_hdr:
 http_405_date:
     .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
     .ascii  "\r\n"
-    .ascii  "Allow: GET, HEAD\r\n"
+    .ascii  "Allow: GET, HEAD, POST\r\n"
     .ascii  "Content-Type: text/html; charset=utf-8\r\n"
     .ascii  "Content-Length: 106\r\n"
     .ascii  "Connection: close\r\n"

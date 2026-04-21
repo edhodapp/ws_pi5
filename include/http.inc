@@ -139,7 +139,8 @@
 .equ HTTP_END_MARKER,   0x0A0D0A0D  /* \r\n\r\n in LE word */
 .equ HTTP_GET_MARKER,   0x20544547  /* "GET " in LE word */
 .equ HTTP_HEAD_MARK_LO, 0x44414548  /* "HEAD" in LE word */
-.equ HTTP_HEAD_SPACE,   0x20        /* " " after "HEAD" */
+.equ HTTP_POST_MARKER,  0x54534F50  /* "POST" in LE word */
+.equ HTTP_HEAD_SPACE,   0x20        /* " " after 4-letter method */
 
 /* Request limits */
 .equ HTTP_MAX_REQUEST_LINE, 8192    /* max request-line length → 414 */

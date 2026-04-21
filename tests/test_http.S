@@ -54,6 +54,7 @@ test_http:
     bl      test_http_reset_during_send
     bl      test_http_resp_isolation
     bl      test_http_route_handler_dispatch
+    bl      test_http_post_accepted
     ldp     x29, x30, [sp], #16
     ret
 
@@ -380,15 +381,15 @@ test_http_parse_bad_method:
     strh    w0, [x19, #TCONN_LPORT]
 
     ldr     x0, =tcp_rxbuf_pool
-    ldr     x1, =thttp_post_request
-    ldr     w2, =thttp_post_request_len
+    ldr     x1, =thttp_put_request
+    ldr     w2, =thttp_put_request_len
 .Lhpbm_cp:
     ldrb    w3, [x1], #1
     strb    w3, [x0], #1
     subs    w2, w2, #1
     b.ne    .Lhpbm_cp
 
-    ldr     w0, =thttp_post_request_len
+    ldr     w0, =thttp_put_request_len
     strh    w0, [x19, #TCONN_RXLEN]
 
     mov     x0, #0
@@ -606,15 +607,15 @@ test_http_method_not_allowed:
     strh    w0, [x19, #TCONN_LPORT]
 
     ldr     x0, =tcp_rxbuf_pool
-    ldr     x1, =thttp_post_request
-    ldr     w2, =thttp_post_request_len
+    ldr     x1, =thttp_put_request
+    ldr     w2, =thttp_put_request_len
 .Lhmna_cp:
     ldrb    w3, [x1], #1
     strb    w3, [x0], #1
     subs    w2, w2, #1
     b.ne    .Lhmna_cp
 
-    ldr     w0, =thttp_post_request_len
+    ldr     w0, =thttp_put_request_len
     strh    w0, [x19, #TCONN_RXLEN]
 
     mov     x0, #0
@@ -1708,6 +1709,65 @@ test_http_route_handler_dispatch:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_post_accepted — a POST request reaches route dispatch and
+ * returns a non-405 status.
+ *
+ * Sets up HCONN[0] as ESTABLISHED with POST / HTTP/1.1 (no body). The
+ * route "/" is a static 200 responder. Asserts: HCONN_STATUS == 200.
+ *
+ * Prerequisite for guestbook/form_log/counter handlers, which consume
+ * POST bodies; this test only checks method acceptance — body parsing
+ * is a follow-on step.
+ * ======================================================================== */
+test_http_post_accepted:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_request
+    ldr     w2, =thttp_post_request_len
+.Lhpa_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhpa_cp
+    ldr     w0, =thttp_post_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_200
+    b.ne    .Lfail_hpa
+
+    ldr     x0, =name_hpa
+    bl      test_pass
+    b       .Ldone_hpa
+.Lfail_hpa:
+    ldr     x0, =name_hpa
+    bl      test_fail
+.Ldone_hpa:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -1746,6 +1806,11 @@ thttp_post_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_post_request_end:
 .equ thttp_post_request_len, thttp_post_request_end - thttp_post_request
+
+thttp_put_request:
+    .ascii  "PUT / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
+thttp_put_request_end:
+.equ thttp_put_request_len, thttp_put_request_end - thttp_put_request
 
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
@@ -1851,6 +1916,7 @@ name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
 name_hri:   .asciz "http_resp_isolation"
 name_hrhd:  .asciz "http_route_handler_dispatch"
+name_hpa:   .asciz "http_post_accepted"
 
 .section .data
 .balign 16
