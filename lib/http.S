@@ -372,7 +372,7 @@ http_poll:
 
     /* Method allow-list: route declares a bitmask of accepted methods.
      * Derive the HM_* bit for this request from HCONN_FLAGS and bail to
-     * the 405 path if the route doesn't list it. */
+     * the per-route 405 path if the route doesn't list it. */
     ldrb    w1, [x20, #HCONN_FLAGS]
     mov     w2, #HM_GET
     tst     w1, #HFLAG_HEAD
@@ -385,7 +385,7 @@ http_poll:
 .Lhp_mth_check:
     ldrb    w1, [x0, #ROUTE_METHODS]
     tst     w1, w2
-    b.eq    .Lhp_bad_method
+    b.eq    .Lhp_bad_method_per_route
 
     /* Route matched + method allowed. Check if dynamic or static. */
     mov     w1, #HSTATUS_200
@@ -477,12 +477,41 @@ http_poll:
     b       .Lhp_setup_resp
 
 .Lhp_bad_method:
+    /* Parser-level bad method (e.g., PUT / DELETE). No route context,
+     * so advertise the generic GET+HEAD+POST Allow set. */
+    ldr     x24, =http_405_hdr_ghp
+    ldr     w3, =http_405_hdr_ghp_len
+    b       .Lhp_405_common
+
+.Lhp_bad_method_per_route:
+    /* Method mismatch on a matched route. x0 still holds the route
+     * pointer; pick the 405 template whose Allow line matches the
+     * route's ROUTE_METHODS bitmask. */
+    ldrb    w1, [x0, #ROUTE_METHODS]
+    cmp     w1, #(HM_GET | HM_HEAD)
+    b.eq    .Lhp_405_gh
+    cmp     w1, #HM_POST
+    b.eq    .Lhp_405_p
+    /* Unrecognized combination → generic GHP */
+    ldr     x24, =http_405_hdr_ghp
+    ldr     w3, =http_405_hdr_ghp_len
+    b       .Lhp_405_common
+
+.Lhp_405_gh:
+    ldr     x24, =http_405_hdr_gh
+    ldr     w3, =http_405_hdr_gh_len
+    b       .Lhp_405_common
+
+.Lhp_405_p:
+    ldr     x24, =http_405_hdr_p
+    ldr     w3, =http_405_hdr_p_len
+    /* fall through */
+
+.Lhp_405_common:
     mov     w0, #HSTATUS_405
     strb    w0, [x20, #HCONN_STATUS]
     ldr     x1, =http_405_body
     ldr     w2, =http_405_body_len
-    ldr     x24, =http_405_hdr
-    ldr     w3, =http_405_hdr_len
     b       .Lhp_setup_resp
 
 .Lhp_bad_request:
@@ -921,7 +950,15 @@ http_update_date:
     bl      http_format_date
 
     mov     x0, x19
-    ldr     x1, =http_405_date
+    ldr     x1, =http_405_date_ghp
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_405_date_gh
+    bl      http_format_date
+
+    mov     x0, x19
+    ldr     x1, =http_405_date_p
     bl      http_format_date
 
     mov     x0, x19
@@ -1250,11 +1287,11 @@ http_400_body_end:
 
 .section .data
 .balign 4
-http_405_hdr:
+http_405_hdr_ghp:
     .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
     .ascii  "Server: ws_pi5\r\n"
     .ascii  "Date: "
-http_405_date:
+http_405_date_ghp:
     .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
     .ascii  "\r\n"
     .ascii  "Allow: GET, HEAD, POST\r\n"
@@ -1262,8 +1299,40 @@ http_405_date:
     .ascii  "Content-Length: 106\r\n"
     .ascii  "Connection: close\r\n"
     .ascii  "\r\n"
-http_405_hdr_end:
-.equ http_405_hdr_len, http_405_hdr_end - http_405_hdr
+http_405_hdr_ghp_end:
+.equ http_405_hdr_ghp_len, http_405_hdr_ghp_end - http_405_hdr_ghp
+
+.balign 4
+http_405_hdr_gh:
+    .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_405_date_gh:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Allow: GET, HEAD\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 106\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_405_hdr_gh_end:
+.equ http_405_hdr_gh_len, http_405_hdr_gh_end - http_405_hdr_gh
+
+.balign 4
+http_405_hdr_p:
+    .ascii  "HTTP/1.1 405 Method Not Allowed\r\n"
+    .ascii  "Server: ws_pi5\r\n"
+    .ascii  "Date: "
+http_405_date_p:
+    .ascii  "Thu, 01 Jan 1970 00:00:00 GMT"
+    .ascii  "\r\n"
+    .ascii  "Allow: POST\r\n"
+    .ascii  "Content-Type: text/html; charset=utf-8\r\n"
+    .ascii  "Content-Length: 106\r\n"
+    .ascii  "Connection: close\r\n"
+    .ascii  "\r\n"
+http_405_hdr_p_end:
+.equ http_405_hdr_p_len, http_405_hdr_p_end - http_405_hdr_p
 
 .section .rodata
 http_405_body:

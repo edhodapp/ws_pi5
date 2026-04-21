@@ -72,6 +72,7 @@ test_http:
     bl      test_http_query_string_split
     bl      test_http_guestbook_html_escape
     bl      test_http_route_method_405
+    bl      test_http_405_allow_per_route
     ldp     x29, x30, [sp], #16
     ret
 
@@ -3026,6 +3027,80 @@ test_http_route_method_405:
     ldp     x29, x30, [sp], #32
     ret
 
+/* ========================================================================
+ * test_http_405_allow_per_route — the 405 response's Allow header
+ * reflects the route's actual accepted methods, not a hardcoded
+ * "GET, HEAD, POST".
+ *
+ * POSTs /about (declared GET+HEAD). The header sent back at
+ * HCONN_HDR_SRC_PTR must contain "Allow: GET, HEAD\r\n" and must NOT
+ * contain ", POST" — proving the Allow line is derived from
+ * ROUTE_METHODS rather than a template that always advertises POST.
+ * ======================================================================== */
+test_http_405_allow_per_route:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_post_about_request
+    ldr     w2, =thttp_post_about_request_len
+.Lh4apr_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lh4apr_cp
+    ldr     w0, =thttp_post_about_request_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x20, =http_conn_table
+    ldrb    w0, [x20, #HCONN_STATUS]
+    cmp     w0, #HSTATUS_405
+    b.ne    .Lfail_h4apr
+
+    /* Header must contain "Allow: GET, HEAD\r\n" */
+    ldr     x0, [x20, #HCONN_HDR_SRC_PTR]
+    ldr     w1, [x20, #HCONN_HDR_SRC_LEN]
+    ldr     x2, =thttp_allow_gh_needle
+    mov     w3, #18
+    bl      thttp_find_bytes
+    cbz     w0, .Lfail_h4apr
+
+    /* Header must NOT contain ", POST" */
+    ldr     x0, [x20, #HCONN_HDR_SRC_PTR]
+    ldr     w1, [x20, #HCONN_HDR_SRC_LEN]
+    ldr     x2, =thttp_post_suffix_needle
+    mov     w3, #6
+    bl      thttp_find_bytes
+    cbnz    w0, .Lfail_h4apr
+
+    ldr     x0, =name_h4apr
+    bl      test_pass
+    b       .Ldone_h4apr
+.Lfail_h4apr:
+    ldr     x0, =name_h4apr
+    bl      test_fail
+.Ldone_h4apr:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3170,6 +3245,12 @@ thttp_post_about_request:
 thttp_post_about_request_end:
 .equ thttp_post_about_request_len, thttp_post_about_request_end - thttp_post_about_request
 
+thttp_allow_gh_needle:
+    .ascii  "Allow: GET, HEAD\r\n"
+
+thttp_post_suffix_needle:
+    .ascii  ", POST"
+
 thttp_head_request:
     .ascii  "HEAD / HTTP/1.1\r\nHost: 10.0.2.15\r\n\r\n"
 thttp_head_request_end:
@@ -3291,6 +3372,7 @@ name_hfl:   .asciz "http_form_log_post"
 name_hqs:   .asciz "http_query_string_split"
 name_hgesc: .asciz "http_guestbook_html_escape"
 name_hrm4:  .asciz "http_route_method_405"
+name_h4apr: .asciz "http_405_allow_per_route"
 
 .section .data
 .balign 16
