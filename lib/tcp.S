@@ -2613,6 +2613,57 @@ tcp_rx_flush:
     ret
 
 /*
+ * tcp_rx_consume — Remove n bytes from the front of the rx buffer,
+ * preserving any bytes beyond.
+ *
+ * x0: connection pointer
+ * w1: number of bytes to consume
+ *
+ * If n >= RXLEN, clears the buffer entirely (equivalent to flushing,
+ * but leaves OOO_COUNT alone; callers that need the OOO-reset semantics
+ * should use tcp_rx_flush). Otherwise shifts rx[n..RXLEN] down to
+ * rx[0..RXLEN-n] and decrements RXLEN accordingly.
+ *
+ * Used by http_poll at response-setup to consume just the current
+ * request's bytes, leaving pipelined data behind for the next parse.
+ *
+ * Leaf function, clobbers x0-x7.
+ */
+.global tcp_rx_consume
+tcp_rx_consume:
+    ldrh    w2, [x0, #TCONN_RXLEN]
+    cmp     w1, w2
+    b.hs    .Ltrc_clear
+
+    /* Buffer base = tcp_rxbuf_pool + (slot << TCP_RXBUF_SHIFT) */
+    ldr     x3, =tcp_conn_table
+    sub     x3, x0, x3
+    lsr     x3, x3, #TCONN_SHIFT
+    ldr     x4, =tcp_rxbuf_pool
+    add     x4, x4, x3, lsl #TCP_RXBUF_SHIFT
+
+    /* Forward memmove rx[n..w2] → rx[0..w2-n]. dst < src by w1 so
+     * writes always trail reads — no overlap clobber. */
+    sub     w3, w2, w1
+    add     x5, x4, w1, uxtw
+    mov     x6, x4
+.Ltrc_cp:
+    cbz     w3, .Ltrc_done
+    ldrb    w7, [x5], #1
+    strb    w7, [x6], #1
+    sub     w3, w3, #1
+    b       .Ltrc_cp
+
+.Ltrc_done:
+    sub     w2, w2, w1
+    strh    w2, [x0, #TCONN_RXLEN]
+    ret
+
+.Ltrc_clear:
+    strh    wzr, [x0, #TCONN_RXLEN]
+    ret
+
+/*
  * tcp_window_update — Send a bare ACK to advertise current window
  *
  * x0: connection pointer

@@ -570,9 +570,16 @@ http_poll:
     mov     w0, #HTTPS_SENDING
     strb    w0, [x20, #HCONN_STATE]
 
-    /* Flush rx buffer */
+    /* Consume only this request's bytes from the rx buffer so any
+     * pipelined follow-on request stays for the next poll pass.
+     * REQ_LEN is the header section length; add CONTENT_LEN for the
+     * body. For error paths with no CL (400, etc.) CONTENT_LEN stays
+     * 0. tcp_rx_consume clamps if n >= rxlen. */
+    ldr     w0, [x20, #HCONN_REQ_LEN]
+    ldr     w1, [x20, #HCONN_CONTENT_LEN]
+    add     w1, w0, w1
     mov     x0, x19
-    bl      tcp_rx_flush
+    bl      tcp_rx_consume
 
     b       .Lhp_next
 
@@ -670,11 +677,9 @@ http_poll:
     strb    wzr, [x20, #HCONN_FLAGS]
     str     wzr, [x20, #HCONN_CONTENT_LEN]
 
-    /* Partial rx flush: consume only REQ_LEN bytes, preserving
-     * any pipelined data after the current request.
-     * TODO: implement partial flush in tcp layer. For now, full flush. */
-    mov     x0, x19
-    bl      tcp_rx_flush
+    /* No rx flush here — setup_resp already consumed the request
+     * bytes via tcp_rx_consume, preserving any pipelined follow-on
+     * data for the next parse on the freshly-reset HCONN. */
 
     b       .Lhp_next
 
