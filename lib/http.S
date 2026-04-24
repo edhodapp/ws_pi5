@@ -11,6 +11,7 @@
 .include "http.inc"
 
 .global http_init
+.global http_appliance_init
 .global http_set_send_ctx
 .global http_poll
 .global http_conn_table
@@ -25,16 +26,123 @@
 .section .text
 
 /*
- * http_init — Zero the HTTP connection table
- * Clobbers: x0-x1
+ * http_init — Zero the HTTP connection table, then run the appliance
+ * activation check (which resets the route indirection to the built-in
+ * table and, if the slab's magic is "WSPIAPLI", walks and activates
+ * the packaged appliance routes).
+ *
+ * Safe to call repeatedly — http_appliance_init resets the indirection
+ * globals first, so stale state from a previous run can't leak across.
  */
 http_init:
+    stp     x29, x30, [sp, #-16]!
     ldr     x0, =http_conn_table
     mov     w1, #(HTTP_CONN_TABLE_SIZE / 8)
 .Lhi_zero:
     str     xzr, [x0], #8
     subs    w1, w1, #1
     b.ne    .Lhi_zero
+    bl      http_appliance_init
+    ldp     x29, x30, [sp], #16
+    ret
+
+/*
+ * http_appliance_init — Detect whether the packager has written a real
+ * appliance into http_appliance_slab, and if so, walk the route array
+ * patching PATH_PTR / BODY_PTR / HDR_PTR byte-offsets into absolute
+ * pointers, then flip the route-table indirection globals to point at
+ * the slab's route section.
+ *
+ * Idempotent at the indirection boundary: always resets
+ * http_routes_active / http_routes_count_runtime to the built-in table
+ * first. Whether it then switches to appliance routes depends entirely
+ * on the current slab magic.
+ *
+ * Not idempotent at the slab patching level: if called on an
+ * already-patched slab (pointers already absolute), a second walk
+ * double-adds the content base and corrupts the table. Callers that
+ * want a fresh state must restore the slab's on-disk contents first.
+ * In practice only http_init calls this, and the slab is only mutated
+ * by the packager writing a binary image — the single boot-time call
+ * is the only activation.
+ *
+ * Clobbers: x0-x6, x19-x24, x30.
+ */
+http_appliance_init:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    /* Reset indirection to the built-in table first. */
+    ldr     x0, =http_routes_active
+    ldr     x1, =http_route_table
+    str     x1, [x0]
+    ldr     x0, =http_routes_count_runtime
+    ldr     w1, =http_route_count
+    str     w1, [x0]
+
+    /* Compare the slab's 8-byte magic against "WSPIAPLI".
+     * As a little-endian u64 that is: 'W','S','P','I','A','P','L','I'
+     *   = 0x49_4C_50_41_49_50_53_57
+     */
+    ldr     x19, =http_appliance_slab
+    ldr     x0, [x19]
+    ldr     x1, =0x494C504149505357
+    cmp     x0, x1
+    b.ne    .Lhai_done
+
+    /* Packaged appliance present. Walk routes, converting
+     * PATH/BODY/HDR byte-offsets into absolute pointers by adding
+     * the absolute address of the content region. */
+    add     x20, x19, #APPLIANCE_ROUTES_OFF     /* x20 = routes base */
+    add     x21, x19, #APPLIANCE_CONTENT_OFF    /* x21 = content base */
+    ldr     w22, [x19, #APPLIANCE_HDR_RCOUNT]   /* w22 = rcount */
+    mov     w23, #0                             /* w23 = i */
+
+.Lhai_loop:
+    cmp     w23, w22
+    b.hs    .Lhai_activate
+
+    /* route_ptr = routes_base + i * ROUTE_SIZE */
+    mov     w0, #ROUTE_SIZE
+    umull   x1, w23, w0
+    add     x1, x20, x1
+
+    /* PATH_PTR: offset → absolute. Paths must always be non-zero. */
+    ldr     x2, [x1, #ROUTE_PATH_PTR]
+    add     x2, x2, x21
+    str     x2, [x1, #ROUTE_PATH_PTR]
+
+    /* BODY_PTR: zero sentinel stays zero (dynamic routes have no
+     * static body). Non-zero offsets get fixed up. */
+    ldr     x2, [x1, #ROUTE_BODY_PTR]
+    cbz     x2, .Lhai_patch_hdr
+    add     x2, x2, x21
+    str     x2, [x1, #ROUTE_BODY_PTR]
+
+.Lhai_patch_hdr:
+    /* HDR_PTR: same zero-sentinel semantics — though every real
+     * route will have a response-header template. */
+    ldr     x2, [x1, #ROUTE_HDR_PTR]
+    cbz     x2, .Lhai_next
+    add     x2, x2, x21
+    str     x2, [x1, #ROUTE_HDR_PTR]
+
+.Lhai_next:
+    add     w23, w23, #1
+    b       .Lhai_loop
+
+.Lhai_activate:
+    /* Point the runtime indirection at the slab's route section. */
+    ldr     x0, =http_routes_active
+    str     x20, [x0]
+    ldr     x0, =http_routes_count_runtime
+    str     w22, [x0]
+
+.Lhai_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
     ret
 
 /*

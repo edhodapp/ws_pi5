@@ -76,6 +76,7 @@ test_http:
     bl      test_http_recv_body_slowloris
     bl      test_http_pipelined_keepalive
     bl      test_http_appliance_slab_placeholder
+    bl      test_http_appliance_activation
     ldp     x29, x30, [sp], #16
     ret
 
@@ -3302,6 +3303,133 @@ test_http_appliance_slab_placeholder:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ========================================================================
+ * test_http_appliance_activation — hand-craft an "appliance" slab and
+ * verify http_appliance_init walks its routes, patches the offset
+ * pointer fields into absolute pointers, and flips the runtime
+ * route-table indirection to point at the slab.
+ *
+ * The test stands in for what the real mk_appliance.py packager will
+ * write into the slab by hand-assembling:
+ *   - rcount=1, one route entry at routes[0]
+ *   - route.PATH_PTR = 0 (offset into content region)
+ *   - route.BODY_PTR = 100
+ *   - route.HDR_PTR  = 50
+ *   - magic flipped from "WSPINONE" to "WSPIAPLI"
+ *
+ * After http_init runs:
+ *   - http_routes_active must point at the slab's route section
+ *   - http_routes_count_runtime must equal 1
+ *   - each pointer offset must have been replaced with
+ *     (slab + APPLIANCE_CONTENT_OFF + offset)
+ *
+ * Cleanup: restores the slab magic to "WSPINONE" and calls http_init
+ * again so subsequent tests see the built-in route table.
+ * ======================================================================== */
+test_http_appliance_activation:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    ldr     x19, =http_appliance_slab
+    add     x20, x19, #APPLIANCE_CONTENT_OFF
+
+    /* Write the header fields (version / rcount / clen) and a single
+     * route entry with offset pointers. */
+    mov     w0, #APPLIANCE_VERSION
+    str     w0, [x19, #APPLIANCE_HDR_VERSION]
+    mov     w0, #1
+    str     w0, [x19, #APPLIANCE_HDR_RCOUNT]
+    mov     w0, #200                        /* clen — arbitrary non-zero */
+    str     w0, [x19, #APPLIANCE_HDR_CLEN]
+
+    add     x0, x19, #APPLIANCE_ROUTES_OFF  /* x0 = routes[0] */
+    mov     w1, #5
+    str     w1, [x0, #ROUTE_PATH_LEN]
+    mov     w1, #10
+    str     w1, [x0, #ROUTE_BODY_LEN]
+    mov     x1, #0
+    str     x1, [x0, #ROUTE_PATH_PTR]       /* offset 0 */
+    mov     x1, #100
+    str     x1, [x0, #ROUTE_BODY_PTR]       /* offset 100 */
+    mov     x1, #50
+    str     x1, [x0, #ROUTE_HDR_PTR]        /* offset 50 */
+    mov     w1, #64
+    str     w1, [x0, #ROUTE_HDR_LEN]
+    mov     w1, #0
+    strb    w1, [x0, #ROUTE_FLAGS]
+    mov     w1, #(HM_GET | HM_HEAD)
+    strb    w1, [x0, #ROUTE_METHODS]
+    str     xzr, [x0, #ROUTE_HANDLER]
+
+    /* Flip the magic from "WSPINONE" to "WSPIAPLI" by storing the
+     * 8-byte literal. ldr with literal pool handles the constant. */
+    ldr     x0, =0x494C504149505357         /* "WSPIAPLI" little-endian */
+    str     x0, [x19]
+
+    /* Activate */
+    bl      http_init
+
+    /* http_routes_count_runtime should now be 1 */
+    ldr     x0, =http_routes_count_runtime
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfail_haa
+
+    /* http_routes_active should point at slab + APPLIANCE_ROUTES_OFF */
+    ldr     x0, =http_routes_active
+    ldr     x0, [x0]
+    add     x1, x19, #APPLIANCE_ROUTES_OFF
+    cmp     x0, x1
+    b.ne    .Lfail_haa
+
+    /* PATH_PTR should have been patched to x20 + 0 = x20 */
+    add     x0, x19, #APPLIANCE_ROUTES_OFF
+    ldr     x1, [x0, #ROUTE_PATH_PTR]
+    cmp     x1, x20
+    b.ne    .Lfail_haa
+
+    /* BODY_PTR should be x20 + 100 */
+    ldr     x1, [x0, #ROUTE_BODY_PTR]
+    add     x2, x20, #100
+    cmp     x1, x2
+    b.ne    .Lfail_haa
+
+    /* HDR_PTR should be x20 + 50 */
+    ldr     x1, [x0, #ROUTE_HDR_PTR]
+    add     x2, x20, #50
+    cmp     x1, x2
+    b.ne    .Lfail_haa
+
+    /* Cleanup: restore "WSPINONE" and re-init so subsequent tests go
+     * back to the built-in route table. */
+    ldr     x0, =0x454E4F4E49505357         /* "WSPINONE" little-endian */
+    str     x0, [x19]
+    bl      http_init
+
+    /* Post-cleanup: indirection must be back to built-ins. */
+    ldr     x0, =http_routes_active
+    ldr     x0, [x0]
+    ldr     x1, =http_route_table
+    cmp     x0, x1
+    b.ne    .Lfail_haa
+
+    ldr     x0, =name_haa
+    bl      test_pass
+    b       .Ldone_haa
+
+.Lfail_haa:
+    /* Force cleanup on failure path too, so later tests aren't
+     * wrecked by a half-activated appliance state. */
+    ldr     x0, =0x454E4F4E49505357
+    str     x0, [x19]
+    bl      http_init
+    ldr     x0, =name_haa
+    bl      test_fail
+.Ldone_haa:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3583,6 +3711,7 @@ name_h4apr: .asciz "http_405_allow_per_route"
 name_hslb:  .asciz "http_recv_body_slowloris"
 name_hpk:   .asciz "http_pipelined_keepalive"
 name_hasp:  .asciz "http_appliance_slab_placeholder"
+name_haa:   .asciz "http_appliance_activation"
 
 .section .data
 .balign 16
