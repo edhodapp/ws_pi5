@@ -16,6 +16,8 @@
 
 .include "vmio.inc"
 .include "http.inc"
+.include "tcp.inc"
+.include "net.inc"
 
 .ifdef HTTP_OUTPUT_FSA
 
@@ -42,6 +44,11 @@ test_http_output_fsa:
     bl      test_fsa_step_preserves_other_way_state
     bl      test_fsa_step_idle_on_empty
     bl      test_fsa_step_no_trans_leaves_state
+    /* ---- send-path functional tests ---- */
+    bl      test_fsa_send_one_chunk
+    bl      test_fsa_response_drains_keepalive
+    bl      test_fsa_response_drains_close
+    bl      test_fsa_tcp_reset_during_tx
 
     ldp     x29, x30, [sp], #16
     ret
@@ -617,6 +624,378 @@ test_fsa_step_no_trans_leaves_state:
     ldp     x29, x30, [sp], #16
     ret
 
+/* ======================================================================
+ * Shared setup helpers for send-path tests.
+ * Each helper leaves state in a known shape so individual tests stay
+ * short and read linearly.
+ * ======================================================================
+ */
+
+/* tfsa_seed_established(way=w0)
+ * Put tcp_conn[way] in ESTABLISHED with a large send window and a
+ * SND_UNA == SND_NXT invariant so tcp_send works and h_send can loop.
+ * Clobbers x0-x9.
+ */
+tfsa_seed_established:
+    stp     x29, x30, [sp, #-16]!
+    mov     w9, w0                                 /* w9 = way */
+
+    ldr     x1, =tcp_conn_table
+    lsl     w2, w9, #TCONN_SHIFT
+    add     x1, x1, x2
+    /* x1 = tcp_conn */
+
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x1, #TCONN_STATE]
+    mov     w0, #0x5000
+    add     w0, w0, w9                             /* unique LPORT */
+    strh    w0, [x1, #TCONN_LPORT]
+    mov     w0, #2000
+    str     w0, [x1, #TCONN_SND_WND]
+    mov     w0, #100
+    str     w0, [x1, #TCONN_SND_UNA]
+    str     w0, [x1, #TCONN_SND_NXT]
+    mov     w0, #TCP_OUR_MSS
+    strh    w0, [x1, #TCONN_PEER_MSS]
+    mov     w0, #0x40000
+    str     w0, [x1, #TCONN_CWND]
+    ldr     x0, =net_our_mac
+    ldr     w2, [x0]
+    str     w2, [x1, #TCONN_RMAC]
+    ldrh    w2, [x0, #4]
+    strh    w2, [x1, #(TCONN_RMAC + 4)]
+    ldr     x0, =net_our_ip
+    ldr     w0, [x0]
+    str     w0, [x1, #TCONN_RIP]
+    mov     w0, #1
+    str     w0, [x1, #TCONN_RCV_NXT]
+    mov     w0, #-1
+    str     w0, [x1, #TCONN_TIMER_SLOT]
+
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* tfsa_seed_response(way=w0)
+ * Populate HCONN[way] with a 200-response shape using http_200_hdr /
+ * http_200_body. HCONN_STATE → HTTPS_SENDING so the input-side poll
+ * dispatch skips this HCONN. Caller is responsible for posting
+ * E_RESP_READY via http_fsa_post to kick the FSA.
+ */
+tfsa_seed_response:
+    mov     w9, w0                                 /* way */
+
+    ldr     x1, =http_conn_table
+    lsl     w2, w9, #HCONN_SHIFT
+    add     x1, x1, x2
+
+    mov     w0, #HTTPS_SENDING
+    strb    w0, [x1, #HCONN_STATE]
+    strb    wzr, [x1, #HCONN_STATUS]
+    str     wzr, [x1, #HCONN_RESP_PTR]
+    /* HFLAG_HTTP11 so h_decide posts DO_KEEPALIVE (default persistent) */
+    mov     w0, #HFLAG_HTTP11
+    strb    w0, [x1, #HCONN_FLAGS]
+
+    ldr     x0, =http_200_body
+    str     x0, [x1, #HCONN_BODY_PTR]
+    /* http_200_body_len / _hdr_len are .equ symbols local to http.S
+     * (assembler gotcha: .equ cannot be .global). The legacy test in
+     * test_http.S hardcodes the same numbers; the Content-Length: 158
+     * value baked into http_200_hdr pins the body length. */
+    mov     w0, #158                                /* http_200_body_len */
+    str     w0, [x1, #HCONN_BODY_LEN]
+    ldr     x3, =http_200_hdr
+    str     x3, [x1, #HCONN_HDR_SRC_PTR]
+    mov     w2, #133                                /* http_200_hdr_len */
+    str     w2, [x1, #HCONN_HDR_SRC_LEN]
+    str     w2, [x1, #HCONN_HDR_LEN]
+    add     w3, w0, w2                              /* hdr + body = 291 */
+    str     w3, [x1, #HCONN_RESP_LEN]
+    ret
+
+/* tfsa_mock_send_install — install tfsa_counting_send as the TX function
+ * so h_send's frame emission increments tfsa_send_count without
+ * touching real hardware. Also zeros the counter. */
+tfsa_mock_send_install:
+    stp     x29, x30, [sp, #-16]!
+    ldr     x0, =tfsa_send_count
+    str     wzr, [x0]
+    mov     x0, #0                                 /* dwc2_base */
+    mov     x1, #0                                 /* ecm_state */
+    ldr     x2, =tfsa_tx_buf
+    ldr     x3, =tfsa_counting_send
+    bl      http_set_send_ctx
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* tfsa_counting_send — mock send_fn, just bumps the counter. */
+tfsa_counting_send:
+    ldr     x4, =tfsa_send_count
+    ldr     w5, [x4]
+    add     w5, w5, #1
+    str     w5, [x4]
+    mov     w0, #0
+    ret
+
+/* ======================================================================
+ * test_fsa_send_one_chunk — equivalent to legacy test_http_send_chunk.
+ * After seeding + posting E_RESP_READY + http_poll, the mock send must
+ * have been invoked at least once and HCONN_RESP_PTR must have moved.
+ * ====================================================================== */
+test_fsa_send_one_chunk:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+    bl      http_init
+
+    mov     w0, #0
+    bl      tfsa_seed_established
+    mov     w0, #0
+    bl      tfsa_seed_response
+    bl      tfsa_mock_send_install
+
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    cmp     w0, #1
+    b.ne    .Lfsc_fail
+
+    bl      http_poll
+
+    /* Mock send MUST have fired at least once. */
+    ldr     x0, =tfsa_send_count
+    ldr     w0, [x0]
+    cbz     w0, .Lfsc_fail
+
+    /* HCONN_RESP_PTR must have advanced from 0. */
+    ldr     x0, =http_conn_table
+    ldr     w0, [x0, #HCONN_RESP_PTR]
+    cbz     w0, .Lfsc_fail
+
+    ldr     x0, =name_fsc
+    bl      test_pass
+    b       .Lfsc_done
+.Lfsc_fail:
+    ldr     x0, =name_fsc
+    bl      test_fail
+.Lfsc_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_response_drains_keepalive — full happy path with
+ * HFLAG_HTTP11 set: response drains, DRAINING + ALL_DRAINED fires
+ * h_decide → DO_KEEPALIVE → h_keepalive → HCONN_STATE back to
+ * HTTPS_RECV_HDR for next pipelined request. ostate must be O_IDLE.
+ * ====================================================================== */
+test_fsa_response_drains_keepalive:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    mov     w0, #0
+    bl      tfsa_seed_established
+    mov     w0, #0
+    bl      tfsa_seed_response
+    bl      tfsa_mock_send_install
+
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+
+    /* Pump http_poll to exhaust bytes → O_DRAINING. Mock send_fn is
+     * silent (never advances SND_UNA), so simulate "ACKs arrived for
+     * all transmitted data" by forcing SND_UNA = SND_NXT. Then another
+     * http_poll picks up E_ALL_DRAINED via the polling pass. Cap
+     * outer iterations at 16 so a broken FSA can't hang. */
+    mov     w19, #16
+.Lfdk_pump:
+    bl      http_poll
+    /* Simulate ACK arrival so DRAINING can fire. */
+    ldr     x0, =tcp_conn_table
+    ldr     w1, [x0, #TCONN_SND_NXT]
+    str     w1, [x0, #TCONN_SND_UNA]
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATE]
+    cmp     w0, #HTTPS_RECV_HDR
+    b.eq    .Lfdk_check
+    subs    w19, w19, #1
+    b.ne    .Lfdk_pump
+    b       .Lfdk_fail
+
+.Lfdk_check:
+    /* ostate[0] must be O_IDLE after h_keepalive completes. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w0, [x0]
+    cbnz    w0, .Lfdk_fail
+
+    /* h_keepalive dispatch count must be exactly 1. */
+    ldr     x0, =http_fsa_count_keepalive
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfdk_fail
+
+    /* h_close must NOT have run (HTTP/1.1 → keepalive). */
+    ldr     x0, =http_fsa_count_close
+    ldr     w0, [x0]
+    cbnz    w0, .Lfdk_fail
+
+    ldr     x0, =name_fdk
+    bl      test_pass
+    b       .Lfdk_done
+.Lfdk_fail:
+    ldr     x0, =name_fdk
+    bl      test_fail
+.Lfdk_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ======================================================================
+ * test_fsa_response_drains_close — same shape as keepalive, but with
+ * HFLAG_CLOSE set: h_decide must post DO_CLOSE, h_close runs (tcp_close
+ * builds FIN which mock_send transmits), HCONN_STATE ends at IDLE (0),
+ * not RECV_HDR.
+ * ====================================================================== */
+test_fsa_response_drains_close:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    mov     w0, #0
+    bl      tfsa_seed_established
+    mov     w0, #0
+    bl      tfsa_seed_response
+    /* Override FLAGS: HTTP11 + CLOSE → close path. */
+    ldr     x0, =http_conn_table
+    mov     w1, #(HFLAG_HTTP11 | HFLAG_CLOSE)
+    strb    w1, [x0, #HCONN_FLAGS]
+    bl      tfsa_mock_send_install
+
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+
+    mov     w19, #16
+.Lfdc_pump:
+    bl      http_poll
+    /* Simulate ACK arrival so DRAINING can fire (see keepalive test). */
+    ldr     x0, =tcp_conn_table
+    ldr     w1, [x0, #TCONN_SND_NXT]
+    str     w1, [x0, #TCONN_SND_UNA]
+    ldr     x0, =http_fsa_count_close
+    ldr     w0, [x0]
+    cbnz    w0, .Lfdc_check
+    subs    w19, w19, #1
+    b.ne    .Lfdc_pump
+    b       .Lfdc_fail
+
+.Lfdc_check:
+    /* h_close must have run exactly once. */
+    ldr     x0, =http_fsa_count_close
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfdc_fail
+
+    /* h_keepalive must NOT have run. */
+    ldr     x0, =http_fsa_count_keepalive
+    ldr     w0, [x0]
+    cbnz    w0, .Lfdc_fail
+
+    /* HCONN_STATE must be IDLE (0), not RECV_HDR. */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATE]
+    cbnz    w0, .Lfdc_fail
+
+    ldr     x0, =name_fdc
+    bl      test_pass
+    b       .Lfdc_done
+.Lfdc_fail:
+    ldr     x0, =name_fdc
+    bl      test_fail
+.Lfdc_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ======================================================================
+ * test_fsa_tcp_reset_during_tx — TCP transitions out of ESTABLISHED
+ * while the FSA is mid-send. The next http_fsa_poll_tcp_events pass
+ * must post E_TCP_CLOSED; the engine routes that to h_reset, which
+ * wipes HCONN and leaves ostate at O_IDLE.
+ * ====================================================================== */
+test_fsa_tcp_reset_during_tx:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      tcp_init
+    bl      http_init
+
+    mov     w0, #0
+    bl      tfsa_seed_established
+    mov     w0, #0
+    bl      tfsa_seed_response
+    bl      tfsa_mock_send_install
+
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    bl      http_poll                              /* advances through h_install,
+                                                    * h_send emits frame,
+                                                    * ostate[0] should be O_TX */
+
+    /* Force TCP out of ESTABLISHED (simulates RST). */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #TCPS_CLOSED
+    strb    w1, [x0, #TCONN_STATE]
+
+    bl      http_poll                              /* poll_tcp_events posts
+                                                    * E_TCP_CLOSED; engine
+                                                    * dispatches h_reset */
+
+    /* ostate[0] must now be O_IDLE. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w0, [x0]
+    cbnz    w0, .Lftrdt_fail
+
+    /* HCONN fields wiped by h_reset (STATE + FLAGS at least). */
+    ldr     x0, =http_conn_table
+    ldrb    w1, [x0, #HCONN_STATE]
+    cbnz    w1, .Lftrdt_fail
+    ldrb    w1, [x0, #HCONN_FLAGS]
+    cbnz    w1, .Lftrdt_fail
+
+    /* h_reset counter must be >= 1 (may fire again on subsequent
+     * pumps if the FSA double-polls; >= 1 is the invariant). */
+    ldr     x0, =http_fsa_count_reset
+    ldr     w0, [x0]
+    cbz     w0, .Lftrdt_fail
+
+    ldr     x0, =name_ftrdt
+    bl      test_pass
+    b       .Lftrdt_done
+.Lftrdt_fail:
+    ldr     x0, =name_ftrdt
+    bl      test_fail
+.Lftrdt_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * Test data / buffers for the send-path tests.
+ * ====================================================================== */
+.section .data
+.balign 16
+tfsa_tx_buf:
+    .space ETH_FRAME_MAX
+
+.balign 4
+tfsa_send_count:
+    .word 0
+
 /* ====================================================================== */
 .section .rodata
 name_fiz:    .asciz "fsa_init_zeroes_state"
@@ -634,5 +1013,9 @@ name_fsao:   .asciz "fsa_step_advances_ostate"
 name_fspos:  .asciz "fsa_step_preserves_other_way_state"
 name_fsioe:  .asciz "fsa_step_idle_on_empty"
 name_fsntls: .asciz "fsa_step_no_trans_leaves_state"
+name_fsc:    .asciz "fsa_send_one_chunk"
+name_fdk:    .asciz "fsa_response_drains_keepalive"
+name_fdc:    .asciz "fsa_response_drains_close"
+name_ftrdt:  .asciz "fsa_tcp_reset_during_tx"
 
 .endif
