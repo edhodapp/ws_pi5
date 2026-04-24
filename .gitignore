@@ -9,3 +9,5 @@ fuzz/findings/
 __pycache__/
 .coverage
 .pytest_cache/
+.mutmut-cache
+.claude/
