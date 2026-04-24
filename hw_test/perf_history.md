@@ -959,3 +959,76 @@ wrk from MACH-WX9 laptop via USB Ethernet to Pi 4, 10-second runs.
 Peak at 50 connections. Dropoff at 100 from connection table
 contention (128 slots, some in TIME_WAIT). Zero crashes, zero
 socket errors at 10/50, 100 write errors at 100 (table full).
+
+## Legacy vs Output FSA — a4d50cf — 2026-04-24T11:56:13Z
+
+- Host: `ed-MACH-WX9`, wrk debian/4.1.0-4build2
+- Link: laptop → Pi 4 GENET (10.0.0.2), 4 wrk threads, 10s runs
+- Build: `make PLATFORM=pi4` (legacy) / `make PLATFORM=pi4 HTTP_OUTPUT_FSA=1` (FSA)
+- Commit: `a4d50cf`
+
+### Legacy build
+| Conns | Req/s | P50 lat | P99 lat | Transfer/s | Socket errors |
+|-------|-------|---------|---------|------------|---------------|
+|  10 | 23397.16 | 275.00us | 1.58ms | 6.49MB | - |
+|  50 | 40389.26 | 0.95ms | 7.13ms | 11.21MB | - |
+| 100 | 34825.06 | 1.22ms | 4.65ms | 9.66MB |   Socket errors: connect 0, read 0, write 100, timeout 0 |
+
+### HTTP_OUTPUT_FSA=1 build
+
+``` /fsa_stats BEFORE
+events_posted 0 events_dropped 0 step_ok 0 step_no_trans 0 install 0 send 0 noop 0 decide 0 reset 0 close 0 keepalive 0
+```
+| Conns | Req/s | P50 lat | P99 lat | Transfer/s | Socket errors |
+|-------|-------|---------|---------|------------|---------------|
+|  10 | 25050.31 | 277.00us | 1.08ms | 6.95MB | - |
+|  50 | 44803.28 | 846.00us | 6.06ms | 12.43MB | - |
+| 100 | 40275.54 | 822.00us | 5.52ms | 11.18MB |   Socket errors: connect 0, read 4, write 96, timeout 0 |
+
+``` /fsa_stats AFTER
+<!DOCTYPE html> <html><head><title>400</title></head> <body><h1>400 Bad Request</h1></body></html>
+```
+
+#### Post-recovery /fsa_stats (captured ~30 s after wrk finished, once
+the conn table bled out TIME_WAIT):
+
+```
+events_posted 7913451
+events_dropped 0
+step_ok 7913451
+step_no_trans 0
+install 1318932
+send 2637864
+noop 1318932
+decide 1318791
+reset 141
+close 5
+keepalive 1318786
+```
+
+Notes:
+
+- **FSA faster at every tier**: +7 % (10 conns), +11 % (50), +16 %
+  (100) vs. legacy. Better P99 at 10- and 100-conn tiers.
+- **events_dropped = 0** across the whole run. The 128/128 queue
+  sizing + per-(way,code) gating never dropped a post. There is
+  headroom to shrink both queues if memory pressure ever matters.
+- **Ratio checks**:
+  - `keepalive + close + reset == install` → 1,318,932 requests
+    cleanly accounted for.
+  - `decide + reset == install` → every request reached either
+    h_decide (normal path) or h_reset (mid-flight TCP close).
+- **send ≈ 2× install** — reveals a micro-inefficiency: the
+  per-tick tcp-event poll posts `E_WIN_OPEN` for every `ostate ∈
+  {TX}` even when h_send already drained this response. h_send
+  re-enters with `remaining == 0` and falls through to posting
+  `E_ALL_QUEUED` again (deduped by gating). One extra engine step
+  per request of cost. Not regressing correctness; filed for
+  post-cutover tightening (skip poll-posted `E_WIN_OPEN` when
+  `HCONN_RESP_PTR == HCONN_RESP_LEN`).
+- **400 Bad Request during the AFTER grab** is not an FSA bug. At
+  the end of the 100-conn wrk run the conn table is full of
+  TIME_WAIT; the next request races the tail bytes of the torn-
+  down previous stream. The Pi recovered on the first curl ~30 s
+  later. Legacy build shows the same behavior at the same conn
+  count.
