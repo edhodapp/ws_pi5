@@ -19,7 +19,17 @@ Run:
     HW_TEST=1 .venv/bin/pytest hw_test/test_l2_linkflap.py -v
 """
 
-import time
+# pylint: disable=missing-class-docstring,unused-argument,line-too-long
+# pylint: disable=inconsistent-quotes
+# flake8: noqa: E501
+# mypy: ignore-errors
+#
+# Matches the pragma block in conftest.py and other hw_test modules.
+# Unused fixture args (laptop_mac, laptop_ip, pi_mac, rtt_p99_ms) are
+# real dependency-injection: pytest runs their side effects (capture
+# setup, route install) before the test body runs.
+
+import subprocess
 
 import pytest
 
@@ -27,6 +37,44 @@ import eth_frames
 import link
 import wire
 from conftest import requires_hardware, PI4_IP
+
+
+def _restore_nm_routes(iface: str) -> None:
+    """Re-activate the NetworkManager profile bound to iface so the
+    profile's configured routes get reinstalled.
+
+    Netlink IFF_UP toggling (what link.temporary_link_down does) flushes
+    routes without deactivating the NM connection, so NM doesn't realize
+    routes need to come back. A clean 'connection up' does reinstall
+    them. Looks up the connection name by DEVICE so this works regardless
+    of which laptop is running the test.
+    """
+    try:
+        out = subprocess.check_output(
+            ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+            text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return
+    for line in out.splitlines():
+        name, _, dev = line.partition(":")
+        if dev == iface and name:
+            subprocess.run(
+                ["nmcli", "connection", "up", name],
+                timeout=10, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return
+
+
+@pytest.fixture(autouse=True)
+def _linkflap_route_restore(eth_iface):
+    """Any linkflap test wipes laptop-side routes as a side effect of
+    netlink IFF_UP toggling. Re-activate the NM profile after the test
+    so subsequent L2 tests (ping, reachability) have a working route.
+    """
+    yield
+    _restore_nm_routes(eth_iface)
 
 
 @requires_hardware
