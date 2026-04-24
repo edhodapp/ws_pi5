@@ -53,6 +53,8 @@ test_http_output_fsa:
     bl      test_fsa_events_posted_counter
     bl      test_fsa_events_dropped_counter_on_dup
     bl      test_fsa_step_counters
+    /* ---- /fsa_stats generator ---- */
+    bl      test_fsa_stats_generator
 
     ldp     x29, x30, [sp], #16
     ret
@@ -1136,6 +1138,128 @@ test_fsa_step_counters:
     ret
 
 /* ======================================================================
+ * test_fsa_stats_generator — after posting a known number of events,
+ * the generator's output MUST contain the expected counter labels and
+ * the matching decimal values. Tests don't parse HTTP — they call the
+ * generator directly with a scratch buffer.
+ * ====================================================================== */
+test_fsa_stats_generator:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      http_fsa_init
+
+    /* Drive counters to known values:
+     *   events_posted = 2 (two unique posts)
+     *   events_dropped = 1 (one dup)
+     *   events posted: RESP_READY for way 0 + RESP_READY for way 0 (dup)
+     *                  WIN_OPEN for way 5
+     */
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post                         /* posted=1 */
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post                         /* dropped=1 */
+    mov     w0, #5
+    mov     w1, #E_WIN_OPEN
+    bl      http_fsa_post                         /* posted=2 */
+
+    /* Generate into scratch buf. */
+    ldr     x0, =tfsa_tx_buf
+    mov     w1, #256
+    mov     x2, #0                                /* HCONN unused */
+    bl      http_fsa_stats_generate
+    cmp     w0, #0
+    b.le    .Lfsg_fail
+    mov     w19, w0                               /* w19 = len */
+
+    /* Verify: output must contain "events_posted 2\n" — search for
+     * "events_posted " label, then a byte that is ASCII '2'. */
+    ldr     x20, =tfsa_tx_buf
+    ldr     x0, =tlbl_events_posted
+    mov     w1, #tlbl_events_posted_len
+    mov     x2, x20
+    mov     w3, w19
+    bl      tfsa_find_substr
+    cbz     x0, .Lfsg_fail                        /* label not found */
+    /* x0 points at the byte AFTER the label (the value digit). */
+    ldrb    w1, [x0]
+    cmp     w1, #'2'
+    b.ne    .Lfsg_fail
+    ldrb    w1, [x0, #1]
+    cmp     w1, #0x0a                             /* \n */
+    b.ne    .Lfsg_fail
+
+    /* Verify: events_dropped 1\n */
+    ldr     x0, =tlbl_events_dropped
+    mov     w1, #tlbl_events_dropped_len
+    mov     x2, x20
+    mov     w3, w19
+    bl      tfsa_find_substr
+    cbz     x0, .Lfsg_fail
+    ldrb    w1, [x0]
+    cmp     w1, #'1'
+    b.ne    .Lfsg_fail
+
+    ldr     x0, =name_fsg
+    bl      test_pass
+    b       .Lfsg_done
+.Lfsg_fail:
+    ldr     x0, =name_fsg
+    bl      test_fail
+.Lfsg_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/*
+ * tfsa_find_substr — naive substring search.
+ *   x0: needle
+ *   w1: needle length
+ *   x2: haystack
+ *   w3: haystack length
+ * Returns: x0 = pointer INTO haystack at the byte AFTER the first
+ *          match (so the caller can read the value that follows the
+ *          label), or 0 if not found.
+ */
+tfsa_find_substr:
+    mov     x4, x2                                /* hs cursor */
+.Ltfs_scan:
+    cmp     w3, w1
+    b.lo    .Ltfs_miss                            /* too little left */
+    mov     x5, x0                                /* needle cursor */
+    mov     x6, x4                                /* test cursor */
+    mov     w7, w1                                /* bytes to match */
+.Ltfs_cmp:
+    cbz     w7, .Ltfs_hit
+    ldrb    w8, [x5], #1
+    ldrb    w9, [x6], #1
+    cmp     w8, w9
+    b.ne    .Ltfs_next
+    sub     w7, w7, #1
+    b       .Ltfs_cmp
+.Ltfs_next:
+    add     x4, x4, #1
+    sub     w3, w3, #1
+    b       .Ltfs_scan
+.Ltfs_hit:
+    mov     x0, x6                                /* first byte past label */
+    ret
+.Ltfs_miss:
+    mov     x0, #0
+    ret
+
+.section .rodata
+tlbl_events_posted:    .ascii "events_posted "
+tlbl_events_posted_end:
+.equ tlbl_events_posted_len, tlbl_events_posted_end - tlbl_events_posted
+
+tlbl_events_dropped:   .ascii "events_dropped "
+tlbl_events_dropped_end:
+.equ tlbl_events_dropped_len, tlbl_events_dropped_end - tlbl_events_dropped
+
+/* ======================================================================
  * Test data / buffers for the send-path tests.
  * ====================================================================== */
 .section .data
@@ -1171,5 +1295,6 @@ name_ftrdt:  .asciz "fsa_tcp_reset_during_tx"
 name_fec:    .asciz "fsa_events_posted_counter"
 name_fedc:   .asciz "fsa_events_dropped_counter_on_dup"
 name_fsco:   .asciz "fsa_step_counters"
+name_fsg:    .asciz "fsa_stats_generator"
 
 .endif

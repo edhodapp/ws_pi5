@@ -1231,6 +1231,22 @@ http_route_table:
     .byte   0, 0
     .xword  http_form_log_handler
 
+.ifdef HTTP_OUTPUT_FSA
+    /* Route N: "/fsa_stats" (dynamic, GET+HEAD). Only present in the
+     * HTTP_OUTPUT_FSA build — exposes engine counters for perf
+     * comparison and as a diagnostic during the migration. */
+    .word   10
+    .word   0
+    .xword  http_path_fsa_stats
+    .xword  0
+    .xword  http_status_hdr
+    .word   http_status_hdr_len
+    .byte   1
+    .byte   HM_GET | HM_HEAD
+    .byte   0, 0
+    .xword  http_fsa_stats_generate
+.endif
+
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE
 

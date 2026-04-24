@@ -65,6 +65,12 @@
 .global http_fsa_step_ok
 .global http_fsa_step_no_trans
 
+/* /fsa_stats route symbols (referenced from http_route_table under
+ * the flag — must be global so the linker resolves the cross-file
+ * references in .rodata). */
+.global http_fsa_stats_generate
+.global http_path_fsa_stats
+
 /* Handler symbols are .global so tests can pin table cells against
  * them (ldr x,=h_install then compare to TRANS_HANDLER entry). */
 .global h_install
@@ -742,6 +748,227 @@ http_fsa_poll_tcp_events:
     ret
 
 /* ========================================================================
+ * http_fsa_stats_generate — dynamic-route handler that formats the
+ * FSA's telemetry counters into a plain-text body. Same signature as
+ * http_status_generate so it slots directly into the route table's
+ * ROUTE_HANDLER slot.
+ *
+ *   x0: output buffer
+ *   w1: max buffer size (caller's per-HCONN scratch, HTTP_DYN_BODY_SIZE)
+ *   x2: HCONN pointer (unused — counters are process-global)
+ *
+ * Returns: w0 = bytes written, 0 if the buffer is too small for even
+ * the key/value pair we're halfway through.
+ *
+ * Body format: one `name value\n` line per counter. Terse so the raw
+ * response is cheap to parse from scripts:
+ *
+ *   events_posted 12345
+ *   events_dropped 67
+ *   step_ok 12340
+ *   step_no_trans 5
+ *   install 42
+ *   send 1234
+ *   noop 42
+ *   decide 42
+ *   reset 0
+ *   close 0
+ *   keepalive 42
+ *
+ * Each counter contributes up to (label + space + 10 decimal digits +
+ * newline) bytes, ~25 B per line × 11 lines < 300 B — fits comfortably
+ * in the 1 KB HTTP_DYN_BODY_SIZE scratch.
+ *
+ * Clobbers: x0-x7, x19-x22 (callee-saved), x30.
+ * ======================================================================== */
+http_fsa_stats_generate:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0                               /* x19 = buf start */
+    mov     x20, x0                               /* x20 = write cursor */
+    add     x21, x0, x1                           /* x21 = buf end */
+
+    /* Emit each counter as `label VALUE\n`. Label + space come from a
+     * rodata literal; value is decimal. Keep going only while there's
+     * at least worst-case room (~25 B) for the next line.
+     *
+     * The macro approach here would cost more clarity than 11 explicit
+     * pairs — keep each pair visible so a diff-reader can see the
+     * exact ordering. */
+    ldr     x0, =fsa_lbl_events_posted
+    mov     w1, #fsa_lbl_events_posted_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_events_posted
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_events_dropped
+    mov     w1, #fsa_lbl_events_dropped_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_events_dropped
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_step_ok
+    mov     w1, #fsa_lbl_step_ok_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_step_ok
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_step_no_trans
+    mov     w1, #fsa_lbl_step_no_trans_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_step_no_trans
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_install
+    mov     w1, #fsa_lbl_install_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_install
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_send
+    mov     w1, #fsa_lbl_send_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_send
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_noop
+    mov     w1, #fsa_lbl_noop_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_noop
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_decide
+    mov     w1, #fsa_lbl_decide_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_decide
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_reset
+    mov     w1, #fsa_lbl_reset_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_reset
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_close
+    mov     w1, #fsa_lbl_close_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_close
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    ldr     x0, =fsa_lbl_keepalive
+    mov     w1, #fsa_lbl_keepalive_len
+    bl      .Lfsg_emit_str
+    ldr     x0, =http_fsa_count_keepalive
+    ldr     w0, [x0]
+    bl      .Lfsg_emit_u32
+    bl      .Lfsg_emit_nl
+
+    /* Total bytes written = cursor - start. */
+    sub     w0, w20, w19
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* Local helpers — leaf functions that write into x20 (cursor),
+ * respecting x21 (end). Run-out-of-space aborts the emission silently;
+ * caller still returns whatever bytes landed. */
+
+/* .Lfsg_emit_str: copy w1 bytes from x0 to x20, advance x20. */
+.Lfsg_emit_str:
+    cbz     w1, .Lfsg_emit_str_done
+.Lfsg_emit_str_loop:
+    cmp     x20, x21
+    b.hs    .Lfsg_emit_str_done
+    ldrb    w2, [x0], #1
+    strb    w2, [x20], #1
+    subs    w1, w1, #1
+    b.ne    .Lfsg_emit_str_loop
+.Lfsg_emit_str_done:
+    ret
+
+/* .Lfsg_emit_nl: write a single '\n'. */
+.Lfsg_emit_nl:
+    cmp     x20, x21
+    b.hs    .Lfsg_emit_nl_done
+    mov     w2, #0x0a
+    strb    w2, [x20], #1
+.Lfsg_emit_nl_done:
+    ret
+
+/* .Lfsg_emit_u32: write decimal form of w0 at x20, advance x20. Uses
+ * a 16-byte stack scratch since u32 max = 10 digits. */
+.Lfsg_emit_u32:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+
+    /* Special-case 0 so the main loop doesn't need a no-digit guard. */
+    cbnz    w0, .Lfsg_u32_loop
+    cmp     x20, x21
+    b.hs    .Lfsg_u32_ret
+    mov     w2, #'0'
+    strb    w2, [x20], #1
+    b       .Lfsg_u32_ret
+
+.Lfsg_u32_loop:
+    /* Push digits onto a 16-byte local buffer in reverse order, then
+     * pop them into the output in natural order. */
+    sub     sp, sp, #16
+    mov     x3, sp                                /* buffer base */
+    mov     x4, sp                                /* write ptr */
+    mov     w5, #10
+
+.Lfsg_u32_div:
+    cbz     w0, .Lfsg_u32_reverse
+    udiv    w6, w0, w5
+    msub    w7, w6, w5, w0                        /* digit = w0 % 10 */
+    add     w7, w7, #'0'
+    strb    w7, [x4], #1
+    mov     w0, w6
+    b       .Lfsg_u32_div
+
+.Lfsg_u32_reverse:
+.Lfsg_u32_pop:
+    cmp     x4, x3
+    b.ls    .Lfsg_u32_pop_done
+    sub     x4, x4, #1
+    ldrb    w7, [x4]
+    cmp     x20, x21
+    b.hs    .Lfsg_u32_pop_done
+    strb    w7, [x20], #1
+    b       .Lfsg_u32_pop
+
+.Lfsg_u32_pop_done:
+    add     sp, sp, #16
+
+.Lfsg_u32_ret:
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
  * Transition table — 32 entries (4 states × 8 events) × 16 B = 512 B.
  * Layout per entry: u32 next_state, u32 pad, u64 handler_ptr.
  * Entries with handler_ptr = 0 yield STEP_NO_TRANS at runtime.
@@ -897,6 +1124,58 @@ http_fsa_trans_table:
 .if http_fsa_trans_table_entries != (FSA_NSTATES * FSA_NEVENTS)
 .error "http_fsa_trans_table size drift — update FSA_NSTATES or FSA_NEVENTS"
 .endif
+
+/* /fsa_stats route path — referenced from http_route_table under the
+ * flag. Length is 10 to match the route-entry path_len. */
+http_path_fsa_stats:
+    .ascii  "/fsa_stats"
+
+/* Counter labels for http_fsa_stats_generate. Each line includes the
+ * trailing space so the label + value form one atomic write. Lengths
+ * are .equ so the emit_str calls are fixed at assembly time. */
+fsa_lbl_events_posted:      .ascii "events_posted "
+fsa_lbl_events_posted_end:
+.equ fsa_lbl_events_posted_len, fsa_lbl_events_posted_end - fsa_lbl_events_posted
+
+fsa_lbl_events_dropped:     .ascii "events_dropped "
+fsa_lbl_events_dropped_end:
+.equ fsa_lbl_events_dropped_len, fsa_lbl_events_dropped_end - fsa_lbl_events_dropped
+
+fsa_lbl_step_ok:            .ascii "step_ok "
+fsa_lbl_step_ok_end:
+.equ fsa_lbl_step_ok_len, fsa_lbl_step_ok_end - fsa_lbl_step_ok
+
+fsa_lbl_step_no_trans:      .ascii "step_no_trans "
+fsa_lbl_step_no_trans_end:
+.equ fsa_lbl_step_no_trans_len, fsa_lbl_step_no_trans_end - fsa_lbl_step_no_trans
+
+fsa_lbl_install:            .ascii "install "
+fsa_lbl_install_end:
+.equ fsa_lbl_install_len, fsa_lbl_install_end - fsa_lbl_install
+
+fsa_lbl_send:               .ascii "send "
+fsa_lbl_send_end:
+.equ fsa_lbl_send_len, fsa_lbl_send_end - fsa_lbl_send
+
+fsa_lbl_noop:               .ascii "noop "
+fsa_lbl_noop_end:
+.equ fsa_lbl_noop_len, fsa_lbl_noop_end - fsa_lbl_noop
+
+fsa_lbl_decide:             .ascii "decide "
+fsa_lbl_decide_end:
+.equ fsa_lbl_decide_len, fsa_lbl_decide_end - fsa_lbl_decide
+
+fsa_lbl_reset:              .ascii "reset "
+fsa_lbl_reset_end:
+.equ fsa_lbl_reset_len, fsa_lbl_reset_end - fsa_lbl_reset
+
+fsa_lbl_close:              .ascii "close "
+fsa_lbl_close_end:
+.equ fsa_lbl_close_len, fsa_lbl_close_end - fsa_lbl_close
+
+fsa_lbl_keepalive:          .ascii "keepalive "
+fsa_lbl_keepalive_end:
+.equ fsa_lbl_keepalive_len, fsa_lbl_keepalive_end - fsa_lbl_keepalive
 
 /* ========================================================================
  * .data — fsa state and queues. Sized for HTTP_MAX_CONNS (128).
