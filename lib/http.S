@@ -783,13 +783,21 @@ http_match_uri:
     /* Scan route table for matching path.
      * x0: URI pointer, w1: URI length
      * Returns: x0 = route entry pointer (or 0 if no match)
-     * Clobbers: x0-x5 */
+     * Clobbers: x0-x5
+     *
+     * Table base / count come from the runtime indirection globals
+     * http_routes_active / http_routes_count_runtime. On a fresh
+     * boot these default to the built-in http_route_table; a future
+     * commit will swap them to the appliance slab's routes when the
+     * packager magic is detected. */
     stp     x29, x30, [sp, #-16]!
     mov     x2, x0                 /* x2 = URI ptr */
     mov     w3, w1                 /* w3 = URI len */
 
-    ldr     x4, =http_route_table
-    ldr     w5, =http_route_count
+    ldr     x4, =http_routes_active
+    ldr     x4, [x4]               /* x4 = active route table base */
+    ldr     x5, =http_routes_count_runtime
+    ldr     w5, [x5]               /* w5 = active route count */
 
 .Lmu_scan:
     cbz     w5, .Lmu_404
@@ -1382,6 +1390,27 @@ http_status_date:
     .ascii  "\r\n"
 http_status_hdr_end:
 .equ http_status_hdr_len, http_status_hdr_end - http_status_hdr
+
+/* ===================================================================
+ * Runtime indirection for the route table.
+ *
+ * http_match_uri reads the table base + count from these globals
+ * rather than hardcoding http_route_table. On a fresh boot they
+ * default to the built-in table. A future commit adds
+ * http_appliance_init which, when the packager has written an
+ * appliance into the slab below, flips these two values to point
+ * at the appliance's route section.
+ * =================================================================== */
+.section .data
+.balign 8
+.global http_routes_active
+http_routes_active:
+    .xword  http_route_table
+
+.global http_routes_count_runtime
+http_routes_count_runtime:
+    .word   http_route_count
+    .word   0                       /* pad to 8 bytes */
 
 /* ===================================================================
  * Appliance packaging slab — 35.8 KB of .data reserved for the
