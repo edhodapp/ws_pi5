@@ -126,7 +126,7 @@ rm -f "$L2_PERF_OUT"
 
 # --- Phase 3: restore default build ---
 echo "--- Phase 3: restoring default build ---"
-flash_and_wait /tmp/pre-push-flash-restore.log PLATFORM=pi4
+flash_and_wait /tmp/pre-push-flash-restore.log PLATFORM=pi4 CONTENT_MAX=$DEV_CONTENT_MAX
 kill_stale
 echo "Default build restored."
 
