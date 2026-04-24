@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>About this appliance</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>About</h1>
+    <p>
+      The kernel you are talking to is a bare-metal HTTP/1.1 server
+      that fits in under 100 KB. Your static files were packaged
+      directly into the kernel image by <code>scripts/mk_appliance.py</code>
+      at build time; the server reads them from a reserved 32 KB
+      content region on boot, so there is no filesystem to cache, no
+      disk I/O, no process model.
+    </p>
+    <p>
+      The Pi 4 boots straight into this kernel from the FAT32 boot
+      partition of the SD card. See the repo's top-level README for
+      the end-to-end workflow.
+    </p>
+    <p><a href="/">&larr; Home</a></p>
+  </main>
+</body>
+</html>

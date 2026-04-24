@@ -1,44 +1,63 @@
 #!/usr/bin/env bash
 # scripts/mk_sd.sh — assemble a Pi 4 SD-card boot bundle.
 #
-# Produces a directory that the user copies onto the FAT32 boot
-# partition of a Pi 4 SD card. Boots straight into the packaged
-# appliance kernel — no UART chainloader needed.
+# Two output modes:
+#   scripts/mk_sd.sh            <kernel.img> <output_dir>
+#   scripts/mk_sd.sh --image    <kernel.img> <output_image.img>
 #
-# Contents of the output directory:
-#   config.txt            — Pi 4 firmware config. kernel_address=0x200000
-#                           so the firmware loads our kernel at the same
-#                           address the linker script targets (chainloader
-#                           used to do this hand-off via UART).
+# Directory mode produces a staging directory the user copies onto the
+# FAT32 boot partition of a pre-formatted Pi 4 SD card. Image mode
+# produces a single raw disk image (MBR + FAT32 partition) the user
+# flashes with Raspberry Pi Imager / balenaEtcher / dd — no manual
+# formatting or mounting. --image requires mtools on PATH.
+#
+# Contents (either mode, same files):
+#   config.txt            — kernel_address=0x200000 so the firmware
+#                           loads the kernel at the same address
+#                           linker_hw.ld targets. The firmware's VC
+#                           agent owns 0x80000 and must not be stomped
+#                           — otherwise UART dies mid-boot.
 #   start4.elf            — Pi 4 GPU firmware.
 #   fixup4.dat            — firmware fixups.
-#   bcm2711-rpi-4-b.dtb   — device tree for the 4-B model.
+#   bcm2711-rpi-4-b.dtb   — device tree for the 4-B.
 #   kernel8.img           — the packaged appliance kernel (first arg).
 #
-# Firmware blobs are NOT checked into the repo (they're upstream
-# Raspberry Pi Foundation files, 2.3 MB total). They're expected in
-# hw_test/uart_test/sdcard/ — if any are missing, the script invokes
-# the existing download_firmware.sh to pull them from
-# github.com/raspberrypi/firmware.
+# Firmware blobs are NOT checked into the repo (they're upstream Pi
+# Foundation files, 2.3 MB total). Expected in
+# hw_test/uart_test/sdcard/ — auto-fetched on first use via the
+# existing download_firmware.sh.
 #
-# Usage:
-#   scripts/mk_sd.sh <packaged_kernel.img> <output_dir>
-#
-# End-to-end example:
+# End-to-end example (directory mode):
 #   make PLATFORM=pi4
 #   scripts/mk_appliance.py kernel8.img public/ appliance.img
 #   scripts/mk_sd.sh appliance.img sd_boot/
-#   # then: cp -r sd_boot/* /media/<user>/boot/
+#   cp -r sd_boot/* /media/<user>/boot/
+#
+# End-to-end example (image mode):
+#   make PLATFORM=pi4
+#   scripts/mk_appliance.py kernel8.img public/ appliance.img
+#   scripts/mk_sd.sh --image appliance.img pi4_sd.img
+#   # flash pi4_sd.img with any SD writer
 
 set -euo pipefail
 
+MODE="dir"
+if [[ "${1:-}" == "--image" ]]; then
+    MODE="image"
+    shift
+fi
+
 if [[ $# -ne 2 ]]; then
-    echo "usage: $(basename "$0") <packaged_kernel.img> <output_dir>" >&2
+    cat >&2 <<USAGE
+usage:
+  $(basename "$0")          <packaged_kernel.img> <output_dir>
+  $(basename "$0") --image  <packaged_kernel.img> <output_image.img>
+USAGE
     exit 2
 fi
 
 KERNEL_IN="$1"
-OUTDIR="$2"
+TARGET="$2"
 
 if [[ ! -f "$KERNEL_IN" ]]; then
     echo "mk_sd: $KERNEL_IN not found" >&2
@@ -67,8 +86,6 @@ if [[ "$missing" -eq 1 ]]; then
     bash "$FW_DIR/download_firmware.sh"
 fi
 
-# Re-check after download; bail loudly if still missing rather than
-# producing a half-complete bundle.
 for f in "${FW_FILES[@]}"; do
     if [[ ! -f "$FW_DIR/$f" ]]; then
         echo "mk_sd: firmware file $f still missing after download — aborting" >&2
@@ -76,20 +93,23 @@ for f in "${FW_FILES[@]}"; do
     fi
 done
 
-mkdir -p "$OUTDIR"
+# Directory mode writes directly into TARGET; image mode stages into a
+# tmpdir and then converts to a raw disk image via mk_sd_image.py.
+if [[ "$MODE" == "image" ]]; then
+    STAGING=$(mktemp -d)
+    trap 'rm -rf "$STAGING"' EXIT
+    BUNDLE_DIR="$STAGING"
+else
+    mkdir -p "$TARGET"
+    BUNDLE_DIR="$TARGET"
+fi
 
-# Copy kernel + firmware into the bundle.
-cp "$KERNEL_IN" "$OUTDIR/kernel8.img"
+cp "$KERNEL_IN" "$BUNDLE_DIR/kernel8.img"
 for f in "${FW_FILES[@]}"; do
-    cp "$FW_DIR/$f" "$OUTDIR/$f"
+    cp "$FW_DIR/$f" "$BUNDLE_DIR/$f"
 done
 
-# Write config.txt. The kernel_address value is non-negotiable: the
-# linker script (linker_hw.ld) targets 0x200000, and the firmware's
-# VC agent lives at 0x80000. If the firmware loaded our kernel at the
-# default 0x80000 address it would stomp the VC agent and UART would
-# die during boot.
-cat > "$OUTDIR/config.txt" <<'EOF'
+cat > "$BUNDLE_DIR/config.txt" <<'EOF'
 # Pi 4 boot config for the ws_pi5 appliance.
 #
 # The kernel is linked to 0x200000 (linker_hw.ld). The firmware's
@@ -103,8 +123,12 @@ kernel_address=0x200000
 enable_uart=1
 EOF
 
-echo "mk_sd: SD boot bundle in $OUTDIR/"
-ls -lh "$OUTDIR/"
-echo
-echo "Flash: mount the FAT32 boot partition of a fresh Pi 4 SD card and"
-echo "  cp -r $OUTDIR/* /media/<user>/boot/"
+if [[ "$MODE" == "image" ]]; then
+    python3 "$PROJECT_DIR/scripts/mk_sd_image.py" "$BUNDLE_DIR" "$TARGET"
+else
+    echo "mk_sd: SD boot bundle in $TARGET/"
+    ls -lh "$TARGET/"
+    echo
+    echo "Flash: mount the FAT32 boot partition of a fresh Pi 4 SD card and"
+    echo "  cp -r $TARGET/* /media/<user>/boot/"
+fi
