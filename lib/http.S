@@ -9,9 +9,7 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "http.inc"
-.ifdef HTTP_OUTPUT_FSA
 .include "vmio.inc"
-.endif
 
 .global http_init
 .global http_appliance_init
@@ -46,9 +44,7 @@ http_init:
     subs    w1, w1, #1
     b.ne    .Lhi_zero
     bl      http_appliance_init
-.ifdef HTTP_OUTPUT_FSA
     bl      http_fsa_init
-.endif
     ldp     x29, x30, [sp], #16
     ret
 
@@ -201,19 +197,13 @@ http_poll:
     cmp     w0, #HTTPS_RECV_HDR
     b.eq    .Lhp_try_parse
 
-    /* SENDING → send next chunk */
+    /* SENDING → owned by the output FSA (http_fsa_step, invoked from
+     * the drain loop at the end of http_poll). HCONN_STATE stays at
+     * HTTPS_SENDING as a "FSA busy" marker that blocks the input-side
+     * dispatch from starting a new parse on the same HCONN until
+     * h_keepalive resets it. So just skip to the next HCONN. */
     cmp     w0, #HTTPS_SENDING
-.ifdef HTTP_OUTPUT_FSA
-    /* Under the output FSA the send path is driven out-of-band by
-     * http_fsa_step (invoked from the drain loop at the end of
-     * http_poll). HCONN_STATE is kept at HTTPS_SENDING as a "FSA busy"
-     * marker that blocks the input-side dispatch from starting a new
-     * parse on the same HCONN until h_keepalive resets it. So here we
-     * just skip to the next HCONN. */
     b.eq    .Lhp_next
-.else
-    b.eq    .Lhp_send_chunk
-.endif
 
     /* RECV_BODY → resume body accumulation */
     cmp     w0, #HTTPS_RECV_BODY
@@ -705,8 +695,7 @@ http_poll:
     mov     x0, x19
     bl      tcp_rx_consume
 
-.ifdef HTTP_OUTPUT_FSA
-    /* Output FSA: hand the response off to the engine. Compute way
+    /* Hand the response off to the output FSA engine. Compute way
      * from the HCONN pointer, post E_RESP_READY. HCONN_STATE stays at
      * HTTPS_SENDING so the input-side dispatch skips this HCONN until
      * h_keepalive flips it back to RECV_HDR. */
@@ -715,107 +704,6 @@ http_poll:
     lsr     x0, x0, #HCONN_SHIFT
     mov     w1, #E_RESP_READY
     bl      http_fsa_post
-.endif
-    b       .Lhp_next
-
-/* (parse_incomplete removed — now branches directly to .Lhp_next) */
-
-.Lhp_send_chunk:
-    /* Check if connection is still ESTABLISHED */
-    ldrb    w0, [x19, #TCONN_STATE]
-    cmp     w0, #TCPS_ESTABLISHED
-    b.ne    .Lhp_reset_hconn
-
-    /* Check remaining */
-    ldr     w22, [x20, #HCONN_RESP_PTR]
-    ldr     w23, [x20, #HCONN_RESP_LEN]
-    subs    w24, w23, w22               /* remaining */
-    cbz     w24, .Lhp_close
-
-    /* Check send window */
-    mov     x0, x19
-    bl      tcp_send_ready
-    cbz     w0, .Lhp_next              /* window closed */
-
-    /* chunk = min(ready, remaining) */
-    cmp     w0, w24
-    csel    w24, w0, w24, lo
-
-    /* Determine source: header or body region */
-    ldr     w1, [x20, #HCONN_HDR_LEN]
-    cmp     w22, w1
-    b.hs    .Lhp_from_body
-
-    /* From header: truncate chunk at header boundary */
-    sub     w2, w1, w22                 /* hdr_remaining */
-    cmp     w24, w2
-    csel    w24, w24, w2, lo
-
-    /* Read header source from stored pointer */
-    ldr     x2, [x20, #HCONN_HDR_SRC_PTR]
-    add     x2, x2, x22
-    b       .Lhp_do_send
-
-.Lhp_from_body:
-    ldr     x2, [x20, #HCONN_BODY_PTR]
-    ldr     w1, [x20, #HCONN_HDR_LEN]
-    sub     w3, w22, w1                 /* body offset */
-    add     x2, x2, x3
-
-.Lhp_do_send:
-    /* tcp_send(conn, tx_buf, payload, len) */
-    ldr     x23, =http_send_ctx
-    mov     x0, x19
-    ldr     x1, [x23, #HSCTX_TX_BUF]
-    /* x2 = payload source (set above) */
-    mov     w3, w24
-    bl      tcp_send
-    cbz     w0, .Lhp_next              /* send failed */
-    mov     w22, w0                     /* frame_len */
-
-    /* Transmit frame */
-    ldr     x0, [x23, #HSCTX_DWC2_BASE]
-    ldr     x1, [x23, #HSCTX_ECM_STATE]
-    ldr     x2, [x23, #HSCTX_TX_BUF]
-    mov     w3, w22
-    ldr     x4, [x23, #HSCTX_SEND_FN]
-    blr     x4
-
-    /* Advance pointer */
-    ldr     w0, [x20, #HCONN_RESP_PTR]
-    add     w0, w0, w24
-    str     w0, [x20, #HCONN_RESP_PTR]
-
-    b       .Lhp_next
-
-.Lhp_close:
-    /* Response complete. Keep-alive or close?
-     * Close if: HFLAG_CLOSE set, or HTTP/1.0 without explicit keep-alive.
-     * For now: HTTP/1.1 default = persistent, HTTP/1.0 = close.
-     * Connection: close from client overrides. */
-    ldrb    w0, [x20, #HCONN_FLAGS]
-    tst     w0, #HFLAG_CLOSE
-    b.ne    .Lhp_do_close
-
-    tst     w0, #HFLAG_HTTP11
-    b.eq    .Lhp_do_close           /* HTTP/1.0 → close */
-
-    /* Keep-alive: reset HCONN to RECV_HDR for next request.
-     * Reset parser state so the FSA starts from S_METHOD. */
-    mov     w0, #HTTPS_RECV_HDR
-    strb    w0, [x20, #HCONN_STATE]
-    strb    wzr, [x20, #HCONN_PARSE_STATE]
-    strh    wzr, [x20, #HCONN_PARSE_OFF]
-    strb    wzr, [x20, #HCONN_HOST_FOUND]
-    strb    wzr, [x20, #HCONN_CLOSE_FOUND]
-    strb    wzr, [x20, #HCONN_VER_MINOR]
-    strb    wzr, [x20, #HCONN_FLAGS]
-    str     wzr, [x20, #HCONN_CONTENT_LEN]
-
-    /* No rx flush here — setup_resp already consumed the request
-     * bytes via tcp_rx_consume, preserving any pipelined follow-on
-     * data for the next parse on the freshly-reset HCONN. */
-
     b       .Lhp_next
 
 .Lhp_slowloris_close:
@@ -855,19 +743,16 @@ http_poll:
     b       .Lhp_loop
 
 .Lhp_done:
-.ifdef HTTP_OUTPUT_FSA
     /* Output FSA drain: pump the engine until idle before returning.
      * http_fsa_poll_tcp_events posts the TCP-driven transitions
      * (WIN_OPEN / ALL_DRAINED / TCP_CLOSED); http_fsa_step then
-     * dispatches whatever's queued. Loop until STEP_IDLE so a single
-     * http_poll call drains the whole work cycle for all ways — same
-     * invariant the legacy per-HCONN loop maintained. */
+     * dispatches whatever's queued. Loop until STEP_IDLE so one
+     * http_poll call drains the whole work cycle for all ways. */
     bl      http_fsa_poll_tcp_events
 .Lhp_fsa_drain:
     bl      http_fsa_step
     cmp     w0, #STEP_IDLE
     b.ne    .Lhp_fsa_drain
-.endif
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -1231,10 +1116,10 @@ http_route_table:
     .byte   0, 0
     .xword  http_form_log_handler
 
-.ifdef HTTP_OUTPUT_FSA
-    /* Route N: "/fsa_stats" (dynamic, GET+HEAD). Only present in the
-     * HTTP_OUTPUT_FSA build — exposes engine counters for perf
-     * comparison and as a diagnostic during the migration. */
+    /* Route 9: "/fsa_stats" (dynamic, GET+HEAD). Exposes engine
+     * telemetry — events_posted / events_dropped / step_ok /
+     * step_no_trans plus per-handler dispatch counts — for perf
+     * diagnostics. */
     .word   10
     .word   0
     .xword  http_path_fsa_stats
@@ -1245,7 +1130,6 @@ http_route_table:
     .byte   HM_GET | HM_HEAD
     .byte   0, 0
     .xword  http_fsa_stats_generate
-.endif
 
 http_route_table_end:
 .equ http_route_count, (http_route_table_end - http_route_table) / ROUTE_SIZE

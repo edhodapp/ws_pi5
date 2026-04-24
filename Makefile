@@ -60,24 +60,7 @@ else ifneq ($(PERF),)
   $(error Unknown PERF=$(PERF); use recv, send, dispatch, l3, or all)
 endif
 
-# ---------------------------------------------------------------------------
-# HTTP_OUTPUT_FSA — opt-in build flag for the FSA-driven send path.
-#
-#   make PLATFORM=pi4                      — production kernel, legacy send path
-#   make PLATFORM=pi4 HTTP_OUTPUT_FSA=1    — build the parallel FSA send path
-#
-# When the flag is off, lib/http_output_fsa.S is NOT linked and the build
-# is byte-identical to history — zero risk to production. When the flag is
-# on, the FSA path links in and http_init swaps the output driver at boot.
-# Old path and new path live side-by-side until the cutover commit deletes
-# the legacy one.
-# ---------------------------------------------------------------------------
-HTTP_OUTPUT_FSA_ASFLAGS =
-ifeq ($(HTTP_OUTPUT_FSA),1)
-  HTTP_OUTPUT_FSA_ASFLAGS = --defsym HTTP_OUTPUT_FSA=1
-endif
-
-ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(HTTP_OUTPUT_FSA_ASFLAGS)
+ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories
@@ -93,12 +76,8 @@ SHARED_OBJS = \
     $(BUILD)/udp.o $(BUILD)/tcp.o $(BUILD)/http.o $(BUILD)/http_parse.o $(BUILD)/http_date.o $(BUILD)/http_chunk.o $(BUILD)/http_status.o $(BUILD)/http_handlers.o \
     $(BUILD)/store.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
-    $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
-
-# Output FSA object — only linked when HTTP_OUTPUT_FSA=1 is set.
-ifeq ($(HTTP_OUTPUT_FSA),1)
-  SHARED_OBJS += $(BUILD)/http_output_fsa.o
-endif
+    $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o \
+    $(BUILD)/http_output_fsa.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -140,13 +119,8 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_tcp.o $(BUILD)/test_net.o $(BUILD)/test_timer.o \
     $(BUILD)/test_ntp.o $(BUILD)/test_md5.o $(BUILD)/test_http.o \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
-    $(BUILD)/test_genet_rx_err.o
-
-# Output FSA tests — only when HTTP_OUTPUT_FSA=1 so the legacy test
-# suite stays byte-identical without the flag.
-ifeq ($(HTTP_OUTPUT_FSA),1)
-  SHARED_TEST_OBJS += $(BUILD)/test_http_output_fsa.o
-endif
+    $(BUILD)/test_genet_rx_err.o \
+    $(BUILD)/test_http_output_fsa.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)

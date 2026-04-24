@@ -1,25 +1,16 @@
 /*
- * test_http_output_fsa — unit tests for the FSA scaffolding.
+ * test_http_output_fsa — unit tests for the output FSA.
  *
- * Compiled and linked only when HTTP_OUTPUT_FSA=1. The suite pins:
- *   - post gating (dedupes same (way, code), independent across
- *     ways or codes)
- *   - init state (ostate all O_IDLE, evt_pending all zero)
- *   - transition-table shape (handler pointers at expected entries,
- *     STEP_NO_TRANS cells are zero)
- *   - engine dispatch reaches the correct stub handler and bumps the
- *     correct dispatch counter
- *
- * Handlers are stubs in commit 2, so tests check counters, not side
- * effects. Commit 3 layers real behavior on top and extends the suite.
+ * Covers: post gating, init state, transition-table shape, engine
+ * dispatch, per-way state plumbing, send-path functional behavior
+ * (RESP_READY → SETUP → TX → DRAINING → keepalive/close), engine
+ * telemetry counters, and the /fsa_stats generator.
  */
 
 .include "vmio.inc"
 .include "http.inc"
 .include "tcp.inc"
 .include "net.inc"
-
-.ifdef HTTP_OUTPUT_FSA
 
 .global test_http_output_fsa
 
@@ -1296,5 +1287,3 @@ name_fec:    .asciz "fsa_events_posted_counter"
 name_fedc:   .asciz "fsa_events_dropped_counter_on_dup"
 name_fsco:   .asciz "fsa_step_counters"
 name_fsg:    .asciz "fsa_stats_generator"
-
-.endif

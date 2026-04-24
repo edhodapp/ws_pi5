@@ -50,17 +50,10 @@ test_http:
     bl      test_http_date_2026
     bl      test_http_leap_2000
     bl      test_http_noleap_2100
-.ifndef HTTP_OUTPUT_FSA
-    /* Direct legacy-send-path tests. Under the output FSA build these
-     * would need an FSA-equivalent setup (posting E_RESP_READY after
-     * priming HCONN fields, then draining the engine). The FSA build
-     * has its own send-path suite in commit 5 / test_http_output_fsa.S
-     * that exercises the same externally observable behavior via the
-     * engine, so these are simply skipped when the legacy path is
-     * disabled. Cutover deletes both the .ifndef and these tests. */
-    bl      test_http_send_chunk
-    bl      test_http_send_close
-.endif
+    /* test_http_send_chunk / test_http_send_close exercised the
+     * legacy inline send path in http_poll; those are now driven by
+     * the output FSA (see test_http_output_fsa.S:fsa_send_one_chunk /
+     * fsa_response_drains_*). Register entries deleted at cutover. */
     bl      test_http_reset_during_send
     bl      test_http_resp_isolation
     bl      test_http_route_handler_dispatch
@@ -1369,163 +1362,6 @@ test_http_noleap_2100:
 .Ldone_hn21:
     ldp     x29, x30, [sp], #16
     ret
-
-/* ========================================================================
- * test_http_send_chunk — SENDING state sends one chunk and advances ptr
- * ======================================================================== */
-test_http_send_chunk:
-    stp     x29, x30, [sp, #-32]!
-    stp     x19, x20, [sp, #16]
-
-    bl      tcp_init
-    bl      http_init
-
-    /* Pre-seed ESTABLISHED connection with large SND_WND */
-    ldr     x19, =tcp_conn_table
-    mov     w0, #TCPS_ESTABLISHED
-    strb    w0, [x19, #TCONN_STATE]
-    mov     w0, #0x5000
-    strh    w0, [x19, #TCONN_LPORT]
-    mov     w0, #2000
-    str     w0, [x19, #TCONN_SND_WND]
-    /* Need SND_NXT = SND_UNA (no data in flight) for tcp_send to work */
-    mov     w0, #100
-    str     w0, [x19, #TCONN_SND_UNA]
-    str     w0, [x19, #TCONN_SND_NXT]
-    /* Need PEER_MSS */
-    mov     w0, #TCP_OUR_MSS
-    strh    w0, [x19, #TCONN_PEER_MSS]
-    /* Need CWND */
-    mov     w0, #0x40000
-    str     w0, [x19, #TCONN_CWND]
-    /* Need RMAC */
-    ldr     x0, =net_our_mac
-    ldr     w1, [x0]
-    str     w1, [x19, #TCONN_RMAC]
-    ldrh    w1, [x0, #4]
-    strh    w1, [x19, #(TCONN_RMAC + 4)]
-    /* Need RIP */
-    ldr     x0, =net_our_ip
-    ldr     w0, [x0]
-    str     w0, [x19, #TCONN_RIP]
-    /* Need RCV_NXT for ACK field */
-    mov     w0, #1
-    str     w0, [x19, #TCONN_RCV_NXT]
-
-    /* Pre-set HCONN to SENDING with 200 response */
-    ldr     x20, =http_conn_table
-    mov     w0, #HTTPS_SENDING
-    strb    w0, [x20, #HCONN_STATE]
-    strb    wzr, [x20, #HCONN_STATUS]
-    str     wzr, [x20, #HCONN_RESP_PTR]
-    ldr     x0, =http_200_body
-    str     x0, [x20, #HCONN_BODY_PTR]
-    mov     w0, #158                    /* http_200_body_len */
-    str     w0, [x20, #HCONN_BODY_LEN]
-    mov     w1, #133                    /* http_200_hdr_len (no Connection: close) */
-    str     w1, [x20, #HCONN_HDR_LEN]
-    add     w2, w0, w1
-    str     w2, [x20, #HCONN_RESP_LEN]
-
-    /* Install mock send */
-    ldr     x0, =thttp_send_count
-    str     wzr, [x0]
-    mov     x0, #0
-    mov     x1, #0
-    ldr     x2, =thttp_tx_buf
-    ldr     x3, =thttp_counting_send
-    bl      http_set_send_ctx
-
-    /* Call http_poll — should send one chunk */
-    bl      http_poll
-
-    /* Send should have been called */
-    ldr     x0, =thttp_send_count
-    ldr     w0, [x0]
-    cbz     w0, .Lfail_hsc
-
-    /* RESP_PTR should have advanced (> 0) */
-    ldr     w0, [x20, #HCONN_RESP_PTR]
-    cbz     w0, .Lfail_hsc
-
-    ldr     x0, =name_hsc
-    bl      test_pass
-    b       .Ldone_hsc
-.Lfail_hsc:
-    ldr     x0, =name_hsc
-    bl      test_fail
-.Ldone_hsc:
-    ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
-    ret
-
-/* ========================================================================
- * test_http_send_close — response complete → tcp_close + IDLE
- * ======================================================================== */
-test_http_send_close:
-    stp     x29, x30, [sp, #-32]!
-    stp     x19, x20, [sp, #16]
-
-    bl      tcp_init
-    bl      http_init
-
-    /* Pre-seed ESTABLISHED connection */
-    ldr     x19, =tcp_conn_table
-    mov     w0, #TCPS_ESTABLISHED
-    strb    w0, [x19, #TCONN_STATE]
-    mov     w0, #0x5000
-    strh    w0, [x19, #TCONN_LPORT]
-    mov     w0, #100
-    str     w0, [x19, #TCONN_SND_UNA]
-    str     w0, [x19, #TCONN_SND_NXT]
-    mov     w0, #TCP_OUR_MSS
-    strh    w0, [x19, #TCONN_PEER_MSS]
-    mov     w0, #0x40000
-    str     w0, [x19, #TCONN_CWND]
-    ldr     x0, =net_our_mac
-    ldr     w1, [x0]
-    str     w1, [x19, #TCONN_RMAC]
-    ldr     x0, =net_our_ip
-    ldr     w0, [x0]
-    str     w0, [x19, #TCONN_RIP]
-    mov     w0, #1
-    str     w0, [x19, #TCONN_RCV_NXT]
-    mov     w0, #-1
-    str     w0, [x19, #TCONN_TIMER_SLOT]
-
-    /* HCONN: SENDING, RESP_PTR == RESP_LEN (all sent) */
-    ldr     x20, =http_conn_table
-    mov     w0, #HTTPS_SENDING
-    strb    w0, [x20, #HCONN_STATE]
-    mov     w0, #100
-    str     w0, [x20, #HCONN_RESP_PTR]
-    str     w0, [x20, #HCONN_RESP_LEN]     /* ptr == len → done */
-
-    /* Install mock send for tcp_close FIN */
-    mov     x0, #0
-    mov     x1, #0
-    ldr     x2, =thttp_tx_buf
-    ldr     x3, =thttp_counting_send
-    bl      http_set_send_ctx
-
-    bl      http_poll
-
-    /* HCONN should be back to IDLE */
-    ldr     x0, =http_conn_table
-    ldrb    w0, [x0, #HCONN_STATE]
-    cbnz    w0, .Lfail_hscl
-
-    ldr     x0, =name_hscl
-    bl      test_pass
-    b       .Ldone_hscl
-.Lfail_hscl:
-    ldr     x0, =name_hscl
-    bl      test_fail
-.Ldone_hscl:
-    ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
-    ret
-
 /* ========================================================================
  * test_http_reset_during_send — TCP RST while SENDING → reset to IDLE
  * ======================================================================== */
@@ -3679,7 +3515,6 @@ name_hde:   .asciz "http_date_epoch"
 name_hd26:  .asciz "http_date_2026"
 name_hl20:  .asciz "http_leap_2000"
 name_hn21:  .asciz "http_noleap_2100"
-name_hsc:   .asciz "http_send_chunk"
 
 thttp_chunk_data:
     .ascii  "Hello"
@@ -3695,7 +3530,6 @@ thttp_date_leap2000_expected:
 
 thttp_date_noleap2100_expected:
     .ascii  "Sun, 28 Feb 2100 12:00:00 GMT"
-name_hscl:  .asciz "http_send_close"
 name_hrds:  .asciz "http_reset_during_send"
 name_hri:   .asciz "http_resp_isolation"
 name_hrhd:  .asciz "http_route_handler_dispatch"

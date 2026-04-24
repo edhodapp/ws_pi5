@@ -236,11 +236,9 @@
 .equ HTTP_MAX_RECV_BODY_SHIFT, 10
 
 /* ========================================================================
- * Output FSA (HTTP_OUTPUT_FSA build flag). Mirrors the send-side states
- * and events introduced in lib/http_output_fsa.S. Kept here so tests and
- * any future tcp.S hook (option-b migration) can reference the same
- * canonical numbers. Safe to read unconditionally — they're plain .equ
- * constants with no runtime footprint.
+ * Output FSA. Send-side states and events used by lib/http_output_fsa.S.
+ * Kept here so tests and any future tcp.S hook (option-b migration) can
+ * reference the same canonical numbers.
  * ======================================================================== */
 
 /* States (O_*) — per-HCONN entry in http_fsa_ostate. */

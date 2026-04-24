@@ -1,10 +1,6 @@
 /*
  * http_output_fsa.S — VMIO-driven HTTP response send path.
  *
- * Parallel build behind --defsym HTTP_OUTPUT_FSA=1. When the flag is
- * off this file is not linked at all (see Makefile SHARED_OBJS
- * conditional); the legacy send path in lib/http.S is untouched.
- *
  * States / events are named in include/http.inc (O_*, E_*, FSA_*).
  *
  * Data-flow summary:
@@ -16,18 +12,14 @@
  *   http_fsa_step              — one engine step; clears the pending
  *                                bit BEFORE dispatching the handler so
  *                                handlers can re-post their own type.
- *   Handlers                   — 7 of them (see DESIGN). This commit
- *                                lands the scaffolding and stub handlers
- *                                that only record dispatch (for tests).
- *                                Commit 3 replaces stubs with real
- *                                send / decide / close / keepalive.
+ *   Handlers (7)               — h_install / h_send / h_noop /
+ *                                h_decide / h_reset / h_close /
+ *                                h_keepalive. See transition table.
  */
 
 .include "vmio.inc"
 .include "http.inc"
 .include "tcp.inc"
-
-.ifdef HTTP_OUTPUT_FSA
 
 .global http_fsa_init
 .global http_fsa_post
@@ -101,7 +93,7 @@
 
 /* ------------------------------------------------------------------------
  * http_fsa_init — wire the engine to the canonical queues + table +
- * ctx struct. Called from http_init when HTTP_OUTPUT_FSA=1.
+ * ctx struct. Called from http_init.
  * Clobbers: x0-x7, x30.
  * ------------------------------------------------------------------------ */
 http_fsa_init:
@@ -1222,5 +1214,3 @@ http_fsa_events_posted:    .word 0
 http_fsa_events_dropped:   .word 0
 http_fsa_step_ok:          .word 0
 http_fsa_step_no_trans:    .word 0
-
-.endif
