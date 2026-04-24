@@ -220,8 +220,11 @@ def build_slab(routes: list[Route]) -> bytes:
 def find_slab_offset(image: bytes) -> int:
     """Locate the WSPINONE marker in a base kernel image.
 
-    Raises ValueError if the marker is absent or appears more than
-    once — both indicate an unusable or non-canonical image.
+    Raises ValueError if the marker is absent, appears more than once,
+    or the full slab would not fit inside the image. Catching truncation
+    here matters because bytearray slice assignment silently extends the
+    container, turning a corrupt input into a corrupt output instead of
+    a loud failure.
     """
     off = image.find(MAGIC_NONE)
     if off < 0:
@@ -230,6 +233,11 @@ def find_slab_offset(image: bytes) -> int:
         )
     if image.find(MAGIC_NONE, off + 1) >= 0:
         raise ValueError("WSPINONE appears more than once — ambiguous slab")
+    if off + APPLIANCE_SLAB_SIZE > len(image):
+        raise ValueError(
+            f"image truncated: slab starts at {off} but image is only "
+            f"{len(image)} B (need {APPLIANCE_SLAB_SIZE})"
+        )
     return off
 
 

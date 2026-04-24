@@ -34,8 +34,10 @@ def test_build_header_structure() -> None:
 
 
 def test_find_slab_offset_happy() -> None:
-    image = b"prefix-bytes" + M.MAGIC_NONE + b"suffix"
-    assert M.find_slab_offset(image) == len(b"prefix-bytes")
+    prefix = b"prefix-bytes"
+    suffix_pad = b"\x00" * M.APPLIANCE_SLAB_SIZE
+    image = prefix + M.MAGIC_NONE + suffix_pad
+    assert M.find_slab_offset(image) == len(prefix)
 
 
 def test_find_slab_offset_missing() -> None:
@@ -44,8 +46,24 @@ def test_find_slab_offset_missing() -> None:
 
 
 def test_find_slab_offset_duplicate() -> None:
-    image = M.MAGIC_NONE + b"middle" + M.MAGIC_NONE
+    # Embed both markers in an image large enough that truncation isn't
+    # what trips — we want the duplicate check, not the size check.
+    image = (
+        M.MAGIC_NONE
+        + b"\x00" * M.APPLIANCE_SLAB_SIZE
+        + M.MAGIC_NONE
+        + b"\x00" * M.APPLIANCE_SLAB_SIZE
+    )
     with pytest.raises(ValueError, match="more than once"):
+        M.find_slab_offset(image)
+
+
+def test_find_slab_offset_truncated() -> None:
+    # Marker is present but the remaining image is too short to hold
+    # the full slab — silent bytearray-extension would corrupt the
+    # output; we want a loud ValueError instead.
+    image = b"pad" + M.MAGIC_NONE + b"\x00" * 16
+    with pytest.raises(ValueError, match="truncated"):
         M.find_slab_offset(image)
 
 
