@@ -23,21 +23,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y binutils-aarch64-linux-gnu
 
-      - name: Build Pi 4 kernel
-        run: |
-          make clean
-          make PLATFORM=pi4
-          ls -lh kernel8.img
-
-      # QEMU raspi3b test-kernel run — catches regressions the release
-      # build shouldn't ship with even if the upstream tag was pushed
-      # by mistake. Cheap compared to the alternative of shipping a
-      # broken image.
       - name: Install QEMU for test kernel
         run: sudo apt-get install -y qemu-system-arm
 
+      # Run the QEMU test suite FIRST as the release gate. `make test`
+      # calls `make clean` internally, so the Pi 4 release kernel has
+      # to be built AFTER the test run — otherwise the test run's
+      # clean would delete it before the upload step can find it.
       - name: Run QEMU test suite
         run: make test
+
+      - name: Build Pi 4 kernel
+        run: |
+          make PLATFORM=pi4
+          ls -lh kernel8.img
 
       - name: Upload kernel as workflow artifact
         uses: actions/upload-artifact@v4
