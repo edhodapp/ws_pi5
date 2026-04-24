@@ -46,7 +46,10 @@ flash_and_wait() {
     make "$@" > /dev/null 2>&1
     $VENV scripts/hw_send.py kernel8.img > "$logfile" 2>&1 &
     local hw_pid=$!
-    for i in $(seq 1 30); do
+    # hw_send typically takes ~35 s (5182 records @ ~150 rec/s + DTR
+    # reset + post-BOOT handshake). Give 75 s so a transiently slow
+    # serial link doesn't false-fail the whole integration suite.
+    for i in $(seq 1 75); do
         if grep -q 'GENET Gigabit Ethernet' "$logfile" 2>/dev/null; then
             break
         fi
