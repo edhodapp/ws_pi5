@@ -164,6 +164,61 @@
 /* Peek buffer for request parsing */
 .equ HTTP_PEEK_BUF_SIZE, 512
 
+/* =====================================================================
+ * Appliance packaging slab — binary contract
+ *
+ * The kernel reserves a fixed-size region in .data that the appliance
+ * packager (mk_appliance.py) overwrites to inject a user-provided
+ * route table and content bundle. The packager locates the slab by
+ * searching the kernel image for APPLIANCE_MAGIC_NONE (the "unused"
+ * marker written at link time) and rewrites the magic, routes, and
+ * content in place. Nothing in the slab is accessed by the running
+ * kernel until a later commit wires boot-time initialization; today
+ * this commit just reserves the bytes and locks down the layout.
+ *
+ * Layout (fixed offsets within the slab):
+ *   0   APPLIANCE_HDR_MAGIC     8 B  — one of APPLIANCE_MAGIC_*
+ *   8   APPLIANCE_HDR_VERSION   4 B  — u32, currently 1
+ *   12  APPLIANCE_HDR_RCOUNT    4 B  — u32, number of active routes
+ *   16  APPLIANCE_HDR_CLEN      4 B  — u32, bytes used in content region
+ *   20  APPLIANCE_HDR_PAD       4 B  — reserved, zero
+ *   24  APPLIANCE_ROUTES        3840 B — 80 × 48-byte route entries
+ *   ...within each route entry, pointer fields hold BYTE OFFSETS into
+ *      APPLIANCE_CONTENT rather than absolute pointers. Boot-time
+ *      init (future commit) converts them to absolute pointers.
+ *   3864 APPLIANCE_CONTENT      32 KB — path strings + body bytes
+ *   (total slab size = 24 + 3840 + 32768 = 36632 bytes ≈ 35.8 KB)
+ *
+ * Magic values are raw 8-byte ASCII, stored little-endian-word so
+ * `.quad` of the two halves reads back as the string in memory.
+ * ===================================================================== */
+
+.equ APPLIANCE_HDR_MAGIC,       0
+.equ APPLIANCE_HDR_VERSION,     8
+.equ APPLIANCE_HDR_RCOUNT,      12
+.equ APPLIANCE_HDR_CLEN,        16
+.equ APPLIANCE_HDR_PAD,         20
+.equ APPLIANCE_HDR_SIZE,        24
+
+.equ APPLIANCE_MAX_ROUTES,      80
+.equ APPLIANCE_ROUTES_OFF,      24
+.equ APPLIANCE_ROUTES_SIZE,     (APPLIANCE_MAX_ROUTES * ROUTE_SIZE)
+
+.equ APPLIANCE_CONTENT_OFF,     (APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE)
+.equ APPLIANCE_CONTENT_MAX,     32768
+.equ APPLIANCE_SLAB_SIZE,       (APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX)
+
+.equ APPLIANCE_VERSION,         1
+
+/* The "unused" magic lands at link time. The packager rewrites it to
+ * APPLIANCE_MAGIC_V1 as part of producing an appliance image. */
+.equ APPLIANCE_MAGIC_NONE_LO,   0x4950534E57      /* "NSPIW" — high half lies in the .lo field */
+.equ APPLIANCE_MAGIC_NONE_HI,   0x454E4F4E        /* "NONE"  */
+/* Combined: bytes 0..7 = "WSPINONE" (LE word layout via .ascii) */
+
+.equ APPLIANCE_MAGIC_V1_LO,     0x4950535700      /* placeholder — see .ascii */
+/* Packager writes literal 8-byte string "WSPIAPLI" — no .equ math needed. */
+
 /* Per-HCONN dynamic response scratch sizes.
  * Body buf holds raw handler output; chunk buf holds chunk-encoded output
  * plus the 5-byte "0\r\n\r\n" terminator.

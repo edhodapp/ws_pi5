@@ -1384,6 +1384,45 @@ http_status_hdr_end:
 .equ http_status_hdr_len, http_status_hdr_end - http_status_hdr
 
 /* ===================================================================
+ * Appliance packaging slab — 35.8 KB of .data reserved for the
+ * mk_appliance.py packager to overwrite with user routes + content.
+ *
+ * Placeholder bytes today:
+ *   - magic: "WSPINONE" (the kernel treats this as "no appliance
+ *     packaged; use built-in http_route_table")
+ *   - rest of header: zero
+ *   - routes array: zero
+ *   - content region: zero
+ *
+ * The packager locates the slab by scanning the kernel image for
+ * the magic bytes, then rewrites the whole region with a real
+ * appliance. Boot-time activation (a future commit) checks for
+ * "WSPIAPLI" and switches the dispatcher's route base.
+ *
+ * Lives in .data so the eventual boot-init can patch per-route
+ * offset→pointer fixups in place without MMU perms getting in the
+ * way. Alignment 16 so the magic reads atomically and route
+ * entries start 8-aligned.
+ * =================================================================== */
+.section .data
+.balign 16
+.global http_appliance_slab
+http_appliance_slab:
+    .ascii  "WSPINONE"                  /* magic — packager rewrites */
+    .word   0                           /* version */
+    .word   0                           /* rcount */
+    .word   0                           /* clen */
+    .word   0                           /* pad */
+    .space  APPLIANCE_ROUTES_SIZE       /* route entries */
+    .space  APPLIANCE_CONTENT_MAX       /* content bytes */
+http_appliance_slab_end:
+.equ http_appliance_slab_bytes, http_appliance_slab_end - http_appliance_slab
+
+.if http_appliance_slab_bytes != APPLIANCE_SLAB_SIZE
+.error "http_appliance_slab size drift — update APPLIANCE_SLAB_SIZE or the reservation"
+.endif
+
+/* ===================================================================
  * BSS
  * =================================================================== */
 .section .bss

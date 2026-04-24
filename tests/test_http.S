@@ -75,6 +75,7 @@ test_http:
     bl      test_http_405_allow_per_route
     bl      test_http_recv_body_slowloris
     bl      test_http_pipelined_keepalive
+    bl      test_http_appliance_slab_placeholder
     ldp     x29, x30, [sp], #16
     ret
 
@@ -3240,6 +3241,67 @@ test_http_pipelined_keepalive:
     ldp     x29, x30, [sp], #48
     ret
 
+/* ========================================================================
+ * test_http_appliance_slab_placeholder — the packager slab is linked
+ * into the image with the "no appliance" magic bytes.
+ *
+ * The packager finds the slab by searching for "WSPINONE" and rewrites
+ * it in place. If the link-time placeholder drifts, the packager's
+ * locator breaks silently. This test is a regression guard against
+ * anyone changing the magic string without updating both sides.
+ *
+ * Reads byte-by-byte rather than loading a word so it doesn't depend
+ * on endianness of the magic constant definitions — a reader of the
+ * raw image sees bytes 'W','S','P','I','N','O','N','E' in order.
+ * ======================================================================== */
+test_http_appliance_slab_placeholder:
+    stp     x29, x30, [sp, #-16]!
+
+    ldr     x0, =http_appliance_slab
+    ldrb    w1, [x0]
+    cmp     w1, #'W'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #1]
+    cmp     w1, #'S'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #2]
+    cmp     w1, #'P'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #3]
+    cmp     w1, #'I'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #4]
+    cmp     w1, #'N'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #5]
+    cmp     w1, #'O'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #6]
+    cmp     w1, #'N'
+    b.ne    .Lfail_hasp
+    ldrb    w1, [x0, #7]
+    cmp     w1, #'E'
+    b.ne    .Lfail_hasp
+
+    /* Header fields past the magic should all be zero in the
+     * placeholder — version / rcount / clen / pad. */
+    ldr     w1, [x0, #APPLIANCE_HDR_VERSION]
+    cbnz    w1, .Lfail_hasp
+    ldr     w1, [x0, #APPLIANCE_HDR_RCOUNT]
+    cbnz    w1, .Lfail_hasp
+    ldr     w1, [x0, #APPLIANCE_HDR_CLEN]
+    cbnz    w1, .Lfail_hasp
+
+    ldr     x0, =name_hasp
+    bl      test_pass
+    b       .Ldone_hasp
+.Lfail_hasp:
+    ldr     x0, =name_hasp
+    bl      test_fail
+.Ldone_hasp:
+    ldp     x29, x30, [sp], #16
+    ret
+
 /* Counting send function for send-path tests */
 thttp_counting_send:
     ldr     x9, =thttp_send_count
@@ -3520,6 +3582,7 @@ name_hrm4:  .asciz "http_route_method_405"
 name_h4apr: .asciz "http_405_allow_per_route"
 name_hslb:  .asciz "http_recv_body_slowloris"
 name_hpk:   .asciz "http_pipelined_keepalive"
+name_hasp:  .asciz "http_appliance_slab_placeholder"
 
 .section .data
 .balign 16
