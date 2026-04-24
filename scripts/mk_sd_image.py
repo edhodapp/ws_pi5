@@ -37,7 +37,15 @@ PART_OFFSET_SECTORS = 2048      # 1 MiB aligned; universal convention
 # the smallest image lands 131,072 clusters — comfortably above the
 # spec floor and accepted by Windows, macOS, and Pi firmware alike.
 MIN_PART_MB = 64
-SLACK_MB = 4
+BASE_SLACK_MB = 4
+# At 512-byte clusters, each FAT consumes ~1/128th of the partition
+# (4-byte entries, 512-byte clusters). Two FATs plus directory
+# metadata nudge the fixed-overhead ratio closer to 1/64 of the
+# partition size. For a small bundle the 4 MiB base slack is plenty;
+# for a hypothetical multi-hundred-MiB bundle the slack scales so the
+# FATs fit without bumping into the content area. 1/50 of content,
+# rounded up, is a comfortable over-estimate.
+SLACK_RATIO = 50
 PART_TYPE_FAT32_LBA = 0x0C
 MBR_BOOT_SIG = 0xAA55
 
@@ -69,9 +77,17 @@ def bundle_size_bytes(bundle_dir: Path) -> int:
 
 
 def computed_image_size_mb(bundle_dir: Path) -> int:
-    """Pick an image size with enough slack for FAT overhead."""
+    """Pick an image size with enough slack for FAT overhead.
+
+    Slack is max(BASE_SLACK_MB, content_mb / SLACK_RATIO) so small
+    bundles get the 4 MiB baseline and large bundles scale linearly —
+    otherwise at 512-byte clusters the two FATs would eat more than
+    the baseline slack once the partition passes ~250 MiB and mcopy
+    would fail with "disk full" despite the raw file sizes fitting.
+    """
     content_mb = (bundle_size_bytes(bundle_dir) + (1 << 20) - 1) // (1 << 20)
-    return max(MIN_PART_MB, content_mb + SLACK_MB)
+    slack = max(BASE_SLACK_MB, content_mb // SLACK_RATIO + 1)
+    return max(MIN_PART_MB, content_mb + slack)
 
 
 def write_mbr(
@@ -200,9 +216,14 @@ def main() -> int:
     if part_sectors <= 0:
         die("computed partition has 0 sectors — bundle too large?")
 
+    # Write the MBR FIRST. If a later step fails (mformat error, disk
+    # full, interrupted), the image is still recognizably partitioned
+    # — a user who tries to flash the partial output sees "empty
+    # partition" rather than "no partition table at all", which is a
+    # much clearer signal that mk_sd_image itself aborted.
+    write_mbr(image, PART_OFFSET_SECTORS, part_sectors)
     mformat_partition(image, PART_OFFSET_SECTORS)
     mcopy_files(image, PART_OFFSET_SECTORS, bundle)
-    write_mbr(image, PART_OFFSET_SECTORS, part_sectors)
 
     print(
         f"mk_sd_image: wrote {size_mb} MiB SD image to {image}"
