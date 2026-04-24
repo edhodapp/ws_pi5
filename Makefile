@@ -60,7 +60,24 @@ else ifneq ($(PERF),)
   $(error Unknown PERF=$(PERF); use recv, send, dispatch, l3, or all)
 endif
 
-ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
+# ---------------------------------------------------------------------------
+# HTTP_OUTPUT_FSA — opt-in build flag for the FSA-driven send path.
+#
+#   make PLATFORM=pi4                      — production kernel, legacy send path
+#   make PLATFORM=pi4 HTTP_OUTPUT_FSA=1    — build the parallel FSA send path
+#
+# When the flag is off, lib/http_output_fsa.S is NOT linked and the build
+# is byte-identical to history — zero risk to production. When the flag is
+# on, the FSA path links in and http_init swaps the output driver at boot.
+# Old path and new path live side-by-side until the cutover commit deletes
+# the legacy one.
+# ---------------------------------------------------------------------------
+HTTP_OUTPUT_FSA_ASFLAGS =
+ifeq ($(HTTP_OUTPUT_FSA),1)
+  HTTP_OUTPUT_FSA_ASFLAGS = --defsym HTTP_OUTPUT_FSA=1
+endif
+
+ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(HTTP_OUTPUT_FSA_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories
@@ -77,6 +94,11 @@ SHARED_OBJS = \
     $(BUILD)/store.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o
+
+# Output FSA object — only linked when HTTP_OUTPUT_FSA=1 is set.
+ifeq ($(HTTP_OUTPUT_FSA),1)
+  SHARED_OBJS += $(BUILD)/http_output_fsa.o
+endif
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -326,6 +348,9 @@ $(BUILD)/http_chunk.o: lib/http_chunk.S include/http.inc include/tcp.inc include
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/http_status.o: lib/http_status.S include/http.inc include/tcp.inc include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/http_output_fsa.o: lib/http_output_fsa.S include/http.inc include/tcp.inc include/vmio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/net.o: lib/net.S include/net.inc include/perf.inc | $(BUILD)
