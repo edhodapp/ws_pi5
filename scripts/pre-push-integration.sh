@@ -29,6 +29,12 @@ fi
 COMMIT=$(git rev-parse --short HEAD)
 PERF_LOG="$PROJECT_DIR/hw_test/perf_runs.log"
 
+# Dev-build content slab — tiny, so the UART chainloader can finish
+# flashing within the flash_and_wait timeout budget. The release /
+# production kernels use the full 256 MiB default; this is only for
+# the integration-test path that goes over /dev/ttyUSB0.
+DEV_CONTENT_MAX=65536
+
 kill_stale() {
     $VENV -c "
 import sys; sys.path.insert(0, 'scripts')
@@ -71,7 +77,7 @@ echo "=== pre-push: L2 integration tests (commit $COMMIT) ==="
 
 # --- Phase 1: functional tests (default build) ---
 echo "--- Phase 1: flash default build ---"
-flash_and_wait /tmp/pre-push-flash.log PLATFORM=pi4
+flash_and_wait /tmp/pre-push-flash.log PLATFORM=pi4 CONTENT_MAX=$DEV_CONTENT_MAX
 
 echo "--- Phase 1: running L2 functional tests ---"
 L2_FUNC_OUT=$(mktemp)
@@ -95,7 +101,7 @@ rm -f "$L2_FUNC_OUT"
 
 # --- Phase 2: perf tests (PERF=recv build) ---
 echo "--- Phase 2: flash PERF=recv build ---"
-flash_and_wait /tmp/pre-push-flash-perf.log PLATFORM=pi4 PERF=recv
+flash_and_wait /tmp/pre-push-flash-perf.log PLATFORM=pi4 PERF=recv CONTENT_MAX=$DEV_CONTENT_MAX
 
 echo "--- Phase 2: running L2 perf tests ---"
 L2_PERF_OUT=$(mktemp)
