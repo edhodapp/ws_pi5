@@ -51,6 +51,20 @@
 .global http_fsa_count_close
 .global http_fsa_count_keepalive
 
+/* Engine-level counters (separate block from handler-dispatch counters
+ * so they can be zeroed independently). Telemetry for the /fsa_stats
+ * route and comparison against expected invariants:
+ *   events_posted  — increments once per successful http_fsa_post
+ *   events_dropped — increments on dup or full-queue drops (measures
+ *                    gating efficacy vs over-provisioning)
+ *   step_ok        — engine steps that dispatched a handler
+ *   step_no_trans  — engine steps that hit a zero-handler table cell
+ *                    (benign; stale/irrelevant event for current state) */
+.global http_fsa_events_posted
+.global http_fsa_events_dropped
+.global http_fsa_step_ok
+.global http_fsa_step_no_trans
+
 /* Handler symbols are .global so tests can pin table cells against
  * them (ldr x,=h_install then compare to TRANS_HANDLER entry). */
 .global h_install
@@ -141,6 +155,10 @@ http_fsa_init:
     stp     xzr, xzr, [x0]
     stp     xzr, xzr, [x0, #16]
 
+    /* Zero engine counters — 4 consecutive u32s = 16 bytes. */
+    ldr     x0, =http_fsa_events_posted
+    stp     xzr, xzr, [x0]
+
     ldp     x29, x30, [sp], #16
     ret
 
@@ -205,7 +223,8 @@ http_fsa_post:
      * full, clear the pending bit so a future re-post is allowed. */
     cbz     w0, .Lhfp_ok
 
-    /* Enqueue failed (queue full). Roll back the pending bit. */
+    /* Enqueue failed (queue full). Roll back the pending bit and bump
+     * events_dropped so the counter captures capacity pressure too. */
     ldr     x2, =http_fsa_evt_pending
     /* w0 from helper clobbered EVT_WAY; re-derive from stack event. */
     ldrh    w0, [sp, #EVT_WAY]
@@ -216,15 +235,27 @@ http_fsa_post:
     bic     w3, w3, w4
     strb    w3, [x2, w0, uxtw]
     add     sp, sp, #EVT_SIZE
+    ldr     x6, =http_fsa_events_dropped
+    ldr     w7, [x6]
+    add     w7, w7, #1
+    str     w7, [x6]
     mov     w0, #0
     b       .Lhfp_ret
 
 .Lhfp_ok:
     add     sp, sp, #EVT_SIZE
+    ldr     x6, =http_fsa_events_posted
+    ldr     w7, [x6]
+    add     w7, w7, #1
+    str     w7, [x6]
     mov     w0, #1
     b       .Lhfp_ret
 
 .Lhfp_drop:
+    ldr     x6, =http_fsa_events_dropped
+    ldr     w7, [x6]
+    add     w7, w7, #1
+    str     w7, [x6]
     mov     w0, #0
 
 .Lhfp_ret:
@@ -308,10 +339,23 @@ http_fsa_step:
     ldr     x0, =http_fsa_engine
     bl      vmio_engine_step
 
-    /* If the engine reported no valid dispatch, skip the state
-     * writeback — ENG_STATE may have been left at a stale value. */
+    /* Telemetry: bump step_ok / step_no_trans based on return. Don't
+     * bump either on STEP_IDLE (no event was dequeued → the idle case
+     * isn't interesting for throughput accounting). */
+    cmp     w0, #STEP_NO_TRANS
+    b.ne    .Lhfs_maybe_ok
+    ldr     x2, =http_fsa_step_no_trans
+    ldr     w3, [x2]
+    add     w3, w3, #1
+    str     w3, [x2]
+    b       .Lhfs_ret
+.Lhfs_maybe_ok:
     cmp     w0, #STEP_OK
-    b.ne    .Lhfs_ret
+    b.ne    .Lhfs_ret                              /* STEP_IDLE */
+    ldr     x2, =http_fsa_step_ok
+    ldr     w3, [x2]
+    add     w3, w3, #1
+    str     w3, [x2]
 
     /* Write engine.state back to ostate[way]. */
     cmp     w19, #HTTP_MAX_CONNS
@@ -320,6 +364,7 @@ http_fsa_step:
     ldr     w5, [x4, #ENG_STATE]
     ldr     x2, =http_fsa_ostate
     strb    w5, [x2, w19, uxtw]
+    /* w0 still holds STEP_OK; return value preserved across fallthrough. */
 
 .Lhfs_ret:
     ldp     x19, x20, [sp, #16]
@@ -892,5 +937,11 @@ http_fsa_count_reset:      .word 0
 http_fsa_count_close:      .word 0
 http_fsa_count_keepalive:  .word 0
 http_fsa_count_pad:        .word 0   /* keep block 16-byte aligned */
+
+/* Engine-level counters — 4 consecutive u32s = 16 bytes (one stp). */
+http_fsa_events_posted:    .word 0
+http_fsa_events_dropped:   .word 0
+http_fsa_step_ok:          .word 0
+http_fsa_step_no_trans:    .word 0
 
 .endif

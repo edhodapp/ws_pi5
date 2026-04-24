@@ -49,6 +49,10 @@ test_http_output_fsa:
     bl      test_fsa_response_drains_keepalive
     bl      test_fsa_response_drains_close
     bl      test_fsa_tcp_reset_during_tx
+    /* ---- engine-level counters ---- */
+    bl      test_fsa_events_posted_counter
+    bl      test_fsa_events_dropped_counter_on_dup
+    bl      test_fsa_step_counters
 
     ldp     x29, x30, [sp], #16
     ret
@@ -985,6 +989,153 @@ test_fsa_tcp_reset_during_tx:
     ret
 
 /* ======================================================================
+ * test_fsa_events_posted_counter — three successful posts must leave
+ * http_fsa_events_posted at exactly 3.
+ * ====================================================================== */
+test_fsa_events_posted_counter:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      http_fsa_init
+
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    mov     w0, #1
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    mov     w0, #2
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+
+    ldr     x0, =http_fsa_events_posted
+    ldr     w0, [x0]
+    cmp     w0, #3
+    b.ne    .Lfec_fail
+
+    /* Dropped counter must still be 0 — no dup/full in this test. */
+    ldr     x0, =http_fsa_events_dropped
+    ldr     w0, [x0]
+    cbnz    w0, .Lfec_fail
+
+    ldr     x0, =name_fec
+    bl      test_pass
+    b       .Lfec_done
+.Lfec_fail:
+    ldr     x0, =name_fec
+    bl      test_fail
+.Lfec_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_events_dropped_counter_on_dup — dup post bumps
+ * events_dropped, not events_posted.
+ * ====================================================================== */
+test_fsa_events_dropped_counter_on_dup:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      http_fsa_init
+
+    mov     w0, #7
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post                          /* posts 1 */
+    mov     w0, #7
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post                          /* dup → dropped */
+
+    ldr     x0, =http_fsa_events_posted
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfedc_fail
+
+    ldr     x0, =http_fsa_events_dropped
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lfedc_fail
+
+    ldr     x0, =name_fedc
+    bl      test_pass
+    b       .Lfedc_done
+.Lfedc_fail:
+    ldr     x0, =name_fedc
+    bl      test_fail
+.Lfedc_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_step_counters — step_ok bumps on successful dispatch,
+ * step_no_trans bumps on a zero-handler cell, STEP_IDLE bumps neither.
+ * ====================================================================== */
+test_fsa_step_counters:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      http_fsa_init
+
+    /* Simplest path first: post RESP_READY for way 0. h_install is the
+     * only handler that runs (it posts E_WIN_OPEN follow-up, but we
+     * only step ONCE). Result: step_ok == 1. */
+    mov     w0, #0
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    bl      http_fsa_step
+    cmp     w0, #STEP_OK
+    b.ne    .Lfsco_fail
+    ldr     x0, =http_fsa_step_ok
+    ldr     w19, [x0]
+    cmp     w19, #1
+    b.ne    .Lfsco_fail
+
+    /* step_no_trans still 0. */
+    ldr     x0, =http_fsa_step_no_trans
+    ldr     w1, [x0]
+    cbnz    w1, .Lfsco_fail
+
+    /* Re-init to clear all state; then drive a STEP_NO_TRANS event. */
+    bl      http_fsa_init
+
+    /* WIN_OPEN for way 10: ostate[10] = IDLE + no table entry →
+     * STEP_NO_TRANS. step_ok stays 0, step_no_trans becomes 1. */
+    mov     w0, #10
+    mov     w1, #E_WIN_OPEN
+    bl      http_fsa_post
+    bl      http_fsa_step
+    cmp     w0, #STEP_NO_TRANS
+    b.ne    .Lfsco_fail
+    ldr     x0, =http_fsa_step_no_trans
+    ldr     w1, [x0]
+    cmp     w1, #1
+    b.ne    .Lfsco_fail
+    ldr     x0, =http_fsa_step_ok
+    ldr     w1, [x0]
+    cbnz    w1, .Lfsco_fail
+
+    /* STEP_IDLE path: re-init, step with empty queue, neither counter
+     * should move. */
+    bl      http_fsa_init
+    bl      http_fsa_step
+    cmp     w0, #STEP_IDLE
+    b.ne    .Lfsco_fail
+    ldr     x0, =http_fsa_step_ok
+    ldr     w1, [x0]
+    cbnz    w1, .Lfsco_fail
+    ldr     x0, =http_fsa_step_no_trans
+    ldr     w1, [x0]
+    cbnz    w1, .Lfsco_fail
+
+    ldr     x0, =name_fsco
+    bl      test_pass
+    b       .Lfsco_done
+.Lfsco_fail:
+    ldr     x0, =name_fsco
+    bl      test_fail
+.Lfsco_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ======================================================================
  * Test data / buffers for the send-path tests.
  * ====================================================================== */
 .section .data
@@ -1017,5 +1168,8 @@ name_fsc:    .asciz "fsa_send_one_chunk"
 name_fdk:    .asciz "fsa_response_drains_keepalive"
 name_fdc:    .asciz "fsa_response_drains_close"
 name_ftrdt:  .asciz "fsa_tcp_reset_during_tx"
+name_fec:    .asciz "fsa_events_posted_counter"
+name_fedc:   .asciz "fsa_events_dropped_counter_on_dup"
+name_fsco:   .asciz "fsa_step_counters"
 
 .endif
