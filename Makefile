@@ -142,6 +142,12 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
     $(BUILD)/test_genet_rx_err.o
 
+# Output FSA tests — only when HTTP_OUTPUT_FSA=1 so the legacy test
+# suite stays byte-identical without the flag.
+ifeq ($(HTTP_OUTPUT_FSA),1)
+  SHARED_TEST_OBJS += $(BUILD)/test_http_output_fsa.o
+endif
+
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
 
@@ -450,6 +456,9 @@ $(BUILD)/test_md5.o: tests/test_md5.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_http.o: tests/test_http.S include/http.inc include/tcp.inc include/net.inc include/store.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_http_output_fsa.o: tests/test_http_output_fsa.S include/http.inc include/vmio.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_hex_parse.o: tests/test_hex_parse.S | $(BUILD)

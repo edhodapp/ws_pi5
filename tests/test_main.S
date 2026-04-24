@@ -113,6 +113,9 @@ _start:
     bl      test_example
     bl      test_vmio_queue
     bl      test_vmio_engine
+.ifdef HTTP_OUTPUT_FSA
+    bl      test_http_output_fsa
+.endif
     bl      test_store
     bl      test_platform_drivers
     bl      test_eth_type_arp

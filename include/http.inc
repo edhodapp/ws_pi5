@@ -234,3 +234,36 @@
  * 2 for shift-indexing. */
 .equ HTTP_MAX_RECV_BODY,  1024
 .equ HTTP_MAX_RECV_BODY_SHIFT, 10
+
+/* ========================================================================
+ * Output FSA (HTTP_OUTPUT_FSA build flag). Mirrors the send-side states
+ * and events introduced in lib/http_output_fsa.S. Kept here so tests and
+ * any future tcp.S hook (option-b migration) can reference the same
+ * canonical numbers. Safe to read unconditionally — they're plain .equ
+ * constants with no runtime footprint.
+ * ======================================================================== */
+
+/* States (O_*) — per-HCONN entry in http_fsa_ostate. */
+.equ O_IDLE,        0    /* no response queued */
+.equ O_SETUP,       1    /* hdr+body installed, waiting for first tx window */
+.equ O_TX,          2    /* emitting chunks */
+.equ O_DRAINING,    3    /* all bytes handed to tcp, waiting for sndbuf drain */
+.equ FSA_NSTATES,   4
+
+/* Events (E_*) — evt_code in the EVT struct, also the bit index in
+ * http_fsa_evt_pending so gating can check/set with `1 << evt_code`. */
+.equ E_RESP_READY,      0    /* hi — route produced hdr+body */
+.equ E_WIN_OPEN,        1    /* lo — tcp_send_ready transitioned 0 → non-0 */
+.equ E_CHUNK_SENT,      2    /* lo — handler wrote one frame; loop */
+.equ E_ALL_QUEUED,      3    /* lo — last byte handed to tcp */
+.equ E_ALL_DRAINED,     4    /* lo — sndbuf_unacked reached 0 */
+.equ E_TCP_CLOSED,      5    /* hi — conn left ESTABLISHED */
+.equ E_DO_CLOSE,        6    /* hi — h_decide → route to close */
+.equ E_DO_KEEPALIVE,    7    /* hi — h_decide → route to keepalive */
+.equ FSA_NEVENTS,       8
+
+/* Queue sizing: per-(way, event_code) gating in http_fsa_evt_pending
+ * bounds the live event count at HTTP_MAX_CONNS per queue. Power-of-2
+ * required by Q_MASK. */
+.equ HTTP_FSA_Q_CAP,    128
+.equ HTTP_FSA_Q_MASK,   127
