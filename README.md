@@ -140,6 +140,61 @@ hw_test/            Hardware test scripts for Pi 4 test fixture
   uart_test/          UART test kernels and PL011 register reference
 ```
 
+## Deploy Your Site
+
+Three-step flow for putting your own static site on a Pi 4. No
+AArch64 cross-toolchain required if you use a prebuilt kernel from
+the Releases page; if you'd rather build from source, jump to
+[Building](#building) below.
+
+### 1. Get a kernel
+
+Either download a prebuilt one (easiest) or build locally.
+
+Prebuilt — from the GitHub Releases page, grab `kernel8.img` for the
+release you want:
+
+```
+wget https://github.com/<owner>/ws_pi5/releases/download/<tag>/kernel8.img
+```
+
+From source:
+
+```
+sudo apt install binutils-aarch64-linux-gnu   # Debian/Ubuntu; use brew on macOS
+make PLATFORM=pi4
+```
+
+### 2. Package your site into the kernel
+
+Drop your static files into a directory (HTML, CSS, images — see
+`examples/public/` for a starter layout), then run the packager:
+
+```
+scripts/mk_appliance.py kernel8.img path/to/your/site/ appliance.img
+```
+
+Output: `appliance.img` — same format as the input kernel, but with
+your files baked in as served routes. The packager shows what each
+file got mapped to (`/index.html` is also aliased to `/`).
+
+### 3. Write an SD image and boot
+
+Build a flashable SD image:
+
+```
+sudo apt install mtools   # Debian/Ubuntu; brew install mtools on macOS
+scripts/mk_sd.sh --image appliance.img pi4_sd.img
+```
+
+Flash `pi4_sd.img` to an SD card with **Raspberry Pi Imager** (choose
+"Use custom"), **balenaEtcher**, or `dd`. Insert the SD into the Pi
+4, power on, and the appliance is live on `http://<pi-ip>/`.
+
+> If you'd rather drop files onto a pre-formatted FAT32 card by hand
+> (no `mtools` dependency), run `scripts/mk_sd.sh appliance.img
+> sd_boot/` for the directory form and `cp -r sd_boot/* /media/.../boot/`.
+
 ## Building
 
 Requires the AArch64 cross-toolchain and QEMU:
