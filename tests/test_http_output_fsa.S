@@ -38,6 +38,10 @@ test_http_output_fsa:
     bl      test_fsa_table_no_trans_cells
     bl      test_fsa_step_dispatches_handler
     bl      test_fsa_step_clears_pending_bit
+    bl      test_fsa_step_advances_ostate
+    bl      test_fsa_step_preserves_other_way_state
+    bl      test_fsa_step_idle_on_empty
+    bl      test_fsa_step_no_trans_leaves_state
 
     ldp     x29, x30, [sp], #16
     ret
@@ -395,14 +399,11 @@ test_fsa_step_dispatches_handler:
     ret
 
 /* ======================================================================
- * test_fsa_step_clears_pending_bit — stub: step currently forwards to
- * vmio_engine_step and does NOT clear the pending bit yet (that's
- * commit 3's http_fsa_step wrapper). Pin the current behavior so the
- * commit-3 change is visible: after a step that dispatched, the
- * pending bit IS still set (assertion on current behavior).
- *
- * Commit 3 will flip this test's expected value to 0 and the wrapper
- * will satisfy it.
+ * test_fsa_step_clears_pending_bit — after a successful dispatch the
+ * wrapper MUST clear the pending bit so a follow-up post of the same
+ * (way, code) can enqueue a fresh event. This is the commit-3
+ * contract; handlers rely on it when they re-post their own type
+ * (notably h_send looping via E_CHUNK_SENT).
  * ====================================================================== */
 test_fsa_step_clears_pending_bit:
     stp     x29, x30, [sp, #-16]!
@@ -420,10 +421,16 @@ test_fsa_step_clears_pending_bit:
     cmp     w0, #STEP_OK
     b.ne    .Lfscp_fail
 
-    /* Current behavior: pending bit still set. Commit 3 flips to 0. */
+    /* Pending bit for way 5, E_RESP_READY must now be 0. */
     ldr     x0, =http_fsa_evt_pending
     ldrb    w1, [x0, #5]
-    cmp     w1, #1
+    cbnz    w1, .Lfscp_fail
+
+    /* And posting the same (way, code) again MUST succeed. */
+    mov     w0, #5
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    cmp     w0, #1
     b.ne    .Lfscp_fail
 
     ldr     x0, =name_fscp
@@ -433,6 +440,165 @@ test_fsa_step_clears_pending_bit:
     ldr     x0, =name_fscp
     bl      test_fail
 .Lfscp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_step_advances_ostate — RESP_READY on an IDLE way MUST
+ * leave ostate[way] = O_SETUP after dispatch.
+ * ====================================================================== */
+test_fsa_step_advances_ostate:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      http_fsa_init
+
+    mov     w0, #9
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    cmp     w0, #1
+    b.ne    .Lfsao_fail
+
+    bl      http_fsa_step
+    cmp     w0, #STEP_OK
+    b.ne    .Lfsao_fail
+
+    ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0, #9]
+    cmp     w1, #O_SETUP
+    b.ne    .Lfsao_fail
+
+    ldr     x0, =name_fsao
+    bl      test_pass
+    b       .Lfsao_done
+.Lfsao_fail:
+    ldr     x0, =name_fsao
+    bl      test_fail
+.Lfsao_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_step_preserves_other_way_state — way 10 advances to
+ * O_SETUP via RESP_READY; way 11 must remain at O_IDLE. Pins the
+ * per-way state plumbing: the wrapper must swap ostate[way], not
+ * leak ENG_STATE across ways.
+ * ====================================================================== */
+test_fsa_step_preserves_other_way_state:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      http_fsa_init
+
+    /* Advance way 10 via RESP_READY + step. */
+    mov     w0, #10
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+    bl      http_fsa_step
+    cmp     w0, #STEP_OK
+    b.ne    .Lfspos_fail
+
+    /* way 10 should be O_SETUP; way 11 should still be O_IDLE. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0, #10]
+    cmp     w1, #O_SETUP
+    b.ne    .Lfspos_fail
+    ldrb    w1, [x0, #11]
+    cbnz    w1, .Lfspos_fail
+
+    /* Now post WIN_OPEN for way 11 — it starts at O_IDLE so there is
+     * no table entry; must STEP_NO_TRANS and leave ostate[11] at 0. */
+    mov     w0, #11
+    mov     w1, #E_WIN_OPEN
+    bl      http_fsa_post
+    bl      http_fsa_step
+    cmp     w0, #STEP_NO_TRANS
+    b.ne    .Lfspos_fail
+    ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0, #11]
+    cbnz    w1, .Lfspos_fail
+
+    /* And way 10 must STILL be at O_SETUP after the way-11 step. */
+    ldrb    w1, [x0, #10]
+    cmp     w1, #O_SETUP
+    b.ne    .Lfspos_fail
+
+    ldr     x0, =name_fspos
+    bl      test_pass
+    b       .Lfspos_done
+.Lfspos_fail:
+    ldr     x0, =name_fspos
+    bl      test_fail
+.Lfspos_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_step_idle_on_empty — both queues empty must return
+ * STEP_IDLE without touching ostate.
+ * ====================================================================== */
+test_fsa_step_idle_on_empty:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      http_fsa_init
+
+    bl      http_fsa_step
+    cmp     w0, #STEP_IDLE
+    b.ne    .Lfsioe_fail
+
+    /* ostate[0] must still be O_IDLE. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0]
+    cbnz    w1, .Lfsioe_fail
+
+    ldr     x0, =name_fsioe
+    bl      test_pass
+    b       .Lfsioe_done
+.Lfsioe_fail:
+    ldr     x0, =name_fsioe
+    bl      test_fail
+.Lfsioe_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ======================================================================
+ * test_fsa_step_no_trans_leaves_state — post an event that has no
+ * table entry for the current state (IDLE + WIN_OPEN). The wrapper
+ * must return STEP_NO_TRANS and leave ostate[way] unchanged.
+ * ====================================================================== */
+test_fsa_step_no_trans_leaves_state:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    bl      http_fsa_init
+
+    mov     w0, #13
+    mov     w1, #E_WIN_OPEN            /* no table entry from O_IDLE */
+    bl      http_fsa_post
+    bl      http_fsa_step
+    cmp     w0, #STEP_NO_TRANS
+    b.ne    .Lfsntls_fail
+
+    /* ostate[13] must still be O_IDLE. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0, #13]
+    cbnz    w1, .Lfsntls_fail
+
+    /* Pending bit for WIN_OPEN was still cleared by the wrapper (we
+     * clear pre-dispatch, and that clear fires regardless of STEP_OK
+     * vs STEP_NO_TRANS). */
+    ldr     x0, =http_fsa_evt_pending
+    ldrb    w1, [x0, #13]
+    cbnz    w1, .Lfsntls_fail
+
+    ldr     x0, =name_fsntls
+    bl      test_pass
+    b       .Lfsntls_done
+.Lfsntls_fail:
+    ldr     x0, =name_fsntls
+    bl      test_fail
+.Lfsntls_done:
     ldp     x29, x30, [sp], #16
     ret
 
@@ -448,6 +614,10 @@ name_fpoorc: .asciz "fsa_post_out_of_range_code"
 name_ftheh:  .asciz "fsa_table_has_expected_handlers"
 name_ftnc:   .asciz "fsa_table_no_trans_cells"
 name_fsdh:   .asciz "fsa_step_dispatches_handler"
-name_fscp:   .asciz "fsa_step_clears_pending_bit_commit2_behavior"
+name_fscp:   .asciz "fsa_step_clears_pending_bit"
+name_fsao:   .asciz "fsa_step_advances_ostate"
+name_fspos:  .asciz "fsa_step_preserves_other_way_state"
+name_fsioe:  .asciz "fsa_step_idle_on_empty"
+name_fsntls: .asciz "fsa_step_no_trans_leaves_state"
 
 .endif

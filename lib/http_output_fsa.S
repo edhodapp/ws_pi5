@@ -234,20 +234,104 @@ http_fsa_post:
 /* ------------------------------------------------------------------------
  * http_fsa_step — one engine step with per-way state plumbing.
  *
- * Wraps vmio_engine_step: peek the hi queue (or lo), read the event's
- * way, load ostate[way] into engine.state, clear the pending bit, step
- * the engine (which will write next_state back into engine.state),
- * then store engine.state into ostate[way].
+ * vmio_engine_step owns a single ENG_STATE field but our FSA has N
+ * logical state variables — one per way. We fix that by peeking the
+ * next event, resolving ostate[way] as the "real" current state,
+ * copying it into ENG_STATE before the engine runs, and copying the
+ * engine's post-step ENG_STATE back into ostate[way] after.
  *
- * Commit 3 implements this; for commit 2 we stub it to just forward to
- * vmio_engine_step so the skeleton links.
+ * Pending-bit clear happens BEFORE the engine runs, so a handler that
+ * re-posts its own event type lands a fresh enqueue (the old one is
+ * already in-hand as the dequeued event we're servicing).
+ *
+ * Peek semantics: both queues might hold events; priority is hi first.
+ * The peek reads EVT_WAY without dequeuing — vmio_engine_step will do
+ * the actual dequeue via its vmio_dequeue_priority call.
  *
  * Returns: w0 = STEP_OK / STEP_IDLE / STEP_NO_TRANS.
  * Clobbers: x0-x9, x19-x22, x30.
  * ------------------------------------------------------------------------ */
 http_fsa_step:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    /* Peek the queue pair for the next event's way + code without
+     * dequeuing. Peek order must match vmio_dequeue_priority: hi first,
+     * then lo. If both are empty we still call vmio_engine_step — it
+     * returns STEP_IDLE cleanly. */
+    ldr     x19, =http_fsa_hi_queue
+    ldr     x20, =http_fsa_lo_queue
+
+    /* hi queue: head == tail means empty. */
+    ldr     w0, [x19, #Q_HEAD]
+    ldr     w1, [x19, #Q_TAIL]
+    cmp     w0, w1
+    b.ne    .Lhfs_peek_hi
+    /* lo queue empty check */
+    ldr     w0, [x20, #Q_HEAD]
+    ldr     w1, [x20, #Q_TAIL]
+    cmp     w0, w1
+    b.eq    .Lhfs_idle            /* both empty — straight to engine for STEP_IDLE */
+    mov     x19, x20               /* x19 = lo queue (has the event) */
+
+.Lhfs_peek_hi:
+    /* Slot address: &q_slots[head * EVT_SIZE] */
+    ldr     w0, [x19, #Q_HEAD]
+    add     x1, x19, #Q_SLOTS
+    lsl     w2, w0, #5             /* head * 32 */
+    add     x1, x1, x2
+    ldrh    w19, [x1, #EVT_WAY]    /* w19 = way */
+    ldrh    w20, [x1, #EVT_CODE]   /* w20 = evt_code (for pending-clear) */
+
+    /* Bounds check the way — if garbage, skip the state swap and let
+     * the engine reject via STEP_NO_TRANS or its own bounds checks. */
+    cmp     w19, #HTTP_MAX_CONNS
+    b.hs    .Lhfs_engine
+
+    /* Load per-way state into ENG_STATE. */
+    ldr     x2, =http_fsa_ostate
+    ldrb    w3, [x2, w19, uxtw]
+    ldr     x4, =http_fsa_engine
+    str     w3, [x4, #ENG_STATE]
+
+    /* Clear the pending bit for (way, evt_code). Done BEFORE dispatch
+     * so a handler that re-posts its own type gets a fresh slot. */
+    ldr     x2, =http_fsa_evt_pending
+    ldrb    w5, [x2, w19, uxtw]
+    mov     w6, #1
+    lsl     w6, w6, w20
+    bic     w5, w5, w6
+    strb    w5, [x2, w19, uxtw]
+
+.Lhfs_engine:
     ldr     x0, =http_fsa_engine
-    b       vmio_engine_step
+    bl      vmio_engine_step
+
+    /* If the engine reported no valid dispatch, skip the state
+     * writeback — ENG_STATE may have been left at a stale value. */
+    cmp     w0, #STEP_OK
+    b.ne    .Lhfs_ret
+
+    /* Write engine.state back to ostate[way]. */
+    cmp     w19, #HTTP_MAX_CONNS
+    b.hs    .Lhfs_ret
+    ldr     x4, =http_fsa_engine
+    ldr     w5, [x4, #ENG_STATE]
+    ldr     x2, =http_fsa_ostate
+    strb    w5, [x2, w19, uxtw]
+
+.Lhfs_ret:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+.Lhfs_idle:
+    ldr     x0, =http_fsa_engine
+    bl      vmio_engine_step
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
 
 /* ========================================================================
  * Handler stubs. Each increments its dispatch counter and returns.
