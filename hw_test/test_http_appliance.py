@@ -133,14 +133,19 @@ class TestGuestbook:
 
     def test_post_html_payload_is_escaped(self):
         """Posting <script>…</script> MUST be HTML-escaped on render —
-        raw <script> bytes in the response would be XSS."""
-        _req("POST", "/guestbook", body=b"<script>x")
+        reflecting the exact posted bytes would be XSS. Pin both halves:
+        the unescaped payload MUST be absent AND the escaped form MUST
+        be present, so a test that merely drops the message entirely
+        can't pass by accident."""
+        payload = b"<script>xss_probe_77</script>"
+        escaped = b"&lt;script&gt;xss_probe_77&lt;/script&gt;"
+        _req("POST", "/guestbook", body=payload)
         _, _, body = _req("GET", "/guestbook")
-        assert b"<script>" not in body, (
-            f"unescaped <script> in response: tail={body[-200:]!r}"
+        assert payload not in body, (
+            f"unescaped payload reflected in response: body={body!r}"
         )
-        assert b"&lt;script&gt;" in body, (
-            f"escaped form missing: tail={body[-200:]!r}"
+        assert escaped in body, (
+            f"escaped form missing: body={body!r}"
         )
 
 
@@ -177,7 +182,8 @@ class TestPostErrorPaths:
 
     def test_post_without_content_length_411(self):
         headers, _ = _raw(
-            b"POST /_test_echo HTTP/1.1\r\nHost: x\r\n\r\n"
+            b"POST /_test_echo HTTP/1.1\r\nHost: x\r\n"
+            b"Connection: close\r\n\r\n"
         )
         status_line = headers.split(b"\r\n", 1)[0]
         assert b"411" in status_line, f"expected 411: {status_line!r}"
@@ -185,6 +191,7 @@ class TestPostErrorPaths:
     def test_post_oversize_content_length_413(self):
         headers, _ = _raw(
             b"POST /_test_echo HTTP/1.1\r\nHost: x\r\n"
+            b"Connection: close\r\n"
             b"Content-Length: 2000\r\n\r\n"
         )
         status_line = headers.split(b"\r\n", 1)[0]
@@ -193,6 +200,7 @@ class TestPostErrorPaths:
     def test_duplicate_content_length_400(self):
         headers, _ = _raw(
             b"POST /_test_echo HTTP/1.1\r\nHost: x\r\n"
+            b"Connection: close\r\n"
             b"Content-Length: 5\r\nContent-Length: 99\r\n\r\nhello"
         )
         status_line = headers.split(b"\r\n", 1)[0]
