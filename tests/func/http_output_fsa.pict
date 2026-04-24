@@ -1,0 +1,20 @@
+# PICT model for the HTTP output FSA transition table.
+#
+# Full cross-product: 4 states × 8 events = 32 vectors.
+#
+# Each vector specifies (state, event) and the expected (next_state,
+# handler) that the table in lib/http_output_fsa.S must encode. A
+# handler of "NONE" means the table cell is empty (handler_ptr == 0);
+# the engine reports STEP_NO_TRANS for that combination and drops the
+# event silently.
+#
+# Paired oracle output: tests/func/http_output_fsa_vectors.tsv —
+# written by hand since the table is 32 entries (no oracle script
+# needed) but committed so the spec can be diff'd against the
+# assembly at any time.
+#
+# Source of truth: lib/http_output_fsa.S::http_fsa_trans_table.
+# Include-side constants: include/http.inc::O_*, E_*.
+
+State:      O_IDLE, O_SETUP, O_TX, O_DRAINING
+Event:      E_RESP_READY, E_WIN_OPEN, E_CHUNK_SENT, E_ALL_QUEUED, E_ALL_DRAINED, E_TCP_CLOSED, E_DO_CLOSE, E_DO_KEEPALIVE

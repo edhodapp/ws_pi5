@@ -141,12 +141,22 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table
 
 all: kernel8.img
 
 kernel8.img: $(BUILD)/kernel8.elf
 	$(OBJCOPY) -O binary $< $@
+
+# ---------------------------------------------------------------------------
+# verify-fsa-table — cross-check tests/func/http_output_fsa_vectors.tsv
+# (the human-authored output-FSA transition-table spec) against the
+# compiled http_fsa_trans_table in the kernel ELF. Catches drift
+# between the .tsv spec and lib/http_output_fsa.S silently reordering
+# cells.
+# ---------------------------------------------------------------------------
+verify-fsa-table: $(BUILD)/kernel8.elf
+	@python3 scripts/verify_fsa_table.py $< tests/func/http_output_fsa_vectors.tsv
 
 $(BUILD)/kernel8.elf: $(KERNEL_OBJS) $(LINKER_SCRIPT)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
