@@ -190,6 +190,21 @@ Build the UART chainloader for Pi 4 development:
 make chainload
 ```
 
+Assemble a Pi 4 SD-boot bundle (for shipping a packaged appliance
+without a UART host):
+
+```
+scripts/mk_appliance.py kernel8.img public/ appliance.img
+scripts/mk_sd.sh appliance.img sd_boot/
+# Then: cp -r sd_boot/* /media/<user>/boot/
+```
+
+`mk_sd.sh` writes a config.txt with `kernel_address=0x200000` so the Pi
+firmware lands the kernel at the address `linker_hw.ld` targets (the
+firmware's VC agent owns 0x80000 and must not be stomped). It
+auto-fetches the Pi 4 GPU firmware blobs via
+`hw_test/uart_test/sdcard/download_firmware.sh` on first use.
+
 Clean build artifacts:
 
 ```
