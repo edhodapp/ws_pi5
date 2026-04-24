@@ -170,11 +170,19 @@ cat > "$BUNDLE_DIR/config.txt" <<'EOF'
 # VC agent owns 0x80000, so we tell the firmware to load our kernel
 # image at 0x200000 instead of the default 0x80000 — otherwise the
 # VC agent gets stomped and UART dies during boot.
+#
+# dtoverlay=disable-bt frees PL011 from the Bluetooth chip so it
+# routes to GPIO 14/15 (header pins 8/10). Our kernel writes debug
+# output through PL011 at 0xFE201000; without this overlay, the
+# firmware points PL011 at BT and GPIO 14/15 get the mini UART
+# instead — serial output disappears even on a successfully-booted
+# kernel. Same setting the known-good chainloader dev sdcard uses.
 
 arm_64bit=1
 kernel=kernel8.img
 kernel_address=0x200000
 enable_uart=1
+dtoverlay=disable-bt
 EOF
 
 if [[ "$MODE" == "image" ]]; then
