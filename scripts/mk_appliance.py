@@ -37,11 +37,11 @@ VERSION_V1 = 1
 
 APPLIANCE_HDR_SIZE = 24
 APPLIANCE_ROUTES_OFF = 24
-APPLIANCE_MAX_ROUTES = 80
+APPLIANCE_MAX_ROUTES = 512
 ROUTE_SIZE = 48
 APPLIANCE_ROUTES_SIZE = APPLIANCE_MAX_ROUTES * ROUTE_SIZE
 APPLIANCE_CONTENT_OFF = APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE
-APPLIANCE_CONTENT_MAX = 32768
+APPLIANCE_CONTENT_MAX = 256 * 1024 * 1024
 APPLIANCE_SLAB_SIZE = APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX
 
 # Header field offsets
@@ -49,7 +49,7 @@ HDR_MAGIC = 0
 HDR_VERSION = 8
 HDR_RCOUNT = 12
 HDR_CLEN = 16
-HDR_PAD = 20
+HDR_KSIZE = 20    # u32 — kernel's compile-time APPLIANCE_SLAB_SIZE
 
 # Route entry field offsets
 ROUTE_PATH_LEN = 0
@@ -241,12 +241,37 @@ def find_slab_offset(image: bytes) -> int:
     return off
 
 
+def verify_kernel_ksize(image: bytes, slab_off: int) -> None:
+    """Bail loudly if the packager's APPLIANCE_SLAB_SIZE doesn't match
+    the kernel's.
+
+    The kernel bakes its own APPLIANCE_SLAB_SIZE into the placeholder
+    header's HDR_KSIZE u32 at build time. If this packager's Python
+    constants drift from include/http.inc, we'd either write past the
+    placeholder into adjacent kernel code (packager slab larger) or
+    leave the tail of the placeholder full of whatever was there
+    before (packager slab smaller, kernel reads uninitialized bytes
+    as route entries at boot). Either failure mode is silent and ugly;
+    catching it here turns mismatch into a clear error.
+    """
+    kernel_ksize = struct.unpack_from("<I", image, slab_off + HDR_KSIZE)[0]
+    if kernel_ksize != APPLIANCE_SLAB_SIZE:
+        raise ValueError(
+            "kernel/packager slab-size mismatch — rebuild the kernel "
+            "with matching include/http.inc, or update the Python "
+            "constants in this script.\n"
+            f"  kernel APPLIANCE_SLAB_SIZE  = {kernel_ksize} B\n"
+            f"  packager APPLIANCE_SLAB_SIZE = {APPLIANCE_SLAB_SIZE} B"
+        )
+
+
 def package(
     kernel_path: Path, public_dir: Path, output_path: Path,
 ) -> int:
     """Produce a packaged appliance image. Returns 0 on success."""
     image = kernel_path.read_bytes()
     slab_off = find_slab_offset(image)
+    verify_kernel_ksize(image, slab_off)
     routes = collect_routes(public_dir)
     if not routes:
         print(

@@ -161,14 +161,22 @@ def test_collect_routes_skips_dotfiles(tmp_path: Path) -> None:
     assert paths == {"/page.html"}
 
 
+def _make_placeholder_slab(ksize: int = M.APPLIANCE_SLAB_SIZE) -> bytes:
+    """Build an unpackaged WSPINONE slab with the HDR_KSIZE field
+    populated. Tests use this to stand in for a linked kernel's
+    placeholder when they don't care about any other header bytes."""
+    slab = bytearray(M.APPLIANCE_SLAB_SIZE)
+    slab[:8] = M.MAGIC_NONE
+    struct.pack_into("<I", slab, M.HDR_KSIZE, ksize)
+    return bytes(slab)
+
+
 def test_package_empty_dir_warns(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Empty public_dir must still produce rc=0 and warn on stderr."""
     kernel_path = tmp_path / "kernel.img"
-    slab_region = bytearray(M.APPLIANCE_SLAB_SIZE)
-    slab_region[:8] = M.MAGIC_NONE
-    kernel_path.write_bytes(bytes(slab_region))
+    kernel_path.write_bytes(_make_placeholder_slab())
     public = tmp_path / "empty"
     public.mkdir()
     output = tmp_path / "out.img"
@@ -201,10 +209,8 @@ def test_package_end_to_end(tmp_path: Path) -> None:
     kernel_path = tmp_path / "kernel.img"
     # Pre-marker filler, marker-padded slab region, post-marker filler.
     pre = b"\xAA" * 128
-    slab_region = bytearray(M.APPLIANCE_SLAB_SIZE)
-    slab_region[:8] = M.MAGIC_NONE
     post = b"\xBB" * 128
-    kernel_path.write_bytes(pre + bytes(slab_region) + post)
+    kernel_path.write_bytes(pre + _make_placeholder_slab() + post)
 
     public = tmp_path / "public"
     public.mkdir()
@@ -282,3 +288,22 @@ def test_main_rejects_missing_public(
         sys.argv = argv
     assert rc == 1
     assert "not a directory" in capsys.readouterr().err
+
+
+def test_package_rejects_ksize_mismatch(tmp_path: Path) -> None:
+    """If the kernel's HDR_KSIZE doesn't match the packager's
+    APPLIANCE_SLAB_SIZE, package() must refuse to write — otherwise a
+    packager with drifted constants would over-write adjacent kernel
+    code or leave the placeholder tail uninitialized."""
+    kernel_path = tmp_path / "kernel.img"
+    # Write a placeholder claiming a kernel slab 8 bytes smaller than
+    # the packager's expected size. Any value != APPLIANCE_SLAB_SIZE
+    # should trip the check; the exact delta doesn't matter.
+    bogus_ksize = M.APPLIANCE_SLAB_SIZE - 8
+    kernel_path.write_bytes(_make_placeholder_slab(ksize=bogus_ksize))
+    public = tmp_path / "public"
+    public.mkdir()
+    output = tmp_path / "out.img"
+    with pytest.raises(ValueError, match="slab-size mismatch"):
+        M.package(kernel_path, public, output)
+    assert not output.exists()

@@ -95,9 +95,14 @@ http_appliance_init:
 
     /* Packaged appliance present. Walk routes, converting
      * PATH/BODY/HDR byte-offsets into absolute pointers by adding
-     * the absolute address of the content region. */
+     * the absolute address of the content region. APPLIANCE_ROUTES_OFF
+     * (24) fits as an `add` immediate; APPLIANCE_CONTENT_OFF is
+     * 24 + APPLIANCE_MAX_ROUTES*48 which can exceed the 12-bit
+     * immediate ceiling for large route caps — materialize via
+     * `mov` (gas picks MOVZ/MOVK for 16-bit+ immediates). */
     add     x20, x19, #APPLIANCE_ROUTES_OFF     /* x20 = routes base */
-    add     x21, x19, #APPLIANCE_CONTENT_OFF    /* x21 = content base */
+    mov     w0, #APPLIANCE_CONTENT_OFF
+    add     x21, x19, w0, uxtw                  /* x21 = content base */
     ldr     w22, [x19, #APPLIANCE_HDR_RCOUNT]   /* w22 = rcount */
     mov     w23, #0                             /* w23 = i */
 
@@ -1489,7 +1494,10 @@ http_appliance_slab:
     .word   0                           /* version */
     .word   0                           /* rcount */
     .word   0                           /* clen */
-    .word   0                           /* pad */
+    .word   APPLIANCE_SLAB_SIZE         /* ksize — so the packager can
+                                         * verify its own constants
+                                         * match this kernel's slab
+                                         * before writing */
     .space  APPLIANCE_ROUTES_SIZE       /* route entries */
     .space  APPLIANCE_CONTENT_MAX       /* content bytes */
 http_appliance_slab_end:

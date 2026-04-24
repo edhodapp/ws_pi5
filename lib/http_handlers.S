@@ -366,6 +366,11 @@ form_log_store:
 .equ FORM_LOG_REC_BYTES, 256
 .equ FORM_LOG_CAP,       8
 
+/* Handler code belongs in .text — a missed section switch upstream
+ * placed this (and nothing else visible) into .data, where it
+ * worked by accident until the appliance slab grew large enough to
+ * push it >128 MiB from its BL targets in .text. */
+.section .text
 http_form_log_handler:
     stp     x29, x30, [sp, #-48]!
     stp     x19, x20, [sp, #16]

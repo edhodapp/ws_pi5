@@ -3176,7 +3176,10 @@ test_http_appliance_activation:
     stp     x19, x20, [sp, #16]
 
     ldr     x19, =http_appliance_slab
-    add     x20, x19, #APPLIANCE_CONTENT_OFF
+    /* APPLIANCE_CONTENT_OFF can exceed the 12-bit add-immediate ceiling
+     * once APPLIANCE_MAX_ROUTES pushes it past 4095 — materialize it. */
+    mov     w20, #APPLIANCE_CONTENT_OFF
+    add     x20, x19, w20, uxtw
 
     /* Write the header fields (version / rcount / clen) and a single
      * route entry with offset pointers. */

@@ -181,13 +181,19 @@
  *   8   APPLIANCE_HDR_VERSION   4 B  — u32, currently 1
  *   12  APPLIANCE_HDR_RCOUNT    4 B  — u32, number of active routes
  *   16  APPLIANCE_HDR_CLEN      4 B  — u32, bytes used in content region
- *   20  APPLIANCE_HDR_PAD       4 B  — reserved, zero
- *   24  APPLIANCE_ROUTES        3840 B — 80 × 48-byte route entries
+ *   20  APPLIANCE_HDR_KSIZE     4 B  — u32, kernel-side APPLIANCE_SLAB_SIZE
+ *                                     baked in at build time. The packager
+ *                                     reads this and refuses to run if its
+ *                                     own APPLIANCE_SLAB_SIZE differs;
+ *                                     writing a mismatched slab would
+ *                                     either over-write adjacent kernel
+ *                                     code or leave the tail of the
+ *                                     placeholder unwritten.
+ *   24  APPLIANCE_ROUTES        variable — APPLIANCE_MAX_ROUTES × 48 B
  *   ...within each route entry, pointer fields hold BYTE OFFSETS into
  *      APPLIANCE_CONTENT rather than absolute pointers. Boot-time
- *      init (future commit) converts them to absolute pointers.
- *   3864 APPLIANCE_CONTENT      32 KB — path strings + body bytes
- *   (total slab size = 24 + 3840 + 32768 = 36632 bytes ≈ 35.8 KB)
+ *      init converts them to absolute pointers.
+ *   24 + N*48 APPLIANCE_CONTENT  variable — APPLIANCE_CONTENT_MAX bytes
  *
  * Magic values are raw 8-byte ASCII, stored little-endian-word so
  * `.quad` of the two halves reads back as the string in memory.
@@ -197,15 +203,15 @@
 .equ APPLIANCE_HDR_VERSION,     8
 .equ APPLIANCE_HDR_RCOUNT,      12
 .equ APPLIANCE_HDR_CLEN,        16
-.equ APPLIANCE_HDR_PAD,         20
+.equ APPLIANCE_HDR_KSIZE,       20
 .equ APPLIANCE_HDR_SIZE,        24
 
-.equ APPLIANCE_MAX_ROUTES,      80
+.equ APPLIANCE_MAX_ROUTES,      512
 .equ APPLIANCE_ROUTES_OFF,      24
 .equ APPLIANCE_ROUTES_SIZE,     (APPLIANCE_MAX_ROUTES * ROUTE_SIZE)
 
 .equ APPLIANCE_CONTENT_OFF,     (APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE)
-.equ APPLIANCE_CONTENT_MAX,     32768
+.equ APPLIANCE_CONTENT_MAX,     (256 * 1024 * 1024)
 .equ APPLIANCE_SLAB_SIZE,       (APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX)
 
 .equ APPLIANCE_VERSION,         1
