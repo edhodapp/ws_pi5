@@ -5,6 +5,86 @@
 
 ---
 
+## Installation
+
+Two paths, pick the one that matches what you want to do.
+
+### Deploy a site (no compiler needed)
+
+Enough to package a static site into a bootable kernel image and
+flash it to an SD card. You never touch the AArch64 toolchain.
+
+Debian / Ubuntu:
+
+```
+sudo apt install python3 mtools
+```
+
+macOS (Homebrew):
+
+```
+brew install python@3.12 mtools
+```
+
+Then clone the repo and grab a prebuilt kernel from the
+[Releases page](https://github.com/edhodapp/ws_pi5/releases):
+
+```
+git clone https://github.com/edhodapp/ws_pi5.git
+cd ws_pi5
+wget -O kernel8.img https://github.com/edhodapp/ws_pi5/releases/latest/download/kernel8.img
+```
+
+Skip to [Deploy Your Site](#deploy-your-site) below.
+
+### Build from source (developer setup)
+
+Adds the AArch64 cross-assembler + QEMU for running the QEMU test
+suite, plus `pict` for the functional-test oracle.
+
+Debian / Ubuntu:
+
+```
+sudo apt install \
+    binutils-aarch64-linux-gnu \
+    qemu-system-arm qemu-user-static \
+    mtools \
+    python3 python3-venv \
+    cmake
+```
+
+macOS (Homebrew):
+
+```
+brew install aarch64-elf-binutils qemu mtools python@3.12 cmake
+```
+
+PICT (Microsoft's combinatorial test-vector generator — same on both
+platforms):
+
+```
+git clone --depth 1 https://github.com/microsoft/pict.git /tmp/pict-build
+cmake -S /tmp/pict-build -B /tmp/pict-build/build -DCMAKE_INSTALL_PREFIX=$HOME/.local
+cmake --build /tmp/pict-build/build -j
+cp /tmp/pict-build/build/cli/pict $HOME/.local/bin/
+```
+
+Python dev dependencies (for the hardware-test framework, branch
+coverage analyzer, and in-repo quality gates):
+
+```
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Build + run the QEMU unit tests as a smoke check:
+
+```
+make test
+```
+
+---
+
 A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. A complete HTTP server — from boot to serving pages — with no OS, no C runtime, and no abstraction layers.
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.

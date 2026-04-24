@@ -1,0 +1,19 @@
+# ws_pi5 Python dependencies.
+#
+# These are only needed for the developer workflow — building,
+# running the QEMU and hardware test suites, mutation testing, and
+# quality gates. A user who only wants to deploy a packaged appliance
+# image needs the Python standard library and nothing else;
+# scripts/mk_appliance.py and scripts/mk_sd_image.py are stdlib-only.
+
+# --- Test and quality gates ---
+pytest
+coverage
+flake8
+pylint
+mypy
+mutmut
+
+# --- Hardware integration tests (hw_test/) ---
+pyserial       # scripts/hw_send.py — chainloader host-side UART driver
+scapy          # hw_test/*  — L2/L3 raw-frame fabrication + capture
