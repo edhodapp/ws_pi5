@@ -83,6 +83,50 @@ Build + run the QEMU unit tests as a smoke check:
 make test
 ```
 
+### Capacity: how big can your site be?
+
+Static content is baked into the kernel image at package time — the
+packager copies files into a reserved region of `.data`, and the
+running kernel serves them from RAM. That means the site-size ceiling
+is set at compile time by two constants in `include/http.inc` (kernel
+side) and `scripts/mk_appliance.py` (packager side; the two MUST
+match):
+
+| Constant | Default | What it caps |
+|---|---|---|
+| `APPLIANCE_CONTENT_MAX` | `32768` (32 KiB) | total bytes across all packaged files (paths + headers + bodies) |
+| `APPLIANCE_MAX_ROUTES` | `80` | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
+
+The 32 KiB default is sized for the starter site in `examples/public/`.
+Real sites will need both constants raised and the kernel rebuilt.
+
+**Safe ceilings on a 1 GB Pi 4** (smallest model; bigger Pis have
+proportionally more headroom):
+
+| Content size | Notes |
+|---|---|
+| 32 KiB | default; starter page + minimal CSS. |
+| 1 MiB | text-heavy blog with minimal images. Boot-time impact negligible. |
+| 16 MiB | typical personal site with light images. <1 s extra boot. |
+| 64 MiB | image-heavy portfolio. 2–3 s extra boot. |
+| 256 MiB | large site; still leaves ~400 MiB free on the 1 GB model. |
+| >512 MiB | not recommended on 1 GB Pi; use a 2 GB+ model. |
+
+The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×
+256 KiB send buffer each is the dominant share). What's left of the
+1 GB is shared between the kernel image (which holds the baked-in
+content) and the 64 KiB stack. Bigger sites also take longer to load
+off SD at boot — figure ~20–50 MiB/s on a Class 10 card.
+
+To raise the ceilings: edit `APPLIANCE_CONTENT_MAX` and
+`APPLIANCE_MAX_ROUTES` in **both** `include/http.inc` and
+`scripts/mk_appliance.py`, keeping the values in sync, then `make
+clean && make PLATFORM=pi4` before re-running the packager. The two
+copies of each constant are not automatically reconciled today — if
+they drift the packager can over-write the end of its placeholder
+slab into adjacent kernel code. Until that cross-check lands, treat
+the two files as a linked pair when editing either constant.
+
 ---
 
 A bare-metal web server written entirely in AArch64 assembly through human-AI collaboration. A complete HTTP server — from boot to serving pages — with no OS, no C runtime, and no abstraction layers.
