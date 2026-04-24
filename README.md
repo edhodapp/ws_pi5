@@ -94,22 +94,19 @@ match):
 
 | Constant | Default | What it caps |
 |---|---|---|
-| `APPLIANCE_CONTENT_MAX` | `32768` (32 KiB) | total bytes across all packaged files (paths + headers + bodies) |
-| `APPLIANCE_MAX_ROUTES` | `80` | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
-
-The 32 KiB default is sized for the starter site in `examples/public/`.
-Real sites will need both constants raised and the kernel rebuilt.
+| `APPLIANCE_CONTENT_MAX` | `256 MiB` | total bytes across all packaged files (paths + headers + bodies) |
+| `APPLIANCE_MAX_ROUTES` | `512` | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
 
 **Safe ceilings on a 1 GB Pi 4** (smallest model; bigger Pis have
 proportionally more headroom):
 
 | Content size | Notes |
 |---|---|
-| 32 KiB | default; starter page + minimal CSS. |
+| 32 KiB | starter page + minimal CSS (historical default). |
 | 1 MiB | text-heavy blog with minimal images. Boot-time impact negligible. |
 | 16 MiB | typical personal site with light images. <1 s extra boot. |
 | 64 MiB | image-heavy portfolio. 2–3 s extra boot. |
-| 256 MiB | large site; still leaves ~400 MiB free on the 1 GB model. |
+| 256 MiB | **current default** — large site; still leaves ~400 MiB free on the 1 GB model. |
 | >512 MiB | not recommended on 1 GB Pi; use a 2 GB+ model. |
 
 The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×
@@ -118,14 +115,27 @@ The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×
 content) and the 64 KiB stack. Bigger sites also take longer to load
 off SD at boot — figure ~20–50 MiB/s on a Class 10 card.
 
-To raise the ceilings: edit `APPLIANCE_CONTENT_MAX` and
+#### Why `kernel8.img` is so big
+
+The built image comes out around **268 MB** even for a starter site.
+Nearly all of that is the reserved appliance-content region: a
+fixed-size hole in `.data` that the packager stamps files into at
+build time. The executable web server itself — code, string
+constants, route table, all of `.text` + `.rodata` + non-slab
+`.data` — is well under **60 KB**. Shrinking `APPLIANCE_CONTENT_MAX`
+shrinks the image proportionally; the server's "real" footprint
+doesn't change.
+
+To raise or lower the ceilings: edit `APPLIANCE_CONTENT_MAX` and
 `APPLIANCE_MAX_ROUTES` in **both** `include/http.inc` and
 `scripts/mk_appliance.py`, keeping the values in sync, then `make
-clean && make PLATFORM=pi4` before re-running the packager. The two
-copies of each constant are not automatically reconciled today — if
-they drift the packager can over-write the end of its placeholder
-slab into adjacent kernel code. Until that cross-check lands, treat
-the two files as a linked pair when editing either constant.
+clean && make PLATFORM=pi4` before re-running the packager. A
+compile-time `HDR_KSIZE` field in the placeholder slab carries the
+kernel's `APPLIANCE_SLAB_SIZE` into the image; the packager reads
+it on every run and aborts with a clear message if its own Python
+constants don't match — so editing one file without the other
+fails loudly instead of writing past the placeholder into adjacent
+kernel code.
 
 ---
 
@@ -142,7 +152,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 431 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 480 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -341,7 +351,7 @@ cp /tmp/pict-build/build/cli/pict $HOME/.local/bin/
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
 | **Pi 4** (QEMU test harness) | `make` | `make test` | Default. Runs the shared protocol-stack tests on QEMU raspi3b (BCM2837 peripheral base at 0x3F000000). Tests the platform-independent `lib/` code without needing real hardware. |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware via chainloader. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. Development flashing via UART chainloader; production via SD-card boot (see `scripts/mk_sd.sh`). |
 
 Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on QEMU 7.2, 8.2, and 11.0-rc0.
 
