@@ -32,11 +32,10 @@ from pathlib import Path
 SECTOR = 512
 PART_OFFSET_SECTORS = 2048      # 1 MiB aligned; universal convention
 # FAT32 requires >= 65,525 clusters. At mformat's default cluster size
-# for small volumes (4 KiB), that's ~258 MiB of data area. At 512-byte
-# clusters the minimum is ~33 MiB. Use 64 MiB as the floor: comfortably
-# above the 33 MiB lower bound, leaves headroom for the ~2.5 MiB
-# bundle, and avoids mformat failing with "too small for FAT32" when
-# the bundle is near-empty.
+# for small volumes (4 KiB), that's ~258 MiB of data area. We keep a
+# 64 MiB floor and force 512-byte clusters via `mformat -c 1` so even
+# the smallest image lands 131,072 clusters — comfortably above the
+# spec floor and accepted by Windows, macOS, and Pi firmware alike.
 MIN_PART_MB = 64
 SLACK_MB = 4
 PART_TYPE_FAT32_LBA = 0x0C
@@ -115,15 +114,25 @@ def create_image(image_path: Path, size_mb: int) -> None:
         handle.truncate(size_mb * (1 << 20))
 
 
+def _run_mtool(cmd: list[str]) -> None:
+    """Run an mtools invocation; translate failures into a clean die()
+    message instead of letting CalledProcessError fall through as a
+    traceback."""
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        die(f"{cmd[0]} failed (exit {exc.returncode})")
+
+
 def mformat_partition(image_path: Path, part_offset_sectors: int) -> None:
-    """Format the partition inside the image as FAT32 via mtools."""
+    """Format the partition inside the image as FAT32 via mtools.
+    -c 1 forces 1 sector per cluster (512 B) so a 64 MiB partition has
+    131 K clusters, well above FAT32's 65,525-cluster minimum — smaller
+    cluster sizes avoid the "below-minimum clusters" spec violation
+    otherwise triggered at small volume sizes."""
     target = f"{image_path}@@{part_offset_sectors * SECTOR}"
-    # -F forces FAT32 regardless of auto-detection heuristics;
-    # -v "boot" gives a recognizable volume label; -h/-s/-t zero
-    # lets mformat compute geometry from the image size.
-    subprocess.run(
-        ["mformat", "-i", target, "-F", "-v", "BOOT", "::"],
-        check=True,
+    _run_mtool(
+        ["mformat", "-i", target, "-F", "-c", "1", "-v", "BOOT", "::"],
     )
 
 
@@ -133,19 +142,20 @@ def mcopy_files(
     """Copy every top-level entry (files AND subdirectories) from
     bundle_dir into the FAT32 root. Pi 4 boot layouts can include an
     overlays/ subdirectory with .dtbo files; -s makes mcopy descend
-    into it."""
+    into it. Symlinks are skipped (packager output never creates them
+    — silently dropping keeps bundle_size_bytes and mcopy aligned)."""
     target = f"{image_path}@@{part_offset_sectors * SECTOR}"
     entries = sorted(
         str(p) for p in bundle_dir.iterdir()
-        if p.is_file() or p.is_dir()
+        if (p.is_file() or p.is_dir()) and not p.is_symlink()
     )
     if not entries:
         die(f"bundle dir {bundle_dir} is empty")
-    # -s descends into directory arguments; -i selects the image;
-    # :: is the FAT filesystem root.
-    subprocess.run(
-        ["mcopy", "-i", target, "-s", *entries, "::"],
-        check=True,
+    # -s descends into directory args; -i selects the image; :: is the
+    # FAT filesystem root. "--" terminates the options list so a file
+    # whose name starts with "-" can't be misread as a flag.
+    _run_mtool(
+        ["mcopy", "-s", "-i", target, "--", *entries, "::"],
     )
 
 
@@ -162,6 +172,22 @@ def main() -> int:
 
     if not bundle.is_dir():
         die(f"{bundle} is not a directory")
+
+    # Guard: output image path inside the bundle would make
+    # bundle_size_bytes count its own output on rerun (growing the
+    # target on each call) and mcopy would try to copy the image into
+    # itself. Resolve both paths to absolute form before comparing so
+    # './' and '../' prefixes don't hide the overlap.
+    try:
+        image_resolved = image.resolve()
+        bundle_resolved = bundle.resolve()
+        if bundle_resolved in image_resolved.parents:
+            die(
+                f"output image {image} is inside bundle {bundle} — "
+                "choose a location outside the bundle directory"
+            )
+    except OSError as exc:
+        die(f"cannot resolve paths: {exc}")
 
     check_mtools()
 
