@@ -13,9 +13,7 @@ Verifies the Pi 4 serves correct HTTP responses.
 # unused-import disable covers names re-exported for test discovery
 # and legacy scaffolding that other tests in this file reference.
 
-import http.client  # noqa: F401
-import socket       # noqa: F401
-import pytest       # noqa: F401
+import http.client
 from conftest import (  # noqa: F401
     requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
 )
@@ -25,15 +23,26 @@ from conftest import (  # noqa: F401
 class TestHTTPGet:
 
     def _get(self, path: str, host: str = None) -> http.client.HTTPResponse:
-        """Helper: send GET request, return response."""
+        """Helper: send GET request, return (response, connection).
+
+        Opens the connection and issues the request; the caller is
+        responsible for calling conn.close(). If request/getresponse
+        raises, the connection is closed before propagating — otherwise
+        a transient error on open would leak the socket past the
+        caller's try/finally (which runs only when a conn was returned).
+        """
         conn = http.client.HTTPConnection(
             PI4_IP, PI4_HTTP_PORT, timeout=TEST_TIMEOUT,
         )
-        headers = {}
-        if host:
-            headers["Host"] = host
-        conn.request("GET", path, headers=headers)
-        resp = conn.getresponse()
+        try:
+            headers = {}
+            if host:
+                headers["Host"] = host
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+        except Exception:
+            conn.close()
+            raise
         return resp, conn
 
     def test_get_root_200(self):

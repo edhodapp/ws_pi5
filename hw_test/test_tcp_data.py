@@ -25,23 +25,29 @@ from conftest import (  # noqa: F401
 class TestTCPData:
 
     def test_send_receive_basic(self, pi4_addr):
-        """Send HTTP request, receive complete response."""
+        """Send HTTP request, receive complete response.
+
+        Uses Connection: close so the server closes after the response
+        and the recv loop exits on EOF rather than ticking through
+        TEST_TIMEOUT seconds of idle wait (HTTP/1.1 is keep-alive by
+        default on this server, so without this header the recv would
+        only unblock on timeout).
+        """
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TEST_TIMEOUT)
         try:
             s.connect(pi4_addr)
-            s.sendall(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            s.sendall(
+                b"GET / HTTP/1.1\r\nHost: test\r\n"
+                b"Connection: close\r\n\r\n"
+            )
 
-            # Receive all data until connection closes
             chunks = []
             while True:
-                try:
-                    data = s.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-                except socket.timeout:
+                data = s.recv(4096)
+                if not data:
                     break
+                chunks.append(data)
 
             response = b"".join(chunks)
             assert b"HTTP/1.1 200" in response
