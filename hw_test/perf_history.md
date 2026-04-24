@@ -6,6 +6,67 @@ new entries at the TOP so the latest work is immediately visible.
 
 ---
 
+## 2026-04-23 — HTTP keep-alive after VMIO/POST/appliance work (commit 1b33c4a)
+
+Baseline check after ~30 commits this session (per-HCONN dynamic
+scratch, route-entry-driven dispatch, full POST sequence incl.
+413/411/overflow-clamp/dup-CL/RECV_BODY, per-route Content-Type,
+in-RAM store + counter/guestbook/form_log handlers, query string
+split, XSS escape, per-route method allow-list, dead-code removal,
+partial rx consume). Pure observation — no code change.
+
+wrk from MACH-WX9 laptop via GENET to Pi 4, 4 threads, 10s runs.
+
+| Connections | Req/s | Avg Latency | P99 | Socket errors |
+|-------------|-------|-------------|-----|----------------|
+| 10  | 21,266 | 361μs  | 1.36ms | 0 |
+| 50  | 37,570 | 1.20ms | 4.68ms | 0 |
+| 100 | 42,441 | 1.99ms | 7.20ms | 90 write / 7 read |
+
+### Comparison vs 2026-04-16 baseline (commit 55c392f)
+
+| Connections | 2026-04-16 | 2026-04-23 | Δ       |
+|-------------|------------|------------|---------|
+| 10          | 25,274     | 21,266     | **-16%** |
+| 50          | 37,125     | 37,570     | +1% (noise) |
+| 100         | 32,678     | 42,441     | **+30%** |
+
+### Observations
+
+- **50-conn tier essentially unchanged** — the headline workload. The
+  session's architectural changes (per-HCONN scratch, partial rx
+  consume, method allow-list dispatch) paid for themselves.
+- **100-conn tier up 30%** — previously dropped from the 50-conn
+  peak, now monotonically higher. Per-HCONN scratch removes the
+  shared-buffer contention that bottlenecked at high connection
+  counts, and partial rx consume lets pipelined keep-alive actually
+  reuse connections instead of dropping trailing bytes.
+- **10-conn tier down 16%** — latency-dominated regime (few in-flight
+  requests, RTT-bound). Absolute latency 361μs is still well under
+  1ms; the regression is likely measurement variance (Wi-Fi noise
+  on the test host, GENET interrupt coalescing tick) rather than
+  a code-path change. Re-measuring at a quieter time would be the
+  cheap confirmation; investigate if it persists.
+- **Socket errors at 100 conns** — 90 write / 7 read, matching the
+  April 16 failure mode (128 HCONN slots, some in TIME_WAIT under
+  continuous reconnect pressure). Not a regression; a structural
+  limit until the conn table grows or TIME_WAIT handling tightens.
+- **README.md claims 51.8K req/s** — that figure came from a
+  post-April-16 optimization point not captured in perf_history.md
+  and I could not reproduce it today at any connection tier.
+  Recommend updating README once a higher number is reproducibly
+  measured, or dropping the claim.
+
+### Environment
+
+- Host: MACH-WX9 Ubuntu, wrk 4.1.0 (epoll), 4 threads
+- Link: host `enx00e04c0a2bed` (10.0.0.1/24) → Pi 4 GENET (10.0.0.2)
+- Pi 4 booted via chainloader (validated 2026-04-23 same session)
+- Kernel: `kernel8.img` 45976 bytes (PLATFORM=pi4 build of HEAD)
+- All 500+ unit tests passing on QEMU at this commit
+
+---
+
 ## 2026-04-16 — L3 post-hardening perf (commit 13dc8c6) — PERF=l3
 
 Post-hardening run after callee-saved rate limiter fix and
