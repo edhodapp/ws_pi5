@@ -87,27 +87,27 @@ make test
 
 Static content is baked into the kernel image at package time — the
 packager copies files into a reserved region of `.data`, and the
-running kernel serves them from RAM. That means the site-size ceiling
-is set at compile time by two constants in `include/http.inc` (kernel
-side) and `scripts/mk_appliance.py` (packager side; the two MUST
-match):
+running kernel serves them from RAM. The reserved region is sized at
+**compile time**, so kernel8.img is always `~60 KB of server code + the
+reserved content region`. Pick the size your site actually needs
+(see [Size the kernel to your site](#size-the-kernel-to-your-site)
+below) — don't pay for headroom you won't use.
 
 | Constant | Default | What it caps |
 |---|---|---|
-| `APPLIANCE_CONTENT_MAX` | `256 MiB` | total bytes across all packaged files (paths + headers + bodies) |
-| `APPLIANCE_MAX_ROUTES` | `512` | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
+| `APPLIANCE_CONTENT_MAX` | `256 MiB` (compile-time default; overridable with `make CONTENT_MAX=<bytes>`) | total bytes across all packaged files (paths + headers + bodies) |
+| `APPLIANCE_MAX_ROUTES` | `512` (overridable with `make MAX_ROUTES=<n>`) | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
 
-**Safe ceilings on a 1 GB Pi 4** (smallest model; bigger Pis have
-proportionally more headroom):
+**Maximum available content region on a 1 GB Pi 4** — bigger Pis have
+proportionally more headroom:
 
-| Content size | Notes |
-|---|---|
-| 32 KiB | starter page + minimal CSS (historical default). |
-| 1 MiB | text-heavy blog with minimal images. Boot-time impact negligible. |
-| 16 MiB | typical personal site with light images. <1 s extra boot. |
-| 64 MiB | image-heavy portfolio. 2–3 s extra boot. |
-| 256 MiB | **current default** — large site; still leaves ~400 MiB free on the 1 GB model. |
-| >512 MiB | not recommended on 1 GB Pi; use a 2 GB+ model. |
+| Content ceiling | Kernel image size | Fits on |
+|---|---|---|
+| 1 MiB | ~1 MiB | 128 MB SD and up |
+| 16 MiB | ~16 MiB | 128 MB SD and up |
+| 64 MiB | ~64 MiB | 128 MB SD and up |
+| 256 MiB | ~268 MB | 512 MB SD and up |
+| >512 MiB | uncomfortable on 1 GB Pi | use a 2 GB+ model |
 
 The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×
 256 KiB send buffer each is the dominant share). What's left of the
@@ -115,27 +115,40 @@ The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×
 content) and the 64 KiB stack. Bigger sites also take longer to load
 off SD at boot — figure ~20–50 MiB/s on a Class 10 card.
 
-#### Why `kernel8.img` is so big
+#### Size the kernel to your site
 
-The built image comes out around **268 MB** even for a starter site.
-Nearly all of that is the reserved appliance-content region: a
-fixed-size hole in `.data` that the packager stamps files into at
-build time. The executable web server itself — code, string
-constants, route table, all of `.text` + `.rodata` + non-slab
-`.data` — is well under **60 KB**. Shrinking `APPLIANCE_CONTENT_MAX`
-shrinks the image proportionally; the server's "real" footprint
-doesn't change.
+The cleanest path is `scripts/mk_sd.sh --build`, which measures the
+site, rebuilds the kernel with a matching `CONTENT_MAX`, packages the
+content, and writes a raw SD image — one command, one shot:
 
-To raise or lower the ceilings: edit `APPLIANCE_CONTENT_MAX` and
-`APPLIANCE_MAX_ROUTES` in **both** `include/http.inc` and
-`scripts/mk_appliance.py`, keeping the values in sync, then `make
-clean && make PLATFORM=pi4` before re-running the packager. A
-compile-time `HDR_KSIZE` field in the placeholder slab carries the
-kernel's `APPLIANCE_SLAB_SIZE` into the image; the packager reads
-it on every run and aborts with a clear message if its own Python
-constants don't match — so editing one file without the other
-fails loudly instead of writing past the placeholder into adjacent
-kernel code.
+```
+scripts/mk_sd.sh --build path/to/your/site/ pi4_sd.img
+```
+
+If you'd rather drive the steps manually:
+
+```
+SITE_BYTES=$(du -sb public/ | cut -f1)
+# round up, add ~25 % slack for HTTP header overhead
+CONTENT_MAX=$(( (SITE_BYTES * 5 / 4 + 1048575) / 1048576 * 1048576 ))
+make clean && make PLATFORM=pi4 CONTENT_MAX=$CONTENT_MAX
+scripts/mk_appliance.py --content-max $CONTENT_MAX kernel8.img public/ out.img
+```
+
+The `CONTENT_MAX` value must match on both sides. An `HDR_KSIZE` field
+is baked into the kernel's placeholder slab at compile time; the
+packager reads it and aborts loudly on mismatch — so a typo or
+forgotten flag fails clearly instead of over-writing past the
+placeholder into adjacent kernel code.
+
+#### Why `kernel8.img` is so big by default
+
+The prebuilt kernel from the Releases page is a one-size-fits-all
+image with the full 256 MiB content region reserved — ~268 MB total.
+Nearly all of that is the reserved slab. The executable web server
+itself — `.text` + `.rodata` + non-slab `.data` — is well under
+**60 KB**. Rebuild locally with a smaller `CONTENT_MAX` to get a
+kernel sized to your actual site.
 
 ---
 

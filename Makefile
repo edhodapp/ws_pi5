@@ -60,7 +60,29 @@ else ifneq ($(PERF),)
   $(error Unknown PERF=$(PERF); use recv, send, dispatch, l3, or all)
 endif
 
-ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS)
+# ---------------------------------------------------------------------------
+# Appliance content / route overrides. Pass CONTENT_MAX=<bytes> (and
+# optionally MAX_ROUTES=<n>) to shrink the reserved slab for sites
+# smaller than the 256 MiB default — critical for keeping kernel8.img
+# small enough to fit on a user's SD card. Both values flow through
+# the kernel ELF AND the packager (via HDR_KSIZE cross-check) so the
+# two copies stay in lockstep.
+#
+# Example for a 4 MiB site:
+#   make PLATFORM=pi4 CONTENT_MAX=4194304
+#   scripts/mk_appliance.py --content-max 4194304 kernel8.img public/ out.img
+# Easier: scripts/mk_sd.sh --build public/ sd.img (measures + rebuilds
+# + packages + writes the SD image in one step).
+# ---------------------------------------------------------------------------
+APPLIANCE_OVERRIDE_ASFLAGS =
+ifneq ($(CONTENT_MAX),)
+  APPLIANCE_OVERRIDE_ASFLAGS += --defsym CONTENT_MAX_OVERRIDE=$(CONTENT_MAX)
+endif
+ifneq ($(MAX_ROUTES),)
+  APPLIANCE_OVERRIDE_ASFLAGS += --defsym MAX_ROUTES_OVERRIDE=$(MAX_ROUTES)
+endif
+
+ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(APPLIANCE_OVERRIDE_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
 
 # Shorthand for platform include directories

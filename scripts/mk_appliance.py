@@ -307,6 +307,22 @@ def main() -> int:
         "output", type=Path,
         help="path for the packaged appliance image",
     )
+    parser.add_argument(
+        "--content-max", type=int, default=None,
+        help=(
+            "override APPLIANCE_CONTENT_MAX in bytes — must match the "
+            "`make CONTENT_MAX=<bytes>` value the kernel was built "
+            "with. The HDR_KSIZE cross-check aborts the packager on "
+            "mismatch so a forgotten flag fails loudly."
+        ),
+    )
+    parser.add_argument(
+        "--max-routes", type=int, default=None,
+        help=(
+            "override APPLIANCE_MAX_ROUTES — must match the kernel's "
+            "`make MAX_ROUTES=<n>` value."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.kernel.is_file():
@@ -315,6 +331,20 @@ def main() -> int:
     if not args.public.is_dir():
         print(f"  error: {args.public} is not a directory", file=sys.stderr)
         return 1
+
+    # Override sizing constants at runtime if the user passed values
+    # that differ from the kernel's compiled-in defaults. The globals
+    # feed the rest of the module (build_slab, collect_routes, etc.)
+    # so touching them here is enough.
+    global APPLIANCE_CONTENT_MAX, APPLIANCE_MAX_ROUTES  # noqa: PLW0603
+    global APPLIANCE_ROUTES_SIZE, APPLIANCE_CONTENT_OFF, APPLIANCE_SLAB_SIZE
+    if args.max_routes is not None:
+        APPLIANCE_MAX_ROUTES = args.max_routes
+        APPLIANCE_ROUTES_SIZE = APPLIANCE_MAX_ROUTES * ROUTE_SIZE
+        APPLIANCE_CONTENT_OFF = APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE
+    if args.content_max is not None:
+        APPLIANCE_CONTENT_MAX = args.content_max
+    APPLIANCE_SLAB_SIZE = APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX
 
     return package(args.kernel, args.public, args.output)
 

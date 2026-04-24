@@ -27,6 +27,13 @@
 # hw_test/uart_test/sdcard/ — auto-fetched on first use via the
 # existing download_firmware.sh.
 #
+# Third mode: --build <public_dir> <output_image>
+# One-command flow for developers: measure the public dir, rebuild the
+# kernel with a CONTENT_MAX sized to that, package the site, and emit a
+# raw SD image — all in one step. Produces an image sized to the site
+# rather than the default 256 MiB default, so a small site fits on a
+# small SD card.
+#
 # End-to-end example (directory mode):
 #   make PLATFORM=pi4
 #   scripts/mk_appliance.py kernel8.img public/ appliance.img
@@ -38,22 +45,69 @@
 #   scripts/mk_appliance.py kernel8.img public/ appliance.img
 #   scripts/mk_sd.sh --image appliance.img pi4_sd.img
 #   # flash pi4_sd.img with any SD writer
+#
+# End-to-end example (build mode):
+#   scripts/mk_sd.sh --build public/ pi4_sd.img
+#   # flash pi4_sd.img with any SD writer
 
 set -euo pipefail
 
 MODE="dir"
-if [[ "${1:-}" == "--image" ]]; then
-    MODE="image"
-    shift
-fi
+case "${1:-}" in
+    --image) MODE="image"; shift ;;
+    --build) MODE="build"; shift ;;
+esac
 
 if [[ $# -ne 2 ]]; then
     cat >&2 <<USAGE
 usage:
   $(basename "$0")          <packaged_kernel.img> <output_dir>
   $(basename "$0") --image  <packaged_kernel.img> <output_image.img>
+  $(basename "$0") --build  <public_dir> <output_image.img>
 USAGE
     exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# --build mode: bootstrap a sized kernel, package the site, then fall
+# through to --image mode against the packaged output.
+if [[ "$MODE" == "build" ]]; then
+    PUBLIC_DIR="$1"
+    SD_IMAGE="$2"
+    if [[ ! -d "$PUBLIC_DIR" ]]; then
+        echo "mk_sd: $PUBLIC_DIR is not a directory" >&2
+        exit 1
+    fi
+
+    # Measure the public dir's on-disk size and round up to MiB with a
+    # comfortable slack (larger of +1 MiB or +25 %). HTTP response
+    # headers baked into content also take ~100 bytes per file; the
+    # slack easily covers that.
+    SITE_BYTES=$(du -sb "$PUBLIC_DIR" | cut -f1)
+    SLACK_25=$(( SITE_BYTES / 4 ))
+    SLACK_1MB=$(( 1024 * 1024 ))
+    if (( SLACK_25 > SLACK_1MB )); then
+        SLACK=$SLACK_25
+    else
+        SLACK=$SLACK_1MB
+    fi
+    # Round up to next 1 MiB.
+    CONTENT_MAX=$(( (SITE_BYTES + SLACK + SLACK_1MB - 1) / SLACK_1MB * SLACK_1MB ))
+
+    echo "mk_sd: site is $SITE_BYTES B; building kernel with CONTENT_MAX=$CONTENT_MAX B"
+    ( cd "$PROJECT_DIR" && make clean >/dev/null && make PLATFORM=pi4 CONTENT_MAX="$CONTENT_MAX" >/dev/null )
+
+    APPLIANCE_TMP=$(mktemp -u --suffix=.img)
+    python3 "$PROJECT_DIR/scripts/mk_appliance.py" \
+        --content-max "$CONTENT_MAX" \
+        "$PROJECT_DIR/kernel8.img" "$PUBLIC_DIR" "$APPLIANCE_TMP"
+
+    # Re-exec ourselves in --image mode against the packaged kernel so
+    # the rest of the script (firmware fetch, staging dir, mk_sd_image)
+    # runs without duplication.
+    exec "$0" --image "$APPLIANCE_TMP" "$SD_IMAGE"
 fi
 
 KERNEL_IN="$1"
@@ -64,8 +118,8 @@ if [[ ! -f "$KERNEL_IN" ]]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# SCRIPT_DIR / PROJECT_DIR already resolved above (shared with --build
+# mode's bootstrap path).
 
 FW_DIR="$PROJECT_DIR/hw_test/uart_test/sdcard"
 FW_FILES=("start4.elf" "fixup4.dat" "bcm2711-rpi-4-b.dtb")

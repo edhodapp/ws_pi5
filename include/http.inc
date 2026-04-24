@@ -206,12 +206,26 @@
 .equ APPLIANCE_HDR_KSIZE,       20
 .equ APPLIANCE_HDR_SIZE,        24
 
+/* APPLIANCE_MAX_ROUTES — overridable via `make MAX_ROUTES=<n>` so
+ * route-heavy builds can raise the cap without editing this file. */
+.ifdef MAX_ROUTES_OVERRIDE
+.equ APPLIANCE_MAX_ROUTES,      MAX_ROUTES_OVERRIDE
+.else
 .equ APPLIANCE_MAX_ROUTES,      512
+.endif
 .equ APPLIANCE_ROUTES_OFF,      24
 .equ APPLIANCE_ROUTES_SIZE,     (APPLIANCE_MAX_ROUTES * ROUTE_SIZE)
 
 .equ APPLIANCE_CONTENT_OFF,     (APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE)
+/* APPLIANCE_CONTENT_MAX — overridable via `make CONTENT_MAX=<bytes>` so
+ * kernel8.img can be sized to fit a user's actual site rather than
+ * burning 256 MiB of reserved slab space regardless. Default stays
+ * at 256 MiB for users who want a one-size-fits-everything image. */
+.ifdef CONTENT_MAX_OVERRIDE
+.equ APPLIANCE_CONTENT_MAX,     CONTENT_MAX_OVERRIDE
+.else
 .equ APPLIANCE_CONTENT_MAX,     (256 * 1024 * 1024)
+.endif
 .equ APPLIANCE_SLAB_SIZE,       (APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX)
 
 .equ APPLIANCE_VERSION,         1
