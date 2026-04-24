@@ -31,9 +31,13 @@ from pathlib import Path
 # 63 sectors per track, 255 heads (legacy CHS geometry).
 SECTOR = 512
 PART_OFFSET_SECTORS = 2048      # 1 MiB aligned; universal convention
-# 8 MiB is plenty for the bundle (~2.4 MB today). Round up in
-# computed_image_size() based on actual bundle size.
-MIN_PART_MB = 8
+# FAT32 requires >= 65,525 clusters. At mformat's default cluster size
+# for small volumes (4 KiB), that's ~258 MiB of data area. At 512-byte
+# clusters the minimum is ~33 MiB. Use 64 MiB as the floor: comfortably
+# above the 33 MiB lower bound, leaves headroom for the ~2.5 MiB
+# bundle, and avoids mformat failing with "too small for FAT32" when
+# the bundle is near-empty.
+MIN_PART_MB = 64
 SLACK_MB = 4
 PART_TYPE_FAT32_LBA = 0x0C
 MBR_BOOT_SIG = 0xAA55
@@ -54,11 +58,13 @@ def check_mtools() -> None:
 
 
 def bundle_size_bytes(bundle_dir: Path) -> int:
-    """Sum of bundle file sizes. Rough — doesn't account for FAT
-    overhead, but the MIN_PART_MB + SLACK_MB padding covers it."""
+    """Recursive sum of bundle file sizes. Walks subdirectories so
+    overlays/ and any nested content contribute to the sizing budget.
+    Rough — doesn't account for FAT overhead, but the MIN_PART_MB +
+    SLACK_MB padding covers it."""
     total = 0
-    for path in bundle_dir.iterdir():
-        if path.is_file():
+    for path in bundle_dir.rglob("*"):
+        if path.is_file() and not path.is_symlink():
             total += path.stat().st_size
     return total
 
@@ -124,17 +130,21 @@ def mformat_partition(image_path: Path, part_offset_sectors: int) -> None:
 def mcopy_files(
     image_path: Path, part_offset_sectors: int, bundle_dir: Path,
 ) -> None:
-    """Copy every regular file from bundle_dir into the FAT32 root."""
+    """Copy every top-level entry (files AND subdirectories) from
+    bundle_dir into the FAT32 root. Pi 4 boot layouts can include an
+    overlays/ subdirectory with .dtbo files; -s makes mcopy descend
+    into it."""
     target = f"{image_path}@@{part_offset_sectors * SECTOR}"
-    files = sorted(
-        str(p) for p in bundle_dir.iterdir() if p.is_file()
+    entries = sorted(
+        str(p) for p in bundle_dir.iterdir()
+        if p.is_file() or p.is_dir()
     )
-    if not files:
+    if not entries:
         die(f"bundle dir {bundle_dir} is empty")
-    # mcopy -s is recursive; -i selects the image. Pass each file as
-    # a separate arg followed by the FAT destination ::.
+    # -s descends into directory arguments; -i selects the image;
+    # :: is the FAT filesystem root.
     subprocess.run(
-        ["mcopy", "-i", target, *files, "::"],
+        ["mcopy", "-i", target, "-s", *entries, "::"],
         check=True,
     )
 
