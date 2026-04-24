@@ -50,8 +50,17 @@ test_http:
     bl      test_http_date_2026
     bl      test_http_leap_2000
     bl      test_http_noleap_2100
+.ifndef HTTP_OUTPUT_FSA
+    /* Direct legacy-send-path tests. Under the output FSA build these
+     * would need an FSA-equivalent setup (posting E_RESP_READY after
+     * priming HCONN fields, then draining the engine). The FSA build
+     * has its own send-path suite in commit 5 / test_http_output_fsa.S
+     * that exercises the same externally observable behavior via the
+     * engine, so these are simply skipped when the legacy path is
+     * disabled. Cutover deletes both the .ifndef and these tests. */
     bl      test_http_send_chunk
     bl      test_http_send_close
+.endif
     bl      test_http_reset_during_send
     bl      test_http_resp_isolation
     bl      test_http_route_handler_dispatch

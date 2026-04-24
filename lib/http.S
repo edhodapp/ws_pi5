@@ -9,6 +9,9 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "http.inc"
+.ifdef HTTP_OUTPUT_FSA
+.include "vmio.inc"
+.endif
 
 .global http_init
 .global http_appliance_init
@@ -43,6 +46,9 @@ http_init:
     subs    w1, w1, #1
     b.ne    .Lhi_zero
     bl      http_appliance_init
+.ifdef HTTP_OUTPUT_FSA
+    bl      http_fsa_init
+.endif
     ldp     x29, x30, [sp], #16
     ret
 
@@ -197,7 +203,17 @@ http_poll:
 
     /* SENDING → send next chunk */
     cmp     w0, #HTTPS_SENDING
+.ifdef HTTP_OUTPUT_FSA
+    /* Under the output FSA the send path is driven out-of-band by
+     * http_fsa_step (invoked from the drain loop at the end of
+     * http_poll). HCONN_STATE is kept at HTTPS_SENDING as a "FSA busy"
+     * marker that blocks the input-side dispatch from starting a new
+     * parse on the same HCONN until h_keepalive resets it. So here we
+     * just skip to the next HCONN. */
+    b.eq    .Lhp_next
+.else
     b.eq    .Lhp_send_chunk
+.endif
 
     /* RECV_BODY → resume body accumulation */
     cmp     w0, #HTTPS_RECV_BODY
@@ -689,6 +705,17 @@ http_poll:
     mov     x0, x19
     bl      tcp_rx_consume
 
+.ifdef HTTP_OUTPUT_FSA
+    /* Output FSA: hand the response off to the engine. Compute way
+     * from the HCONN pointer, post E_RESP_READY. HCONN_STATE stays at
+     * HTTPS_SENDING so the input-side dispatch skips this HCONN until
+     * h_keepalive flips it back to RECV_HDR. */
+    ldr     x0, =http_conn_table
+    sub     x0, x20, x0
+    lsr     x0, x0, #HCONN_SHIFT
+    mov     w1, #E_RESP_READY
+    bl      http_fsa_post
+.endif
     b       .Lhp_next
 
 /* (parse_incomplete removed — now branches directly to .Lhp_next) */
@@ -828,6 +855,19 @@ http_poll:
     b       .Lhp_loop
 
 .Lhp_done:
+.ifdef HTTP_OUTPUT_FSA
+    /* Output FSA drain: pump the engine until idle before returning.
+     * http_fsa_poll_tcp_events posts the TCP-driven transitions
+     * (WIN_OPEN / ALL_DRAINED / TCP_CLOSED); http_fsa_step then
+     * dispatches whatever's queued. Loop until STEP_IDLE so a single
+     * http_poll call drains the whole work cycle for all ways — same
+     * invariant the legacy per-HCONN loop maintained. */
+    bl      http_fsa_poll_tcp_events
+.Lhp_fsa_drain:
+    bl      http_fsa_step
+    cmp     w0, #STEP_IDLE
+    b.ne    .Lhp_fsa_drain
+.endif
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]

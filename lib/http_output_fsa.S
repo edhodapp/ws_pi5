@@ -334,28 +334,367 @@ http_fsa_step:
     ret
 
 /* ========================================================================
- * Handler stubs. Each increments its dispatch counter and returns.
- * Real logic lands in commit 3 (happy path) + later (error/close paths).
- * All handlers share the same signature:
- *   x0 = event_ptr, x1 = engine_ptr, x2 = ctx_ptr
+ * Handlers. Each bumps its dispatch counter (for telemetry / tests),
+ * then runs the real body. All share the signature:
+ *   x0 = event_ptr (on stack; read EVT_WAY @+2, EVT_CODE @+4)
+ *   x1 = engine_ptr
+ *   x2 = ctx_ptr (= &http_fsa_ctx)
+ *
+ * Common preamble: derive way and the per-way HCONN / TCONN / send_ctx
+ * pointers. The way-derivation pattern is duplicated inline rather than
+ * macro-ized — each handler needs slightly different scratch usage and
+ * macro bodies would obscure the actual flow.
  * ======================================================================== */
 
-.macro FSA_STUB name, counter
-\name:
+.macro FSA_BUMP_COUNTER counter
     ldr     x3, =\counter
     ldr     w4, [x3]
     add     w4, w4, #1
     str     w4, [x3]
-    ret
 .endm
 
-FSA_STUB h_install,   http_fsa_count_install
-FSA_STUB h_send,      http_fsa_count_send
-FSA_STUB h_noop,      http_fsa_count_noop
-FSA_STUB h_decide,    http_fsa_count_decide
-FSA_STUB h_reset,     http_fsa_count_reset
-FSA_STUB h_close,     http_fsa_count_close
-FSA_STUB h_keepalive, http_fsa_count_keepalive
+/* -----------------------------------------------------------------------
+ * h_install — O_IDLE → O_SETUP. Input-side code has already populated
+ * HCONN_RESP_LEN / HDR_LEN / RESP_PTR=0 / HDR_SRC_PTR / BODY_PTR before
+ * posting E_RESP_READY. This handler just kicks the send state by
+ * posting E_WIN_OPEN so h_send runs next (gated/deduped against the
+ * polling source). Tail-call to http_fsa_post.
+ * ----------------------------------------------------------------------- */
+h_install:
+    stp     x29, x30, [sp, #-16]!
+    FSA_BUMP_COUNTER http_fsa_count_install
+    ldrh    w3, [x0, #EVT_WAY]
+    mov     w0, w3
+    mov     w1, #E_WIN_OPEN
+    bl      http_fsa_post
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_send — emit one chunk of the response. Mirrors .Lhp_send_chunk in
+ * lib/http.S, but driven by the FSA's way/event instead of poll-loop
+ * iteration. Posts E_CHUNK_SENT if bytes remain, E_ALL_QUEUED when the
+ * last byte is handed to tcp_send, E_TCP_CLOSED if the conn left
+ * ESTABLISHED. Silent return if the send window is closed (polling
+ * will repost E_WIN_OPEN when the window reopens).
+ * ----------------------------------------------------------------------- */
+h_send:
+    stp     x29, x30, [sp, #-64]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+    FSA_BUMP_COUNTER http_fsa_count_send
+
+    ldrh    w19, [x0, #EVT_WAY]                   /* w19 = way */
+    ldr     x20, [x2, #FSA_CTX_HCONN_TABLE]
+    /* offset = way << HCONN_SHIFT. aarch64 `add, uxtw` only allows
+     * shift 0..4, and HCONN_SHIFT is 6; materialize via lsl. */
+    lsl     w9, w19, #HCONN_SHIFT
+    add     x20, x20, x9                          /* x20 = hconn */
+    ldr     x21, [x2, #FSA_CTX_TCP_TABLE]
+    lsl     w9, w19, #TCONN_SHIFT
+    add     x21, x21, x9                          /* x21 = tcp_conn */
+    ldr     x22, [x2, #FSA_CTX_SEND_CTX]          /* x22 = send_ctx */
+
+    /* TCP ESTABLISHED? */
+    ldrb    w3, [x21, #TCONN_STATE]
+    cmp     w3, #TCPS_ESTABLISHED
+    b.ne    .Lhs_tcp_closed
+
+    /* Remaining = RESP_LEN - RESP_PTR. 0 means response drained
+     * already — shouldn't happen in normal flow but is harmless. */
+    ldr     w3, [x20, #HCONN_RESP_PTR]
+    ldr     w4, [x20, #HCONN_RESP_LEN]
+    subs    w5, w4, w3                            /* remaining */
+    b.eq    .Lhs_all_queued
+
+    /* tcp_send_ready — 0 means window closed, wait for next tick. */
+    mov     x0, x21
+    bl      tcp_send_ready
+    cbz     w0, .Lhs_ret
+
+    /* chunk = min(ready, remaining) */
+    cmp     w0, w5
+    csel    w5, w0, w5, lo
+    /* w5 = chunk_size (stays intact; callee-saved region) */
+    mov     w23, w5                               /* w23 = chunk_size */
+
+    /* Pick source region: hdr vs body. Truncate chunk at hdr boundary
+     * if we're still in the header region. */
+    ldr     w3, [x20, #HCONN_RESP_PTR]
+    ldr     w6, [x20, #HCONN_HDR_LEN]
+    cmp     w3, w6
+    b.hs    .Lhs_from_body
+
+    /* From header */
+    sub     w7, w6, w3                            /* hdr_remaining */
+    cmp     w23, w7
+    csel    w23, w23, w7, lo
+    mov     w5, w23
+    ldr     x2, [x20, #HCONN_HDR_SRC_PTR]
+    add     x2, x2, x3
+    b       .Lhs_do_send
+
+.Lhs_from_body:
+    ldr     x2, [x20, #HCONN_BODY_PTR]
+    sub     w7, w3, w6                            /* body offset */
+    add     x2, x2, x7
+
+.Lhs_do_send:
+    /* tcp_send(conn, tx_buf, src, chunk_size) → w0 = frame_len (0 = fail) */
+    mov     x0, x21
+    ldr     x1, [x22, #HSCTX_TX_BUF]
+    mov     w3, w23
+    bl      tcp_send
+    cbz     w0, .Lhs_ret                          /* send failed */
+    mov     w24, w0                               /* w24 = frame_len */
+
+    /* Transmit: send_fn(dwc2_base, ecm_state, tx_buf, frame_len). */
+    ldr     x10, [x22, #HSCTX_SEND_FN]
+    ldr     x0, [x22, #HSCTX_DWC2_BASE]
+    ldr     x1, [x22, #HSCTX_ECM_STATE]
+    ldr     x2, [x22, #HSCTX_TX_BUF]
+    mov     w3, w24
+    blr     x10
+
+    /* Advance RESP_PTR by chunk_size (not frame_len — frame_len
+     * includes TCP/IP/Eth headers). */
+    ldr     w0, [x20, #HCONN_RESP_PTR]
+    add     w0, w0, w23
+    str     w0, [x20, #HCONN_RESP_PTR]
+
+    /* Post follow-up: E_ALL_QUEUED if done, else E_CHUNK_SENT to loop. */
+    ldr     w0, [x20, #HCONN_RESP_PTR]
+    ldr     w1, [x20, #HCONN_RESP_LEN]
+    cmp     w0, w1
+    b.lo    .Lhs_more
+    /* fall through */
+
+.Lhs_all_queued:
+    mov     w0, w19
+    mov     w1, #E_ALL_QUEUED
+    bl      http_fsa_post
+    b       .Lhs_ret
+
+.Lhs_more:
+    mov     w0, w19
+    mov     w1, #E_CHUNK_SENT
+    bl      http_fsa_post
+    b       .Lhs_ret
+
+.Lhs_tcp_closed:
+    mov     w0, w19
+    mov     w1, #E_TCP_CLOSED
+    bl      http_fsa_post
+
+.Lhs_ret:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_noop — state transition only (O_TX → O_DRAINING on E_ALL_QUEUED).
+ * Engine already updated state; nothing for the handler to do beyond
+ * the telemetry bump.
+ * ----------------------------------------------------------------------- */
+h_noop:
+    FSA_BUMP_COUNTER http_fsa_count_noop
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_decide — DRAINING + ALL_DRAINED. Read HFLAG_CLOSE / HFLAG_HTTP11
+ * and post E_DO_CLOSE (HTTP/1.0 or explicit close) or E_DO_KEEPALIVE.
+ * ----------------------------------------------------------------------- */
+h_decide:
+    stp     x29, x30, [sp, #-16]!
+    FSA_BUMP_COUNTER http_fsa_count_decide
+    ldrh    w3, [x0, #EVT_WAY]
+    ldr     x4, [x2, #FSA_CTX_HCONN_TABLE]
+    lsl     w9, w3, #HCONN_SHIFT
+    add     x4, x4, x9
+    ldrb    w5, [x4, #HCONN_FLAGS]
+    tst     w5, #HFLAG_CLOSE
+    b.ne    .Lhd_close
+    tst     w5, #HFLAG_HTTP11
+    b.eq    .Lhd_close                             /* HTTP/1.0 → close */
+    mov     w0, w3
+    mov     w1, #E_DO_KEEPALIVE
+    bl      http_fsa_post
+    b       .Lhd_ret
+.Lhd_close:
+    mov     w0, w3
+    mov     w1, #E_DO_CLOSE
+    bl      http_fsa_post
+.Lhd_ret:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_reset — TCP_CLOSED mid-flight. Wipe HCONN send-side state without
+ * sending FIN (TCP already left ESTABLISHED). Mirrors .Lhp_reset_hconn
+ * in the legacy path.
+ * ----------------------------------------------------------------------- */
+h_reset:
+    FSA_BUMP_COUNTER http_fsa_count_reset
+    ldrh    w3, [x0, #EVT_WAY]
+    ldr     x4, [x2, #FSA_CTX_HCONN_TABLE]
+    lsl     w9, w3, #HCONN_SHIFT
+    add     x4, x4, x9
+    strb    wzr, [x4, #HCONN_STATE]
+    strb    wzr, [x4, #HCONN_FLAGS]
+    str     wzr, [x4, #HCONN_CONTENT_LEN]
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_close — DRAINING + DO_CLOSE. Issue tcp_close (builds FIN), send it,
+ * clear HCONN. Mirrors .Lhp_do_close + .Lhp_reset_hconn.
+ * ----------------------------------------------------------------------- */
+h_close:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    FSA_BUMP_COUNTER http_fsa_count_close
+
+    ldrh    w19, [x0, #EVT_WAY]
+    ldr     x20, [x2, #FSA_CTX_HCONN_TABLE]
+    lsl     w9, w19, #HCONN_SHIFT
+    add     x20, x20, x9
+    ldr     x21, [x2, #FSA_CTX_TCP_TABLE]
+    lsl     w9, w19, #TCONN_SHIFT
+    add     x21, x21, x9
+    ldr     x22, [x2, #FSA_CTX_SEND_CTX]
+
+    mov     x0, x21
+    ldr     x1, [x22, #HSCTX_TX_BUF]
+    bl      tcp_close
+    cbz     w0, .Lhc_reset                         /* couldn't build FIN */
+
+    /* Send FIN */
+    mov     w3, w0
+    ldr     x10, [x22, #HSCTX_SEND_FN]
+    ldr     x0, [x22, #HSCTX_DWC2_BASE]
+    ldr     x1, [x22, #HSCTX_ECM_STATE]
+    ldr     x2, [x22, #HSCTX_TX_BUF]
+    blr     x10
+
+.Lhc_reset:
+    strb    wzr, [x20, #HCONN_STATE]
+    strb    wzr, [x20, #HCONN_FLAGS]
+    str     wzr, [x20, #HCONN_CONTENT_LEN]
+
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+/* -----------------------------------------------------------------------
+ * h_keepalive — DRAINING + DO_KEEPALIVE. Reset HCONN so the next
+ * pipelined request parses from scratch. Mirrors the keepalive branch
+ * in legacy .Lhp_close.
+ * ----------------------------------------------------------------------- */
+h_keepalive:
+    FSA_BUMP_COUNTER http_fsa_count_keepalive
+    ldrh    w3, [x0, #EVT_WAY]
+    ldr     x4, [x2, #FSA_CTX_HCONN_TABLE]
+    lsl     w9, w3, #HCONN_SHIFT
+    add     x4, x4, x9
+    mov     w5, #HTTPS_RECV_HDR
+    strb    w5, [x4, #HCONN_STATE]
+    strb    wzr, [x4, #HCONN_PARSE_STATE]
+    strh    wzr, [x4, #HCONN_PARSE_OFF]
+    strb    wzr, [x4, #HCONN_HOST_FOUND]
+    strb    wzr, [x4, #HCONN_CLOSE_FOUND]
+    strb    wzr, [x4, #HCONN_VER_MINOR]
+    strb    wzr, [x4, #HCONN_FLAGS]
+    str     wzr, [x4, #HCONN_CONTENT_LEN]
+    ret
+
+/* ========================================================================
+ * http_fsa_poll_tcp_events — scan all ways, post transition events
+ * based on observed tcp state. Option (a) sourcing: the FSA polls tcp
+ * once per http_poll tick. Gating in http_fsa_post dedupes redundant
+ * posts so this loop is cheap: one pass, ~128 conns, most in O_IDLE.
+ *
+ * Per way (skipping O_IDLE):
+ *   tcp_state != ESTABLISHED     → E_TCP_CLOSED
+ *   ostate in {SETUP, TX} + tcp_send_ready > 0 → E_WIN_OPEN
+ *   ostate == DRAINING + SND_UNA == SND_NXT     → E_ALL_DRAINED
+ *
+ * Clobbers: x0-x9, x19-x22, x30.
+ * ======================================================================== */
+.global http_fsa_poll_tcp_events
+http_fsa_poll_tcp_events:
+    stp     x29, x30, [sp, #-48]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    ldr     x19, =http_fsa_ostate
+    ldr     x20, =tcp_conn_table
+    mov     w21, #0                                /* w21 = way */
+
+.Lhfpte_loop:
+    cmp     w21, #HTTP_MAX_CONNS
+    b.hs    .Lhfpte_done
+
+    ldrb    w0, [x19, w21, uxtw]                   /* ostate[way] */
+    cbz     w0, .Lhfpte_next                       /* O_IDLE */
+    mov     w22, w0                                /* w22 = ostate */
+
+    /* tcp_conn = tcp_conn_table + way << TCONN_SHIFT */
+    mov     x0, x20
+    lsl     w9, w21, #TCONN_SHIFT
+    add     x0, x0, x9
+    /* Save for reuse; bl clobbers x0. */
+    mov     x3, x0
+
+    ldrb    w4, [x3, #TCONN_STATE]
+    cmp     w4, #TCPS_ESTABLISHED
+    b.eq    .Lhfpte_estab
+
+    /* Left ESTABLISHED while FSA active → post E_TCP_CLOSED. */
+    mov     w0, w21
+    mov     w1, #E_TCP_CLOSED
+    bl      http_fsa_post
+    b       .Lhfpte_next
+
+.Lhfpte_estab:
+    cmp     w22, #O_DRAINING
+    b.eq    .Lhfpte_check_drained
+
+    /* SETUP or TX: check send window. */
+    mov     x0, x20
+    lsl     w9, w21, #TCONN_SHIFT
+    add     x0, x0, x9
+    bl      tcp_send_ready
+    cbz     w0, .Lhfpte_next
+    mov     w0, w21
+    mov     w1, #E_WIN_OPEN
+    bl      http_fsa_post
+    b       .Lhfpte_next
+
+.Lhfpte_check_drained:
+    mov     x0, x20
+    lsl     w9, w21, #TCONN_SHIFT
+    add     x0, x0, x9
+    ldr     w4, [x0, #TCONN_SND_UNA]
+    ldr     w5, [x0, #TCONN_SND_NXT]
+    cmp     w4, w5
+    b.ne    .Lhfpte_next
+    mov     w0, w21
+    mov     w1, #E_ALL_DRAINED
+    bl      http_fsa_post
+
+.Lhfpte_next:
+    add     w21, w21, #1
+    b       .Lhfpte_loop
+
+.Lhfpte_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
 
 /* ========================================================================
  * Transition table — 32 entries (4 states × 8 events) × 16 B = 512 B.

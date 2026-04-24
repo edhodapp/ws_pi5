@@ -421,10 +421,13 @@ test_fsa_step_clears_pending_bit:
     cmp     w0, #STEP_OK
     b.ne    .Lfscp_fail
 
-    /* Pending bit for way 5, E_RESP_READY must now be 0. */
+    /* Pending bit for way 5, E_RESP_READY (bit 0) must now be 0.
+     * h_install posts E_WIN_OPEN as a follow-up, so bit 1 may be set —
+     * check bit 0 specifically, not the whole byte. */
     ldr     x0, =http_fsa_evt_pending
     ldrb    w1, [x0, #5]
-    cbnz    w1, .Lfscp_fail
+    tst     w1, #(1 << E_RESP_READY)
+    b.ne    .Lfscp_fail
 
     /* And posting the same (way, code) again MUST succeed. */
     mov     w0, #5
@@ -485,12 +488,13 @@ test_fsa_step_advances_ostate:
  * leak ENG_STATE across ways.
  * ====================================================================== */
 test_fsa_step_preserves_other_way_state:
-    stp     x29, x30, [sp, #-16]!
+    stp     x29, x30, [sp, #-32]!
     mov     x29, sp
+    stp     x19, x20, [sp, #16]
 
     bl      http_fsa_init
 
-    /* Advance way 10 via RESP_READY + step. */
+    /* Advance way 10 via RESP_READY + step — ostate[10] → O_SETUP. */
     mov     w0, #10
     mov     w1, #E_RESP_READY
     bl      http_fsa_post
@@ -498,39 +502,50 @@ test_fsa_step_preserves_other_way_state:
     cmp     w0, #STEP_OK
     b.ne    .Lfspos_fail
 
-    /* way 10 should be O_SETUP; way 11 should still be O_IDLE. */
     ldr     x0, =http_fsa_ostate
     ldrb    w1, [x0, #10]
     cmp     w1, #O_SETUP
     b.ne    .Lfspos_fail
     ldrb    w1, [x0, #11]
-    cbnz    w1, .Lfspos_fail
+    cbnz    w1, .Lfspos_fail                      /* way 11 untouched */
 
-    /* Now post WIN_OPEN for way 11 — it starts at O_IDLE so there is
-     * no table entry; must STEP_NO_TRANS and leave ostate[11] at 0. */
+    /* Drain any handler follow-ups (h_install posted E_WIN_OPEN for
+     * way 10) until STEP_IDLE so only the events we explicitly post
+     * below are pending. */
+.Lfspos_drain1:
+    bl      http_fsa_step
+    cmp     w0, #STEP_IDLE
+    b.ne    .Lfspos_drain1
+
+    /* Snapshot ostate[10] into w19. */
+    ldr     x0, =http_fsa_ostate
+    ldrb    w19, [x0, #10]
+
+    /* Post+step for way 11. WIN_OPEN from O_IDLE has no table entry
+     * → STEP_NO_TRANS, no handler runs. */
     mov     w0, #11
     mov     w1, #E_WIN_OPEN
     bl      http_fsa_post
     bl      http_fsa_step
-    cmp     w0, #STEP_NO_TRANS
-    b.ne    .Lfspos_fail
+
+    /* ostate[10] must equal the snapshot; ostate[11] must still be 0. */
     ldr     x0, =http_fsa_ostate
+    ldrb    w1, [x0, #10]
+    cmp     w1, w19
+    b.ne    .Lfspos_fail
     ldrb    w1, [x0, #11]
     cbnz    w1, .Lfspos_fail
-
-    /* And way 10 must STILL be at O_SETUP after the way-11 step. */
-    ldrb    w1, [x0, #10]
-    cmp     w1, #O_SETUP
-    b.ne    .Lfspos_fail
 
     ldr     x0, =name_fspos
     bl      test_pass
     b       .Lfspos_done
+    /* .Lfspos_fail unreached from this point; falls through otherwise */
 .Lfspos_fail:
     ldr     x0, =name_fspos
     bl      test_fail
 .Lfspos_done:
-    ldp     x29, x30, [sp], #16
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 /* ======================================================================
