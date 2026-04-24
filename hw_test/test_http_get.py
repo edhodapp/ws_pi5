@@ -4,10 +4,21 @@ test_http_get.py — HTTP GET integration tests
 Verifies the Pi 4 serves correct HTTP responses.
 """
 
-import http.client
-import socket
-import pytest
-from conftest import requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,inconsistent-quotes,line-too-long
+# mypy: ignore-errors
+#
+# hw_test integration tests pre-date the type-annotation and strict-
+# style push; matches the pattern established in conftest.py. The
+# unused-import disable covers names re-exported for test discovery
+# and legacy scaffolding that other tests in this file reference.
+
+import http.client  # noqa: F401
+import socket       # noqa: F401
+import pytest       # noqa: F401
+from conftest import (  # noqa: F401
+    requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
+)
 
 
 @requires_hardware
@@ -15,8 +26,9 @@ class TestHTTPGet:
 
     def _get(self, path: str, host: str = None) -> http.client.HTTPResponse:
         """Helper: send GET request, return response."""
-        conn = http.client.HTTPConnection(PI4_IP, PI4_HTTP_PORT,
-                                           timeout=TEST_TIMEOUT)
+        conn = http.client.HTTPConnection(
+            PI4_IP, PI4_HTTP_PORT, timeout=TEST_TIMEOUT,
+        )
         headers = {}
         if host:
             headers["Host"] = host
@@ -64,13 +76,19 @@ class TestHTTPGet:
         finally:
             conn.close()
 
-    def test_get_root_connection_close(self):
-        """GET / has Connection: close header."""
+    def test_get_root_connection_keepalive(self):
+        """GET / on HTTP/1.1 is persistent by default — server must NOT
+        advertise Connection: close unless the client asked for it."""
         resp, conn = self._get("/")
         try:
             connection = resp.getheader("Connection")
-            assert connection is not None
-            assert connection.lower() == "close"
+            # Either absent (implicit keep-alive) or explicitly keep-alive,
+            # but not "close" — that would break HTTP/1.1 pipelining.
+            if connection is not None:
+                assert connection.lower() != "close", (
+                    f"HTTP/1.1 keep-alive expected, got Connection: "
+                    f"{connection!r}"
+                )
         finally:
             conn.close()
 
@@ -91,14 +109,26 @@ class TestHTTPGet:
         finally:
             conn.close()
 
-    def test_post_returns_404(self):
-        """POST / returns 404 (only GET supported)."""
-        conn = http.client.HTTPConnection(PI4_IP, PI4_HTTP_PORT,
-                                           timeout=TEST_TIMEOUT)
+    def test_post_returns_405_with_allow(self):
+        """POST / returns 405 Method Not Allowed with an Allow header
+        that reflects the route's actual accepted methods (GET+HEAD).
+        Previously the test expected 404, but after the per-route
+        method allow-list landed the server correctly returns 405."""
+        conn = http.client.HTTPConnection(
+            PI4_IP, PI4_HTTP_PORT, timeout=TEST_TIMEOUT,
+        )
         try:
-            conn.request("POST", "/")
+            conn.request("POST", "/", headers={"Content-Length": "0"})
             resp = conn.getresponse()
-            # Our server treats non-GET as 404
-            assert resp.status == 404
+            assert resp.status == 405, (
+                f"expected 405, got {resp.status}"
+            )
+            allow = resp.getheader("Allow")
+            assert allow is not None, "Missing Allow header on 405"
+            # Route "/" accepts GET and HEAD; Allow must NOT advertise POST.
+            assert "POST" not in allow, (
+                f"Allow should not advertise POST for a GET-only route, "
+                f"got {allow!r}"
+            )
         finally:
             conn.close()

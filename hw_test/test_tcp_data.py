@@ -5,10 +5,20 @@ Verifies data delivery, window management, and connection lifecycle
 on real hardware.
 """
 
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long
+# mypy: ignore-errors
+#
+# hw_test integration tests pre-date the type-annotation and strict-
+# style push; matches the pattern established in conftest.py.
+
 import socket
 import time
-import pytest
-from conftest import requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT
+import pytest  # noqa: F401
+from conftest import (  # noqa: F401
+    requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
+)
 
 
 @requires_hardware
@@ -39,15 +49,19 @@ class TestTCPData:
         finally:
             s.close()
 
-    def test_server_closes_after_response(self, pi4_addr):
-        """Server closes connection after sending response (Connection: close)."""
+    def test_server_closes_when_client_asks(self, pi4_addr):
+        """Server closes the connection only when the client requests
+        it via `Connection: close`. HTTP/1.1 is persistent by default,
+        so a bare GET must NOT trigger a close. Previously this test
+        expected close-by-default; corrected to match RFC 7230."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TEST_TIMEOUT)
         try:
             s.connect(pi4_addr)
-            s.sendall(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            s.sendall(
+                b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+            )
 
-            # Read until EOF
             response = b""
             while True:
                 try:
@@ -56,7 +70,9 @@ class TestTCPData:
                         break
                     response += data
                 except socket.timeout:
-                    pytest.fail("Server did not close connection")
+                    pytest.fail(
+                        "Server did not close after Connection: close"
+                    )
 
             assert b"HTTP/1." in response, (
                 f"Expected HTTP response, got {response[:40]!r}"
@@ -65,7 +81,8 @@ class TestTCPData:
             s.close()
 
     def test_partial_request(self, pi4_addr):
-        """Send request in two parts with delay — server waits for full headers."""
+        """Send request in two parts with delay — server waits for
+        full headers before dispatching."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TEST_TIMEOUT * 2)
         try:
@@ -85,21 +102,28 @@ class TestTCPData:
             s.close()
 
     def test_large_header(self, pi4_addr):
-        """Request with many headers (tests rx buffer capacity)."""
+        """Request with many extra headers (tests rx buffer capacity).
+
+        Previously omitted a Host header, which makes the server
+        correctly reject HTTP/1.1 with 400 per RFC 7230 §5.4. Corrected
+        to include Host — the test's actual intent is to exercise the
+        parser across a large but well-formed request."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TEST_TIMEOUT)
         try:
             s.connect(pi4_addr)
 
-            # Build request with ~1 KB of headers
-            headers = "GET / HTTP/1.1\r\n"
+            headers = "GET / HTTP/1.1\r\nHost: test\r\n"
             for i in range(20):
                 headers += f"X-Test-{i}: {'A' * 40}\r\n"
             headers += "\r\n"
 
             s.sendall(headers.encode())
             data = s.recv(4096)
-            assert b"HTTP/1.1 200" in data
+            assert b"HTTP/1.1 200" in data, (
+                f"Expected 200 OK for large-but-valid request, got "
+                f"{data[:80]!r}"
+            )
         finally:
             s.close()
 
