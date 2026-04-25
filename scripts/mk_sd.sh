@@ -166,21 +166,24 @@ done
 cat > "$BUNDLE_DIR/config.txt" <<'EOF'
 # Pi 4 boot config for the ws_pi5 appliance.
 #
-# The kernel is linked to 0x200000 (linker_hw.ld). The firmware's
-# VC agent owns 0x80000, so we tell the firmware to load our kernel
-# image at 0x200000 instead of the default 0x80000 — otherwise the
-# VC agent gets stomped and UART dies during boot.
+# The kernel is linked at 0x80000 — the firmware's default load
+# address for AArch64 kernels (arm_64bit=1). Linux/PiOS, Circle, and
+# every other established bare-metal Pi project loads here, so we
+# don't need a kernel_address override. An earlier version of this
+# project linked at 0x200000 to dodge a "VC agent at 0x80000" claim
+# that turned out to be a misdiagnosis: the symptom (silent UART)
+# was the PL011/Bluetooth routing issue cured below by
+# dtoverlay=disable-bt.
 #
 # dtoverlay=disable-bt frees PL011 from the Bluetooth chip so it
 # routes to GPIO 14/15 (header pins 8/10). Our kernel writes debug
 # output through PL011 at 0xFE201000; without this overlay, the
 # firmware points PL011 at BT and GPIO 14/15 get the mini UART
 # instead — serial output disappears even on a successfully-booted
-# kernel. Same setting the known-good chainloader dev sdcard uses.
+# kernel.
 
 arm_64bit=1
 kernel=kernel8.img
-kernel_address=0x200000
 enable_uart=1
 dtoverlay=disable-bt
 EOF
