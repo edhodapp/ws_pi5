@@ -31,6 +31,8 @@ test_http:
     bl      test_http_parse_incomplete
     bl      test_http_parse_404
     bl      test_http_parse_bad_method
+    bl      test_http_first_byte_guard_tls
+    bl      test_http_first_byte_guard_garbage
     bl      test_http_parse_head
     bl      test_http_version_10
     bl      test_http_version_11
@@ -437,6 +439,144 @@ test_http_parse_bad_method:
     ldr     x0, =name_hpbm
     bl      test_fail
 .Ldone_hpbm:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_first_byte_guard_tls — TLS ClientHello (first byte 0x16)
+ * arriving on HTTP port must NOT enter the parser. The connection
+ * should be torn down and HCONN reset to IDLE without producing a
+ * 200 / 4xx / chunked response.
+ *
+ * Pins the defensive guard against accidental browser HTTPS upgrades
+ * (Chrome's default), port scanners, and arbitrary garbage. Without
+ * the guard, those bytes hit code paths that historically corrupted
+ * adjacent .data and crashed the kernel.
+ * ======================================================================== */
+test_http_first_byte_guard_tls:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+    /* tcp_close path needs RMAC + RIP + SND/RCV state to build a FIN
+     * frame; minimal valid values are enough to exercise the close. */
+    ldr     x0, =net_our_mac
+    ldr     w1, [x0]
+    str     w1, [x19, #TCONN_RMAC]
+    ldr     x0, =net_our_ip
+    ldr     w0, [x0]
+    str     w0, [x19, #TCONN_RIP]
+    mov     w0, #100
+    str     w0, [x19, #TCONN_SND_UNA]
+    str     w0, [x19, #TCONN_SND_NXT]
+    mov     w0, #1
+    str     w0, [x19, #TCONN_RCV_NXT]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Copy TLS ClientHello bytes into the rx buffer. */
+    ldr     x0, =tcp_rxbuf_pool
+    ldr     x1, =thttp_tls_client_hello
+    mov     w2, #thttp_tls_client_hello_len
+.Lhfgt_cp:
+    ldrb    w3, [x1], #1
+    strb    w3, [x0], #1
+    subs    w2, w2, #1
+    b.ne    .Lhfgt_cp
+    mov     w0, #thttp_tls_client_hello_len
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    /* Mock send for tcp_close's FIN. */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    /* The guard must close the conn and reset HCONN. HCONN_STATE
+     * back to IDLE (0). HCONN_STATUS untouched (no response built;
+     * stays at HSTATUS_200 init default of 0). */
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATE]
+    cbnz    w0, .Lfail_hfgt
+
+    ldr     x0, =name_hfgt
+    bl      test_pass
+    b       .Ldone_hfgt
+.Lfail_hfgt:
+    ldr     x0, =name_hfgt
+    bl      test_fail
+.Ldone_hfgt:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+/* ========================================================================
+ * test_http_first_byte_guard_garbage — same shape, arbitrary
+ * non-letter first byte (0x00) should also be rejected. Confirms the
+ * guard isn't TLS-specific — it's any first byte outside [A-Z].
+ * ======================================================================== */
+test_http_first_byte_guard_garbage:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+
+    bl      tcp_init
+    bl      http_init
+
+    ldr     x19, =tcp_conn_table
+    mov     w0, #TCPS_ESTABLISHED
+    strb    w0, [x19, #TCONN_STATE]
+    mov     w0, #0x5000
+    strh    w0, [x19, #TCONN_LPORT]
+    ldr     x0, =net_our_mac
+    ldr     w1, [x0]
+    str     w1, [x19, #TCONN_RMAC]
+    ldr     x0, =net_our_ip
+    ldr     w0, [x0]
+    str     w0, [x19, #TCONN_RIP]
+    mov     w0, #100
+    str     w0, [x19, #TCONN_SND_UNA]
+    str     w0, [x19, #TCONN_SND_NXT]
+    mov     w0, #1
+    str     w0, [x19, #TCONN_RCV_NXT]
+    mov     w0, #-1
+    str     w0, [x19, #TCONN_TIMER_SLOT]
+
+    /* Single 0x00 byte in rx — not a method letter. */
+    ldr     x0, =tcp_rxbuf_pool
+    strb    wzr, [x0]
+    mov     w0, #1
+    strh    w0, [x19, #TCONN_RXLEN]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =thttp_tx_buf
+    ldr     x3, =thttp_mock_send
+    bl      http_set_send_ctx
+
+    bl      http_poll
+
+    ldr     x0, =http_conn_table
+    ldrb    w0, [x0, #HCONN_STATE]
+    cbnz    w0, .Lfail_hfgg
+
+    ldr     x0, =name_hfgg
+    bl      test_pass
+    b       .Ldone_hfgg
+.Lfail_hfgg:
+    ldr     x0, =name_hfgg
+    bl      test_fail
+.Ldone_hfgg:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
@@ -3322,6 +3462,15 @@ thttp_put_request:
 thttp_put_request_end:
 .equ thttp_put_request_len, thttp_put_request_end - thttp_put_request
 
+/* TLS ClientHello prefix (Content Type 0x16, version TLS 1.0/1.2,
+ * length, ClientHello). What Chrome sends when it tries
+ * https://10.0.0.2/ — first byte 0x16 must NOT reach our parser. */
+thttp_tls_client_hello:
+    .byte   0x16, 0x03, 0x01, 0x00, 0xA0, 0x01, 0x00, 0x00
+    .byte   0x9C, 0x03, 0x03, 0xDE, 0xAD, 0xBE, 0xEF, 0x00
+thttp_tls_client_hello_end:
+.equ thttp_tls_client_hello_len, thttp_tls_client_hello_end - thttp_tls_client_hello
+
 thttp_post_cl42_request:
     .ascii  "POST / HTTP/1.1\r\nHost: 10.0.2.15\r\nContent-Length: 42\r\n\r\n"
 thttp_post_cl42_request_end:
@@ -3499,6 +3648,8 @@ name_hpg:   .asciz "http_parse_get"
 name_hpi:   .asciz "http_parse_incomplete"
 name_hp4:   .asciz "http_parse_404"
 name_hpbm:  .asciz "http_parse_bad_method"
+name_hfgt:  .asciz "http_first_byte_guard_tls"
+name_hfgg:  .asciz "http_first_byte_guard_garbage"
 name_hph:   .asciz "http_parse_head"
 name_hv10:  .asciz "http_version_10"
 name_hv11:  .asciz "http_version_11"

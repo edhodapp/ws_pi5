@@ -254,6 +254,30 @@ http_poll:
     mov     x22, x0                     /* x22 = buf ptr */
     mov     w23, w1                     /* w23 = data len */
 
+    /* First-byte guard. On the very first dispatch of a new request
+     * (HCONN_PARSE_OFF == 0, parser hasn't consumed anything yet),
+     * the first byte MUST be an uppercase ASCII letter — every
+     * standard HTTP method starts with one. TLS ClientHello (0x16),
+     * port-scan probes, and arbitrary garbage fail this check and
+     * get torn down at the TCP layer before any parser state machine
+     * sees them. Defense in depth against malformed-input crashes.
+     *
+     * RFC 9110 §9.1.1 defines `method = token` and §5.6.2 defines
+     * `token` to include ALPHA (RFC 5234), which covers a-z as well
+     * as A-Z — so lowercase method names like `get` are technically
+     * syntactically valid. In practice every major client (curl,
+     * wget, every browser, language stdlibs) normalizes methods to
+     * uppercase, so the strict A-Z guard does not block real
+     * traffic. Anyone running `curl -X get` against this server
+     * deliberately is on their own. */
+    ldrh    w0, [x20, #HCONN_PARSE_OFF]
+    cbnz    w0, .Lhp_first_byte_ok
+    ldrb    w0, [x22]
+    sub     w0, w0, #'A'
+    cmp     w0, #('Z' - 'A')
+    b.hi    .Lhp_slowloris_close
+.Lhp_first_byte_ok:
+
     /* Run the FSA parser (state persists in HCONN across calls) */
     mov     x0, x20                     /* HCONN */
     mov     x1, x22                     /* buf */
