@@ -156,7 +156,7 @@ A bare-metal web server written entirely in AArch64 assembly through human-AI co
 
 The project targets the Raspberry Pi 4 (BCM2711). The protocol stack in `lib/` is platform-independent; only boot sequences and hardware drivers are Pi-specific.
 
-**Current stage:** Complete HTTP/1.1 web server appliance running on real Pi 4 hardware. Measured throughput on 2026-04-24: 25,050 req/s at 10 connections, 44,803 req/s at 50, 40,275 req/s at 100 (wrk, 10-second runs — raw output in `hw_test/perf_history.md`). Features: FSA-driven request parser; VMIO-driven response-side FSA (4 states × 8 events, per-way state, per-(way,event) gating — see `lib/http_output_fsa.S` and the spec in `tests/func/http_output_fsa.pict`); data-driven route table with dynamic `/status` and `/fsa_stats` endpoints over chunked transfer encoding; packager (`scripts/mk_appliance.py`) that bakes a user's static site directly into a bootable kernel image; RFC 5322 Date header from NTP time; Slowloris protection; exception vectors for fault diagnosis. The full network stack — from GENET Gigabit Ethernet through TCP (all 8 RFC compliance defects closed, dual Claude+Gemini audit) to HTTP — is written in AArch64 assembly with 480 unit tests on QEMU.
+**Current stage:** Complete HTTP/1.1 web server appliance running on real Pi 4 hardware. Measured throughput on 2026-04-24: 25,050 req/s at 10 connections, 44,803 req/s at 50, 40,275 req/s at 100 (wrk, 10-second runs — raw output in `hw_test/perf_history.md`). Features: FSA-driven request parser; VMIO-driven response-side FSA (4 states × 8 events, per-way state, per-(way,event) gating — see `lib/http_output_fsa.S` and the spec in `tests/func/http_output_fsa.pict`); data-driven route table with dynamic `/status` and `/fsa_stats` endpoints over chunked transfer encoding; packager (`scripts/mk_appliance.py`) that bakes a user's static site directly into a bootable kernel image; RFC 5322 Date header from NTP time; Slowloris protection; first-byte input guard (rejects TLS ClientHello and other non-HTTP traffic at the http_poll edge before any parser state is reached); exception vectors for fault diagnosis. The full network stack — from GENET Gigabit Ethernet through TCP (all 8 RFC compliance defects closed, dual Claude+Gemini audit) to HTTP — is written in AArch64 assembly with 482 unit tests on QEMU.
 
 ## The Experiment
 
@@ -165,7 +165,7 @@ This project started as two questions:
 1. Can humans and AI collaborate effectively on real systems programming in assembly?
 2. Do implementation-specific tests become net-positive when AI eliminates the maintenance cost?
 
-**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 480 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
+**The answer to both is yes.** The protocol stack — TCP with 128 connections, WSCALE, SACK, RFC 6298 RTO, multi-segment send, congestion control with fast recovery — was developed through human-AI collaboration. The suite has grown to 482 assembly unit tests + 141 Python unit tests + 153 functional tests + 56 live-hardware integration tests (plus 39 fuzz seeds), with zero fuzz crashes to date and every bug caught by tests rather than inspection. Implementation-specific tests proved invaluable as a ratchet against AI hallucination, and the maintenance cost (AI regenerates tests in seconds) was negligible compared to the bugs caught.
 
 Assembly is an interesting medium for AI collaboration because it resists the usual pattern of generating boilerplate. Every instruction matters — there's no framework to lean on, no abstraction layer to hide behind. The division of labor falls out naturally:
 
@@ -265,7 +265,7 @@ chainload/          UART chainloader for Pi 4 development
   chainload.ld        Linked at 0x4000000 (above kernel footprint)
 tests/              Unit and functional tests
   test_main.S         Test runner (boot, MMU, dispatch, pass/fail reporting)
-  test_*.S            Shared protocol stack tests (374 tests including hex_parse)
+  test_*.S            Shared protocol stack tests (~376 tests including hex_parse)
   pi/                 Pi-specific driver tests (38 tests)
     test_pi_all.S       Aggregates Pi tests via test_platform_drivers symbol
     test_gpio.S         GPIO function select tests (5 tests)
@@ -437,7 +437,7 @@ The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-indepe
 
 ### Unit Tests
 
-480 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through TCP (128 connections, WSCALE, SACK, timestamps/PAWS, congestion control with fast recovery) and HTTP/1.1 (FSA parser with 180-vector PICT coverage, chunked encoding, date formatting with Gregorian leap years, keep-alive, route matching). The VMIO output FSA adds its own 23 tests: post-gating dedup, init invariants, transition-table shape, per-way state plumbing, full send-path functional coverage, engine-counter telemetry, and the `/fsa_stats` generator. The 32-cell transition table has a standalone spec (`tests/func/http_output_fsa.pict` + `http_output_fsa_vectors.tsv`) that `make verify-fsa-table` diffs against the compiled kernel ELF so the spec cannot drift from the assembly. A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 TCP defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+482 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through TCP (128 connections, WSCALE, SACK, timestamps/PAWS, congestion control with fast recovery) and HTTP/1.1 (FSA parser with 180-vector PICT coverage, chunked encoding, date formatting with Gregorian leap years, keep-alive, route matching). The VMIO output FSA adds its own 23 tests: post-gating dedup, init invariants, transition-table shape, per-way state plumbing, full send-path functional coverage, engine-counter telemetry, and the `/fsa_stats` generator. The 32-cell transition table has a standalone spec (`tests/func/http_output_fsa.pict` + `http_output_fsa_vectors.tsv`) that `make verify-fsa-table` diffs against the compiled kernel ELF so the spec cannot drift from the assembly. A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 TCP defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
 
 141 Python unit tests run off-hardware: the Intel HEX library (34 tests, 100% mutation score under mutmut), the `hw_send.py` chainloader host tool (12 tests, covering ioctl DTR toggle and termios line-read deadline shaping), and the L2 hardening framework (95 tests covering `eth_frames`, `link`, and `wire` — the testable pieces of the `hw_test/` integration suite).
 
@@ -666,7 +666,7 @@ fcntl.ioctl(fd, TIOCMBIC, bits)   # DTR low → GLOBAL_EN HIGH → Pi boots
 | **ICMP** | Production ready | Echo reply, error generation, rate limiting |
 | **UDP** | Production ready | Checksum, echo service, NTP dispatch |
 | **TCP** | Production ready | 128 conns, WSCALE, SACK, RFC 6298 RTO, multi-segment send, 256 KB send buffer |
-| **HTTP** | Production ready | FSA parser, data-driven route table, VMIO-driven output FSA, keep-alive, chunked encoding, packager for static sites |
+| **HTTP** | Production ready | FSA parser, data-driven route table, VMIO-driven output FSA, keep-alive, chunked encoding, first-byte guard against non-HTTP traffic (TLS / scanners), packager for static sites |
 | **NTP** | Production ready | Timer-driven polling, LI/version/dispersion checks, monotonicity |
 | **VMIO/Timers** | Production ready | Bounds-checked FSA engine, timer pool |
 | **Chainloader** | Production ready | Intel HEX over UART0, 2-byte ACK/NAK, DTR reset, 27 KB in 12s |
