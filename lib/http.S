@@ -1531,6 +1531,21 @@ http_appliance_slab_end:
 .error "http_appliance_slab size drift — update APPLIANCE_SLAB_SIZE or the reservation"
 .endif
 
+/* Guard region after the slab. A v0.1.0 install-walkthrough crash
+ * traced to a yet-unidentified write that landed past the slab end
+ * and corrupted whatever .data symbol came next (specifically,
+ * http_send_ctx.tx_buf — which has now been moved to .bss to keep
+ * it well clear of this area too). The guard absorbs any overrun
+ * up to its size before adjacent .data sees the corruption. 4 KiB
+ * is an arbitrary "comfortable for unintended overflows" choice
+ * that costs almost nothing in image size. */
+.balign 16
+http_appliance_slab_guard:
+    .space  4096
+http_appliance_slab_guard_end:
+.global http_appliance_slab_guard
+.global http_appliance_slab_guard_end
+
 /* ===================================================================
  * BSS
  * =================================================================== */
@@ -1555,7 +1570,15 @@ http_dyn_chunk_bufs:
 http_body_recv_bufs:
     .space  HTTP_MAX_CONNS * HTTP_MAX_RECV_BODY
 
-.section .data
+/* http_send_ctx lives in .bss, NOT .data. It's runtime-initialized
+ * (http_set_send_ctx populates it from main.S during boot) so static
+ * .data placement was wasted anyway — and the v0.1.0 crash showed
+ * that placing a load-bearing pointer struct adjacent to the
+ * appliance slab in .data is dangerous when an unrelated bug writes
+ * past the slab end. .bss puts it on the far side of all the .data
+ * region, so a slab overrun would have to traverse the rest of
+ * .data plus the slab guard before reaching it. */
+.section .bss
 .balign 8
 http_send_ctx:
     .space  HSCTX_SIZE
