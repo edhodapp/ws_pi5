@@ -12,11 +12,13 @@
 # formatting or mounting. --image requires mtools on PATH.
 #
 # Contents (either mode, same files):
-#   config.txt            — kernel_address=0x200000 so the firmware
-#                           loads the kernel at the same address
-#                           linker_hw.ld targets. The firmware's VC
-#                           agent owns 0x80000 and must not be stomped
-#                           — otherwise UART dies mid-boot.
+#   config.txt            — kernel + dtoverlay=disable-bt. No
+#                           kernel_address= directive: linker_hw.ld
+#                           targets 0x80000 (the firmware default),
+#                           so the firmware lands the kernel exactly
+#                           where the linker expects it. (The earlier
+#                           "VC agent owns 0x80000" claim was a
+#                           misdiagnosis — see debug_log_0x80000.md.)
 #   start4.elf            — Pi 4 GPU firmware.
 #   fixup4.dat            — firmware fixups.
 #   bcm2711-rpi-4-b.dtb   — device tree for the 4-B.
@@ -163,24 +165,34 @@ for f in "${FW_FILES[@]}"; do
     cp "$FW_DIR/$f" "$BUNDLE_DIR/$f"
 done
 
+# overlays/disable-bt.dtbo is load-bearing: without it the firmware
+# silently keeps PL011 routed to the BT chip and our kernel's UART
+# debug output disappears (debug_log_0x80000.md attempt 38).
+mkdir -p "$BUNDLE_DIR/overlays"
+if [[ ! -f "$FW_DIR/overlays/disable-bt.dtbo" ]]; then
+    echo "mk_sd: overlays/disable-bt.dtbo missing in $FW_DIR/ — aborting" >&2
+    echo "       (re-run $FW_DIR/download_firmware.sh to fetch it)" >&2
+    exit 1
+fi
+cp "$FW_DIR/overlays/disable-bt.dtbo" "$BUNDLE_DIR/overlays/disable-bt.dtbo"
+
 cat > "$BUNDLE_DIR/config.txt" <<'EOF'
 # Pi 4 boot config for the ws_pi5 appliance.
 #
-# The kernel is linked to 0x200000 (linker_hw.ld). The firmware's
-# VC agent owns 0x80000, so we tell the firmware to load our kernel
-# image at 0x200000 instead of the default 0x80000 — otherwise the
-# VC agent gets stomped and UART dies during boot.
+# linker_hw.ld targets 0x80000 (the firmware default kernel load
+# address). No kernel_address= directive needed — the firmware lands
+# kernel8.img exactly where the linker expects it. End-user SD-direct
+# boot path verified at debug_log_0x80000.md attempt 40.
 #
 # dtoverlay=disable-bt frees PL011 from the Bluetooth chip so it
 # routes to GPIO 14/15 (header pins 8/10). Our kernel writes debug
-# output through PL011 at 0xFE201000; without this overlay, the
-# firmware points PL011 at BT and GPIO 14/15 get the mini UART
-# instead — serial output disappears even on a successfully-booted
-# kernel. Same setting the known-good chainloader dev sdcard uses.
+# output through PL011 at 0xFE201000; without this overlay (and the
+# matching .dtbo file in overlays/), the firmware silently points
+# PL011 at BT and serial output disappears even on a clean boot.
+# Lost a whole-day session 1 to this one — see attempt 38.
 
 arm_64bit=1
 kernel=kernel8.img
-kernel_address=0x200000
 enable_uart=1
 dtoverlay=disable-bt
 EOF

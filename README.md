@@ -401,11 +401,15 @@ scripts/mk_sd.sh appliance.img sd_boot/
 # Then: cp -r sd_boot/* /media/<user>/boot/
 ```
 
-`mk_sd.sh` writes a config.txt with `kernel_address=0x200000` so the Pi
-firmware lands the kernel at the address `linker_hw.ld` targets (the
-firmware's VC agent owns 0x80000 and must not be stomped). It
-auto-fetches the Pi 4 GPU firmware blobs via
-`hw_test/uart_test/sdcard/download_firmware.sh` on first use.
+`mk_sd.sh` writes a config.txt that boots cleanly on a stock Pi 4:
+`linker_hw.ld` targets 0x80000 (the firmware default kernel address),
+so no `kernel_address=` override is needed. It also bundles
+`overlays/disable-bt.dtbo` — without that overlay file present on the
+SD, the firmware silently keeps PL011 wired to the BT chip and the
+kernel's UART debug output disappears (an earlier session lost a full
+day to this; see `debug_log_0x80000.md`). It auto-fetches the Pi 4 GPU
+firmware blobs via `hw_test/uart_test/sdcard/download_firmware.sh` on
+first use.
 
 Clean build artifacts:
 
@@ -427,7 +431,7 @@ The chainloader protocol:
 2. Chainloader prints `READY\r\n` when initialized
 3. Host sends Intel HEX records with `\r\n` terminators
 4. Chainloader verifies each record's checksum, sends 2-byte ACK (line length + checksum) or NAK (line length + checksum XOR 0xFF)
-5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), jump to kernel at 0x200000
+5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), `memcpy` the staged image from 0x200000 down to 0x80000, then jump to 0x80000 — the same address SD-direct firmware boot uses, so one kernel binary serves both paths
 
 The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
 
