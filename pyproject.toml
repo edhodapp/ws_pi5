@@ -2,3 +2,20 @@
 paths_to_mutate = "scripts/intel_hex.py"
 tests_dir = "scripts/"
 runner = ".venv/bin/python -m pytest -x -q scripts/test_intel_hex.py"
+
+[tool.pytest.ini_options]
+# Markers also registered in hw_test/pytest.ini for test invocations
+# rooted at hw_test/. This duplicate is for pre-commit gates that run
+# pytest from the project root and otherwise emit
+# PytestUnknownMarkWarning per occurrence, which the gates treat as a
+# failure. See TESTING.md.
+markers = [
+    "l2: layer-2 (Ethernet/data-link) hardware integration test",
+    "l3: layer-3 (IPv4/ICMP/reassembly) hardware integration test",
+    "l4: layer-4 (TCP) hardware integration test",
+    "l5: layer-5 (HTTP/appliance) hardware integration test",
+    "perf: perf-instrumented test; requires PERF=<flavor> kernel build",
+    "dut_reset: requires a DTR-based DUT reset before the test runs",
+    "requires_hardware: needs HW_TEST=1 + Pi reachable",
+    "slow: takes multiple seconds of real wall-clock time",
+]

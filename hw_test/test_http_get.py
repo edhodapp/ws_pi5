@@ -14,9 +14,14 @@ Verifies the Pi 4 serves correct HTTP responses.
 # and legacy scaffolding that other tests in this file reference.
 
 import http.client
+
+import pytest
+
 from conftest import (  # noqa: F401
     requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
 )
+
+pytestmark = pytest.mark.l5
 
 
 @requires_hardware

@@ -22,9 +22,13 @@ packaged-appliance workflow and not a test bug.
 import http.client
 import socket
 
+import pytest
+
 from conftest import (  # noqa: F401
     requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
 )
+
+pytestmark = pytest.mark.l5
 
 
 def _req(method, path, body=None, headers=None):

@@ -1,3 +1,7 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long
+# mypy: ignore-errors
 """
 test_tcp_handshake.py — TCP 3-way handshake integration tests
 
@@ -6,10 +10,14 @@ including option negotiation (MSS, WSCALE, SACK-Permitted, Timestamps).
 """
 
 import socket
-import struct
+import struct  # noqa: F401
 import pytest
-from conftest import requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT
-from tcp_helpers import parse_tcp_header, SYN, SYN_ACK, ACK, RST
+from conftest import (  # noqa: F401
+    requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT,
+)
+from tcp_helpers import parse_tcp_header, SYN, SYN_ACK, ACK, RST  # noqa: F401
+
+pytestmark = pytest.mark.l4
 
 
 @requires_hardware

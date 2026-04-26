@@ -1,3 +1,6 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=subprocess-run-check
+# mypy: ignore-errors
 """
 test_ping.py — ICMP echo request/reply integration test
 
@@ -7,6 +10,8 @@ Verifies the Pi 4 responds to ping via the network stack.
 import subprocess
 import pytest
 from conftest import requires_hardware, PI4_IP
+
+pytestmark = pytest.mark.l3
 
 
 @requires_hardware

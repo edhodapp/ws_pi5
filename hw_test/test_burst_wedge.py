@@ -34,6 +34,7 @@ from icmp_helpers import (
     send_echo_and_wait,
 )
 
+pytestmark = pytest.mark.l4
 
 BURST_SIZES = [10, 50, 100, 200]
 

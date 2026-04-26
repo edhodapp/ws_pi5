@@ -1,5 +1,7 @@
-# mypy: disable-error-code="no-untyped-def"
-# pylint: disable=missing-class-docstring
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long
+# mypy: ignore-errors
 """
 test_tcp_concurrent.py — Concurrent TCP connection wedge test.
 
@@ -23,6 +25,8 @@ from conftest import (
     requires_hardware,
 )
 from icmp_helpers import send_echo_and_wait
+
+pytestmark = pytest.mark.l4
 
 
 def _http_get(addr: tuple[str, int], timeout: float = 3.0) -> bool:

@@ -1,3 +1,8 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long,unused-argument
+# mypy: ignore-errors
+# flake8: noqa: E501
 """
 test_l2_ring.py — GENET descriptor ring wraparound exercises.
 
@@ -66,6 +71,7 @@ LARGE_BURST_SETTLE_MS = 2000
 
 @requires_hardware
 @pytest.mark.l2
+@pytest.mark.perf
 class TestRingWraparound:
 
     @pytest.mark.parametrize("n", RING_BURST_SIZES)

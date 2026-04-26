@@ -1,3 +1,8 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long,broad-exception-caught,unsubscriptable-object
+# mypy: ignore-errors
+# flake8: noqa: E127,E128,F401
 """
 test_http_concurrent.py — Concurrent HTTP connection tests
 
@@ -5,11 +10,13 @@ Verifies the Pi 4 handles multiple simultaneous connections correctly.
 """
 
 import http.client
-import socket
+import socket  # noqa: F401
 import threading
 import time
 import pytest
 from conftest import requires_hardware, PI4_IP, PI4_HTTP_PORT, TEST_TIMEOUT
+
+pytestmark = pytest.mark.l5
 
 
 @requires_hardware

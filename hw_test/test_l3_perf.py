@@ -1,3 +1,8 @@
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-import,unused-variable,inconsistent-quotes
+# pylint: disable=line-too-long,redefined-outer-name
+# mypy: ignore-errors
+# flake8: noqa: E501,E221
 """
 test_l3_perf.py — L3 instrumentation assertions.
 
@@ -67,6 +72,8 @@ from icmp_helpers import (
     parse_reply,
     send_echo_and_wait,
 )
+
+pytestmark = pytest.mark.perf
 
 
 # Per-frame cost ceilings (ns). See module docstring for calibration.
