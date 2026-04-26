@@ -37,13 +37,13 @@
 # small SD card.
 #
 # End-to-end example (directory mode):
-#   make PLATFORM=pi4
+#   make PLATFORM=pi4 SHIP=1
 #   scripts/mk_appliance.py kernel8.img public/ appliance.img
 #   scripts/mk_sd.sh appliance.img sd_boot/
 #   cp -r sd_boot/* /media/<user>/boot/
 #
 # End-to-end example (image mode):
-#   make PLATFORM=pi4
+#   make PLATFORM=pi4 SHIP=1
 #   scripts/mk_appliance.py kernel8.img public/ appliance.img
 #   scripts/mk_sd.sh --image appliance.img pi4_sd.img
 #   # flash pi4_sd.img with any SD writer
@@ -99,7 +99,11 @@ if [[ "$MODE" == "build" ]]; then
     CONTENT_MAX=$(( (SITE_BYTES + SLACK + SLACK_1MB - 1) / SLACK_1MB * SLACK_1MB ))
 
     echo "mk_sd: site is $SITE_BYTES B; building kernel with CONTENT_MAX=$CONTENT_MAX B"
-    ( cd "$PROJECT_DIR" && make clean >/dev/null && make PLATFORM=pi4 CONTENT_MAX="$CONTENT_MAX" >/dev/null )
+    # SHIP=1 → kernel linked at 0x80000 to match firmware default
+    # (no kernel_address= override needed in config.txt). The chainloader
+    # path uses LINK_ADDR=0x200000 by default; SD-direct ship images
+    # always need 0x80000.
+    ( cd "$PROJECT_DIR" && make clean >/dev/null && make PLATFORM=pi4 SHIP=1 CONTENT_MAX="$CONTENT_MAX" >/dev/null )
 
     APPLIANCE_TMP=$(mktemp -u --suffix=.img)
     python3 "$PROJECT_DIR/scripts/mk_appliance.py" \

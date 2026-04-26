@@ -16,6 +16,19 @@ PLATFORM_ASFLAGS =
 ifeq ($(PLATFORM),pi4)
   PLATFORM_ASFLAGS = --defsym PLATFORM_PI4=1
   LINKER_SCRIPT = linker_hw.ld
+  # Kernel link address — controls where literal-pool absolute
+  # addresses resolve. Two regimes (see linker_hw.ld and
+  # debug_log_0x80000.md):
+  #   * Default 0x200000 — pairs with the UART chainloader (writes
+  #     records directly to 0x200000 and jumps). Inner-loop dev path.
+  #   * `make ... SHIP=1` → 0x80000 — pairs with SD-direct firmware
+  #     boot (mk_sd.sh's bundle). End-user ship path.
+  ifeq ($(SHIP),1)
+    LINK_ADDR ?= 0x80000
+  else
+    LINK_ADDR ?= 0x200000
+  endif
+  LDFLAGS_EXTRA = --defsym LINK_ADDR=$(LINK_ADDR)
 else
   LINKER_SCRIPT = linker.ld
 endif
@@ -83,7 +96,7 @@ ifneq ($(MAX_ROUTES),)
 endif
 
 ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(APPLIANCE_OVERRIDE_ASFLAGS)
-LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib
+LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib $(LDFLAGS_EXTRA)
 
 # Shorthand for platform include directories
 PI_INC = platform/pi/include

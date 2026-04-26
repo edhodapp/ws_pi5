@@ -2,14 +2,17 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* 0x80000 — Pi 4 firmware default kernel load address.
-     * Per attempt 38 in debug_log_0x80000.md: SD-direct boot to 0x80000
-     * works once `overlays/disable-bt.dtbo` is on the SD card. Downstream
-     * issue (GENET init silent hang) is a separate problem under active
-     * debug. Chainloader path expects bytes at 0x80000 too — chainloader
-     * stages at 0x200000 then memcpy's to 0x80000 before jump (see
-     * chainload/boot.S). */
-    . = 0x80000;
+    /* Link address controlled by Makefile via --defsym LINK_ADDR=...
+     *   - Default 0x200000: paired with the UART chainloader, which
+     *     writes HEX records directly there and jumps. Inner-loop dev
+     *     path; works on every Pi. (Direct chainloader writes to
+     *     0x80000 are corrupted by firmware DMA — see attempt 16 in
+     *     debug_log_0x80000.md; staging is overkill for a dev tool.)
+     *   - 0x80000 (`make ... SHIP=1`): firmware default kernel address,
+     *     used by the SD-direct ship path (scripts/mk_sd.sh). End
+     *     users plug in an SD card and the firmware lands the kernel
+     *     where linker_hw.ld targets. */
+    . = LINK_ADDR;
 
     .text : {
         *(.text._start)
