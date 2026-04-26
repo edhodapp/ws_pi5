@@ -2,16 +2,9 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* 0x80000: Pi 4 firmware's default load address for AArch64 kernels
-     * (arm_64bit=1). Linux/PiOS, Circle, and every other established
-     * bare-metal Pi project links here. The "VC firmware agent owns
-     * 0x80000" claim that drove an earlier 0x200000 layout was a
-     * misdiagnosis: the symptom (silent UART) was a PL011/Bluetooth
-     * routing issue cured by `dtoverlay=disable-bt` in config.txt,
-     * not a memory conflict. With the overlay applied, kernel-at-
-     * 0x80000 is the simplest, firmware-default-honored configuration
-     * — no kernel_address override needed in config.txt. */
-    . = 0x80000;
+    /* 0x200000 (2MB): firmware VC agent owns 0x80000, writing there kills UART.
+     * Used by: make PLATFORM=pi4 (chainloader loads kernel here). */
+    . = 0x200000;
 
     .text : {
         *(.text._start)
