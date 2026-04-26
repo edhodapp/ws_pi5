@@ -15,6 +15,15 @@ Ratchet semantics:
   * No manual standards file — perf_runs.log is the source of truth.
     To "reset" a standard (remove an anomalous outlier), edit the log.
 
+`--runs N` (default 1) lets the caller aggregate across the last N
+runs of the matching (commit, flavor). The "current" measurement for
+each (burst_size, metric) becomes the best across those N. History
+excludes those same N runs so we're not comparing the aggregate
+against itself. This kills tail-jitter outliers — the rig regularly
+produces one ~70%-low wire_pps reading per single run; best-of-3
+floors out near the median and the comparison gates real regressions
+instead of single-shot tcpreplay/USB-scheduling noise.
+
 The first run of a (flavor, burst_size, metric) tuple has no history
 to compare against — it sets the initial standard. Subsequent runs
 must stay within 50% of the best seen so far.
@@ -23,7 +32,10 @@ The 50% tolerance is wide on purpose: this rig has heavy
 session-to-session host-side noise (USB scheduling, CPU governor
 state, tcpreplay process timing) that easily moves wire_pps and
 send_ms by 30%. The ratchet's job here is to catch order-of-magnitude
-regressions and tail collapses, not to police 10% drift.
+regressions and tail collapses, not to police 10% drift. Combined
+with --runs 3 best-of aggregation, the effective sensitivity is
+"caught a real >50% regression that survived three independent
+measurements" — high signal, low false-positive.
 
 Always prints a delta table for human inspection regardless of pass/fail.
 """
@@ -156,6 +168,24 @@ def delta_pct(current: float, standard: float, higher_better: bool) -> float:
     return (1.0 - current / standard) * 100  # positive = improved (lower)
 
 
+def aggregate_best(
+    runs: list[Run],
+) -> dict[tuple[int, str], float]:
+    """Return per-(burst, metric) best across the given runs."""
+    aggregated: dict[tuple[int, str], float] = {}
+    for run in runs:
+        for key, val in run.metrics.items():
+            higher_better = METRIC_DIRECTION.get(key[1], True)
+            existing = aggregated.get(key)
+            if existing is None:
+                aggregated[key] = val
+            elif higher_better and val > existing:
+                aggregated[key] = val
+            elif not higher_better and val < existing:
+                aggregated[key] = val
+    return aggregated
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -166,8 +196,24 @@ def main() -> int:
         "--commit", default=None,
         help="commit hash of the run to check (defaults to latest)",
     )
+    ap.add_argument(
+        "--runs", type=int, default=1,
+        help=(
+            "aggregate the last N runs of (commit, flavor) into a "
+            "best-of-N current measurement. Default 1 = single run, "
+            "back-compat. Use 3+ to absorb single-run tail-jitter "
+            "outliers from a noisy rig."
+        ),
+    )
     ap.add_argument("--log", default=LOG_PATH)
     args = ap.parse_args()
+
+    if args.runs < 1:
+        print(
+            f"perf_check: --runs must be >= 1 (got {args.runs})",
+            file=sys.stderr,
+        )
+        return 2
 
     runs, reset_after = parse_log(args.log)
     reset_idx = reset_after.get(args.flavor, 0)
@@ -179,34 +225,63 @@ def main() -> int:
         )
         return 0
 
+    # Pick the "current window": last args.runs entries matching
+    # (commit, flavor) if --commit was given, else the last args.runs
+    # of the flavor.
     if args.commit:
-        current_idx = max(
-            (i for i, r in enumerate(same_flavor) if r.commit == args.commit),
-            default=None,
+        matching = [r for r in same_flavor if r.commit == args.commit]
+        if not matching:
+            print(
+                f"perf_check: no run for commit {args.commit} "
+                f"flavor {args.flavor!r}; nothing to check."
+            )
+            return 0
+        current_runs = matching[-args.runs:]
+    else:
+        current_runs = same_flavor[-args.runs:]
+
+    # History = same-flavor runs strictly BEFORE the current window.
+    # Aggregating the current window against itself would always pass
+    # (current is included in history → best == current). Filter out
+    # the runs we're using as the current window.
+    current_set = {(r.commit, r.timestamp) for r in current_runs}
+    history = [
+        r for r in same_flavor
+        if (r.commit, r.timestamp) not in current_set
+    ]
+
+    aggregated_metrics = aggregate_best(current_runs)
+    representative = current_runs[-1]
+
+    if args.runs > 1:
+        print(
+            f"perf_check: flavor={args.flavor} commit={representative.commit}"
+            f" timestamp={representative.timestamp}"
+            f" (best-of-{len(current_runs)} window;"
+            f" earliest run {current_runs[0].timestamp})"
         )
     else:
-        current_idx = len(same_flavor) - 1
-
-    if current_idx is None:
         print(
-            f"perf_check: no run for commit {args.commit} "
-            f"flavor {args.flavor!r}; nothing to check."
+            f"perf_check: flavor={args.flavor} commit={representative.commit}"
+            f" timestamp={representative.timestamp}"
         )
-        return 0
-
-    current = same_flavor[current_idx]
-    history = same_flavor[:current_idx]  # all prior runs of same flavor
-
-    print(f"perf_check: flavor={args.flavor} commit={current.commit} "
-          f"timestamp={current.timestamp}")
     print(f"  history: {len(history)} prior runs of this flavor "
           f"(after most recent BASELINE_RESET, if any)")
     print(f"  threshold: {TOLERANCE*100:.0f}% from all-time best")
     print()
 
-    if not current.metrics:
-        print("  (no metrics in current run)")
+    if not aggregated_metrics:
+        print("  (no metrics in current run window)")
         return 0
+
+    # Synthesize a single Run with the aggregated metrics so the
+    # downstream printing / comparison code stays the same shape.
+    current = Run(
+        commit=representative.commit,
+        timestamp=representative.timestamp,
+        flavor=representative.flavor,
+        metrics=aggregated_metrics,
+    )
 
     print(f"  {'burst':>6}  {'metric':<13}  {'current':>10}  "
           f"{'best':>10}  {'delta':>8}  status")

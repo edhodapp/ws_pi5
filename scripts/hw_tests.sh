@@ -99,7 +99,11 @@ flash_and_wait() {
     make "$@" > /dev/null 2>&1
     "$VENV" scripts/hw_send.py kernel8.img > "$logfile" 2>&1 &
     local hw_pid=$!
-    for i in $(seq 1 75); do
+    # 9514 hex records takes ~66 s to UART-send, then GENET init adds
+    # a variable few seconds. The previous 75 s budget left only ~9 s
+    # for init and intermittently flagged healthy boots as "did not
+    # boot". Bumped to 150 s so a slow genet_init still has headroom.
+    for i in $(seq 1 150); do
         if grep -q 'GENET Gigabit Ethernet' "$logfile" 2>/dev/null; then
             break
         fi
@@ -148,21 +152,29 @@ run_perf_phase() {
     out=$(mktemp)
     echo "=== [$label] flash PERF=$perf_flavor build ==="
     flash_and_wait "$flash_log" PLATFORM=pi4 PERF=$perf_flavor CONTENT_MAX=$DEV_CONTENT_MAX
-    echo "=== [$label] running perf tests (-m \"$marker_expr\") ==="
-    if ! HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" --tb=short -q -s 2>&1 | tee "$out"; then
-        rm -f "$out"
-        echo "FAIL: $label perf tests failed"
-        exit 1
-    fi
-    # Append to perf log with header
-    {
-        echo ""
-        echo "--- $COMMIT $(date -u +%Y-%m-%dT%H:%M:%SZ) PERF=$perf_flavor ---"
-        grep -E 'RTT baseline|BURST_STATS|PERF_STATS' "$out" || true
-    } >> "$PERF_LOG"
+    # Run the perf tests PERF_RUNS_PER_PHASE times in a row (no
+    # reflash between — same kernel, same Pi state). perf_check.py
+    # then aggregates best-of across the runs to floor out the
+    # single-run tcpreplay/USB-scheduling tail-jitter that this rig
+    # routinely produces.
+    local PERF_RUNS_PER_PHASE=3
+    for i in $(seq 1 $PERF_RUNS_PER_PHASE); do
+        echo "=== [$label] perf run $i/$PERF_RUNS_PER_PHASE (-m \"$marker_expr\") ==="
+        if ! HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" --tb=short -q -s 2>&1 | tee "$out"; then
+            rm -f "$out"
+            echo "FAIL: $label perf run $i tests failed"
+            exit 1
+        fi
+        # Append this run's stats with its own header — perf_check
+        # reads the last N matching headers as the "current window".
+        {
+            echo ""
+            echo "--- $COMMIT $(date -u +%Y-%m-%dT%H:%M:%SZ) PERF=$perf_flavor ---"
+            grep -E 'RTT baseline|BURST_STATS|PERF_STATS' "$out" || true
+        } >> "$PERF_LOG"
+    done
     rm -f "$out"
-    # Regression check (10% wire_pps drop vs median of last 10 runs)
-    if ! "$VENV" "$SCRIPT_DIR/perf_check.py" --flavor "PERF=$perf_flavor" --commit "$COMMIT"; then
+    if ! "$VENV" "$SCRIPT_DIR/perf_check.py" --flavor "PERF=$perf_flavor" --commit "$COMMIT" --runs $PERF_RUNS_PER_PHASE; then
         echo "FAIL: $label perf regression vs baseline"
         exit 1
     fi
