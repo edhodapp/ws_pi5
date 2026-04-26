@@ -139,14 +139,17 @@ run_layer_functional() {
 run_perf_phase() {
     local label="$1"
     local perf_flavor="$2"
-    local pytest_selector="$3"
+    # Marker EXPRESSION (e.g. "l2 and perf") — passed straight to pytest -m.
+    # Single string, not a multi-token args list, so the bash word-split
+    # bug from $pytest_selector expansion can't reappear.
+    local marker_expr="$3"
     local flash_log="/tmp/hw_tests-${label}-flash.log"
     local out
     out=$(mktemp)
     echo "=== [$label] flash PERF=$perf_flavor build ==="
     flash_and_wait "$flash_log" PLATFORM=pi4 PERF=$perf_flavor CONTENT_MAX=$DEV_CONTENT_MAX
-    echo "=== [$label] running perf tests ==="
-    if ! HW_TEST=1 "$VENV" -m pytest hw_test/ $pytest_selector --tb=short -q -s 2>&1 | tee "$out"; then
+    echo "=== [$label] running perf tests (-m \"$marker_expr\") ==="
+    if ! HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" --tb=short -q -s 2>&1 | tee "$out"; then
         rm -f "$out"
         echo "FAIL: $label perf tests failed"
         exit 1
@@ -172,10 +175,10 @@ for phase in "${PHASES[@]}"; do
         L3)            run_layer_functional "L3" "-m l3" ;;
         L4)            run_layer_functional "L4" "-m l4" ;;
         L5)            run_layer_functional "L5" "-m l5" ;;
-        perf-l2)       run_perf_phase       "perf-l2"       "recv"     '-m "l2 and perf"' ;;
-        perf-dispatch) run_perf_phase       "perf-dispatch" "dispatch" '-m "perf and dispatch"' ;;
-        perf-l3)       run_perf_phase       "perf-l3"       "l3"       '-m "l3 and perf"' ;;
-        perf-l4)       run_perf_phase       "perf-l4"       "send"     '-m "l4 and perf"' ;;
+        perf-l2)       run_perf_phase       "perf-l2"       "recv"     "l2 and perf" ;;
+        perf-dispatch) run_perf_phase       "perf-dispatch" "dispatch" "perf and dispatch" ;;
+        perf-l3)       run_perf_phase       "perf-l3"       "l3"       "l3 and perf" ;;
+        perf-l4)       run_perf_phase       "perf-l4"       "send"     "l4 and perf" ;;
         *) echo "BUG: unhandled phase $phase" >&2; exit 1 ;;
     esac
 done
