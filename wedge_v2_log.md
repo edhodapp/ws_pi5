@@ -162,4 +162,108 @@ Theory is confirmed if TIME_WAIT climbs round-over-round and reaches
 also drops to zero, the wedge has a different shape (look at
 ESTABLISHED + FIN_WAIT_* totals).
 
+### D2 — capture results (2026-04-26 ~05:02 UTC)
+
+**The TIME_WAIT theory is WRONG. The pool is filling with CLOSE_WAIT.**
+
+```
+baseline:     listen=1 closed=127  nonclosed=1/128
+PREFIX n=5:   listen=1 close_wait=5   closed=122  nonclosed=6/128
+PREFIX n=10:  listen=1 close_wait=15  closed=112  nonclosed=16/128
+PREFIX n=15:  listen=1 close_wait=30  closed=97   nonclosed=31/128
+PREFIX n=20:  listen=1 close_wait=50  closed=77   nonclosed=51/128
+round 1/10:   listen=1 close_wait=60  closed=67   nonclosed=61/128   ok=10
+round 2/10:   listen=1 close_wait=70  closed=57   nonclosed=71/128   ok=10
+round 3/10:   listen=1 close_wait=80  closed=47   nonclosed=81/128   ok=10
+round 4/10:   listen=1 close_wait=90  closed=37   nonclosed=91/128   ok=10
+round 5/10:   listen=1 close_wait=100 closed=27   nonclosed=101/128  ok=10
+round 6/10:   listen=1 close_wait=110 closed=17   nonclosed=111/128  ok=10
+round 7/10:   listen=1 close_wait=120 closed=7    nonclosed=121/128  ok=10
+round 8/10:   listen=1 close_wait=127 closed=0    nonclosed=128/128  ok=7  ← onset
+round 9/10:   listen=1 close_wait=127 closed=0    nonclosed=128/128  ok=0
+round 10/10:  listen=1 close_wait=127 closed=0    nonclosed=128/128  ok=0
+```
+
+Every successful HTTP request leaves a slot stuck in CLOSE_WAIT. Zero
+TIME_WAIT, zero ESTABLISHED, zero FIN_WAIT_*. Stuck where? — between
+`peer_FIN_received_and_ACKed` and `our_application_called_tcp_close`.
+
+### Reframe (correct)
+
+The peer (`_http_get` in the probe) issues a normal HTTP/1.1 GET with
+no `Connection: close` and then closes its socket immediately after
+collecting the response. That sends a FIN. Our TCP stack ACKs the FIN
+and transitions the connection to CLOSE_WAIT.
+
+CLOSE_WAIT → LAST_ACK requires the **application** (the HTTP server)
+to invoke `tcp_close` on the connection. The HTTP server isn't doing
+that. The connection can only escape CLOSE_WAIT via the idle reaper
+(`TCP_IDLE_CLOSEWAIT = 60 s`, `TCP_REAPER_INTERVAL = 30 s`), which is
+why D1 saw recovery in <30 s rather than the ~60 s a TIME_WAIT theory
+would have predicted. The recovery interval is the reaper's tick, not
+TIME_WAIT's drain.
+
+### Implication for the proposed fixes
+
+D1's proposed D5 (bigger pool, shorter TIME_WAIT, per-tuple reuse)
+were aiming at the wrong target.
+
+The real fix is in `lib/http.S` (and/or its FSA wiring): when a peer
+half-closes a connection that's idle (no in-flight request), call
+`tcp_close` so we cleanly LAST_ACK and free the slot. Currently the
+HTTP layer appears to ignore the peer-FIN and waits for the next
+keep-alive request that never comes.
+
+### Next step
+
+Investigate `lib/http.S` to find where peer-side FIN is (or isn't)
+plumbed into the HTTP keep-alive lifecycle, then fix it. A repro of
+the same probe should show CLOSE_WAIT counts staying near 0 round
+over round once the fix lands.
+
+## D5 — fix landed
+
+Bug location: `lib/http.S::http_poll`, `.Lhp_not_estab`. When the TCP
+state moved off ESTABLISHED (because the peer FINed), the old code
+just reset the application's `HCONN_STATE` to IDLE and skipped to the
+next slot. It never invoked `tcp_close`, so connections with the
+peer half-closed sat in CLOSE_WAIT forever (until the 60 s reaper).
+
+Fix: in `.Lhp_not_estab`, if TCP state is `TCPS_CLOSE_WAIT` and HCONN
+is not currently `HTTPS_SENDING` (output FSA owns those), branch into
+the existing `.Lhp_do_close` path. That sends our FIN, transitions the
+slot CLOSE_WAIT → LAST_ACK, and on the peer's final ACK the slot
+returns to CLOSED for reuse. SENDING-during-FIN is left to the next
+poll iteration: once `h_keepalive` returns the HCONN to IDLE, the
+same path closes it.
+
+### Capture after fix (2026-04-26 ~05:18 UTC)
+
+Same probe, fresh boot:
+
+```
+all 10 rounds:  listen=1 closed=127 nonclosed=1/128   ok=10 fail=0
+```
+
+Steady state. Zero CLOSE_WAIT residue. Every connection cleanly
+LAST_ACK → CLOSED → reused. The pool occupancy stays at 1 (the
+listener) end-to-end.
+
+Cost: ~6 instructions in the http_poll dispatch. No new failure modes
+in the QEMU unit suite (484 tests still pass).
+
+### Closing notes
+
+The D1 hypothesis (TIME_WAIT exhaustion) was wrong but the diagnostic
+infrastructure — PERF_CMD_DUMP_TCP — was the right move. Without the
+per-state slot dump we'd have continued to reason about TIME_WAIT
+recovery and tuned the wrong knobs (pool size, TIME_WAIT timer).
+The dump took the theory from "plausible-sounding" to "falsifiable in
+60 s" and the actual bug was visible the first time we ran it.
+
+Lesson for future debugging: when a hypothesis names a specific TCP
+state, cheap-instrument the slot distribution before tuning the
+behavior of that state. The same PERF_CMD_DUMP_TCP query will be
+useful for any future TCONN-pool bug.
+
 

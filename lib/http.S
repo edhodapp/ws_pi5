@@ -217,10 +217,32 @@ http_poll:
     b       .Lhp_next
 
 .Lhp_not_estab:
-    /* Connection not ESTABLISHED — if HCONN not IDLE, reset it */
+    /* TCP is not ESTABLISHED. Re-read the state — w0 was clobbered
+     * by the HCONN load on the ESTABLISHED path. */
+    ldrb    w24, [x19, #TCONN_STATE]
+
+    /* Peer half-closed → CLOSE_WAIT. We must call tcp_close to send
+     * our FIN; otherwise the slot lingers until the 60 s idle reaper.
+     * Under burst load that exhausts the 128-slot TCONN pool with
+     * stuck CLOSE_WAITs (wedge_v2_log.md D2). Skip if we're still
+     * mid-response (HTTPS_SENDING) — the output FSA owns the
+     * connection and a later poll iteration closes it once h_keepalive
+     * returns HCONN to IDLE. */
+    cmp     w24, #TCPS_CLOSE_WAIT
+    b.ne    .Lhp_skip_or_reset
+
+    ldrb    w0, [x20, #HCONN_STATE]
+    cmp     w0, #HTTPS_SENDING
+    b.eq    .Lhp_next
+    b       .Lhp_do_close
+
+.Lhp_skip_or_reset:
+    /* Other non-ESTABLISHED states (LAST_ACK, FIN_WAIT_*, TIME_WAIT,
+     * CLOSING, CLOSED): the kernel handles the state machine on its
+     * own. If HCONN had application state, drop it back to IDLE. */
     ldrb    w0, [x20, #HCONN_STATE]
     cbz     w0, .Lhp_next
-    strb    wzr, [x20, #HCONN_STATE]    /* reset to IDLE */
+    strb    wzr, [x20, #HCONN_STATE]
     b       .Lhp_next
 
 .Lhp_start_recv:
@@ -738,6 +760,12 @@ http_poll:
 .Lhp_slowloris_close:
     /* Slowloris timeout — close without sending a response */
 .Lhp_do_close:
+    /* Both entry paths (slowloris timeout from ESTABLISHED, peer-FIN
+     * from CLOSE_WAIT) are valid tcp_close states, so the cbz below
+     * is defensive only — w0 == 0 means the connection drifted into
+     * an unexpected state between the dispatch check and here, in
+     * which case dropping HCONN to IDLE and moving on is correct.
+     * The 60 s idle reaper backstops any stuck slot. */
     ldr     x23, =http_send_ctx
     mov     x0, x19
     ldr     x1, [x23, #HSCTX_TX_BUF]
