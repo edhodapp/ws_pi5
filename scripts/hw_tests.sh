@@ -152,14 +152,15 @@ run_perf_phase() {
     out=$(mktemp)
     echo "=== [$label] flash PERF=$perf_flavor build ==="
     flash_and_wait "$flash_log" PLATFORM=pi4 PERF=$perf_flavor CONTENT_MAX=$DEV_CONTENT_MAX
-    # Run the perf tests PERF_RUNS_PER_PHASE times in a row (no
-    # reflash between — same kernel, same Pi state). perf_check.py
-    # then aggregates best-of across the runs to floor out the
-    # single-run tcpreplay/USB-scheduling tail-jitter that this rig
-    # routinely produces.
-    local PERF_RUNS_PER_PHASE=3
-    for i in $(seq 1 $PERF_RUNS_PER_PHASE); do
-        echo "=== [$label] perf run $i/$PERF_RUNS_PER_PHASE (-m \"$marker_expr\") ==="
+    # PERF_RUNS / PERF_TOLERANCE are knobs the calling driver script
+    # can tune. Strict nightly runs use --runs 3 and --tolerance 0.50;
+    # the looser pre-push gate uses --runs 1 and --tolerance 0.75
+    # (catch only "really horrible" regressions, ignore single-run
+    # tail jitter on a noisy host).
+    : "${PERF_RUNS:=3}"
+    : "${PERF_TOLERANCE:=0.50}"
+    for i in $(seq 1 "$PERF_RUNS"); do
+        echo "=== [$label] perf run $i/$PERF_RUNS (-m \"$marker_expr\") ==="
         if ! HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" --tb=short -q -s 2>&1 | tee "$out"; then
             rm -f "$out"
             echo "FAIL: $label perf run $i tests failed"
@@ -174,7 +175,9 @@ run_perf_phase() {
         } >> "$PERF_LOG"
     done
     rm -f "$out"
-    if ! "$VENV" "$SCRIPT_DIR/perf_check.py" --flavor "PERF=$perf_flavor" --commit "$COMMIT" --runs $PERF_RUNS_PER_PHASE; then
+    if ! "$VENV" "$SCRIPT_DIR/perf_check.py" --flavor "PERF=$perf_flavor" \
+            --commit "$COMMIT" --runs "$PERF_RUNS" \
+            --tolerance "$PERF_TOLERANCE"; then
         echo "FAIL: $label perf regression vs baseline"
         exit 1
     fi

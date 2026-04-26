@@ -48,7 +48,7 @@ import sys
 from dataclasses import dataclass
 
 LOG_PATH = "hw_test/perf_runs.log"
-TOLERANCE = 0.50  # 50% drop from best is a fail (see docstring)
+DEFAULT_TOLERANCE = 0.50  # see docstring; overridable via --tolerance
 
 
 @dataclass
@@ -153,11 +153,11 @@ def best_so_far(history: list[Run], key: tuple[int, str]) -> float | None:
 
 
 def is_regression(
-    current: float, standard: float, higher_better: bool,
+    current: float, standard: float, higher_better: bool, tolerance: float,
 ) -> bool:
     if higher_better:
-        return current < (1.0 - TOLERANCE) * standard
-    return current > (1.0 + TOLERANCE) * standard
+        return current < (1.0 - tolerance) * standard
+    return current > (1.0 + tolerance) * standard
 
 
 def delta_pct(current: float, standard: float, higher_better: bool) -> float:
@@ -205,8 +205,24 @@ def main() -> int:
             "outliers from a noisy rig."
         ),
     )
+    ap.add_argument(
+        "--tolerance", type=float, default=DEFAULT_TOLERANCE,
+        help=(
+            "fail threshold as a fraction (0.50 = fail at 50%% drop "
+            "from best). Default 0.50 — strict run for best-of-N. "
+            "Use 0.75 for the looser pre-push gate."
+        ),
+    )
     ap.add_argument("--log", default=LOG_PATH)
     args = ap.parse_args()
+
+    if not 0.0 < args.tolerance < 1.0:
+        print(
+            f"perf_check: --tolerance must be in (0, 1) "
+            f"(got {args.tolerance})",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.runs < 1:
         print(
@@ -267,7 +283,7 @@ def main() -> int:
         )
     print(f"  history: {len(history)} prior runs of this flavor "
           f"(after most recent BASELINE_RESET, if any)")
-    print(f"  threshold: {TOLERANCE*100:.0f}% from all-time best")
+    print(f"  threshold: {args.tolerance*100:.0f}% from all-time best")
     print()
 
     if not aggregated_metrics:
@@ -314,7 +330,9 @@ def main() -> int:
             new_bars.append(
                 f"{name}@n={size}: {standard:.1f} → {current_val:.1f}"
             )
-        elif is_regression(current_val, standard, higher_better):
+        elif is_regression(
+            current_val, standard, higher_better, args.tolerance,
+        ):
             status = "FAIL"
             failures.append(
                 f"{name}@n={size}: current={current_val:.1f} "
@@ -337,7 +355,10 @@ def main() -> int:
         print()
 
     if failures:
-        print(f"perf_check: REGRESSION (>{TOLERANCE*100:.0f}% from best)")
+        print(
+            f"perf_check: REGRESSION "
+            f"(>{args.tolerance*100:.0f}% from best)"
+        )
         for f in failures:
             print(f"  - {f}")
         return 1

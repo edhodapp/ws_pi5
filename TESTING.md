@@ -43,11 +43,25 @@ Wrap in `scripts/hw_tests.sh L2 L3 L4 L5 perf`. The script handles flashing betw
 
 Total: ~10 min for the full pass (functional + perf).
 
-### Perf policy: ratchet, with explicit baseline-reset escape hatch
+### Perf policy: two gates, ratchet, baseline-reset escape hatch
 
 Functional correctness is the contract; perf is the goal we keep moving toward, not a regression we ignore.
 
-**Default rule**: every perf run is compared against the all-time best for that `(flavor, burst_size, metric)` recorded in `hw_test/perf_runs.log`. A run **fails** if any metric is more than 10 % worse than the all-time best (lower `wire_pps`, higher `send_ms`/`total_ms`/`recv_ns`/etc.). A run that beats the standard automatically becomes the new bar — the standard is recomputed from history on every check, so improvements ratchet upward without manual intervention.
+**Two gates, calibrated for what they need to catch:**
+
+| Gate | Driver | Runs/phase | Tolerance | Purpose |
+|---|---|---|---|---|
+| Pre-push (loose) | `scripts/perf_push.sh` | 1 | 75 % | Catch "we did something really horrible" before a push. Don't fight host-side single-run jitter. |
+| Nightly (strict) | `scripts/perf_nightly.sh` | 3 (best-of) | 50 % | The real perf bar. Best-of-3 absorbs single-run tail jitter; runs only when the laptop is actually quiet. |
+
+**Default rule**: every perf run is compared against the all-time best for that `(flavor, burst_size, metric)` recorded in `hw_test/perf_runs.log`. A run **fails** if any metric is more than the gate's tolerance worse than the all-time best (lower `wire_pps`, higher `send_ms`/`total_ms`/`recv_ns`/etc.). A run that beats the standard automatically becomes the new bar — the standard is recomputed from history on every check, so improvements ratchet upward without manual intervention.
+
+**Nightly cron install** (system local time — `crond` honors local TZ; the deadline aligns with sleep, not UTC):
+```
+crontab -e
+0 0 * * * /home/ed/ws_pi5/scripts/perf_nightly.sh >> /tmp/perf_nightly.log 2>&1
+```
+The nightly waiter polls `/proc/loadavg` every 5 min; fires the strict perf cycle as soon as 1-min load drops below 1.5; gives up at 08:00 local if the laptop never goes idle (Ed didn't sleep that day). Log timestamps inside `perf_runs.log` stay UTC — the trigger is local-clock-aligned, the data is timezone-neutral.
 
 **Escape hatch** for intentional perf cost:
 - A planned change (a new feature, a correctness fix that costs throughput) that is expected to lower perf needs an explicit `BASELINE_RESET` marker in `perf_runs.log` along with a written rationale.
@@ -80,7 +94,7 @@ Every-commit feedback should be cheap; every-push feedback should be thorough. T
 - Bucket A (lints + Python unit + PICT-gen)
 - Bucket B (`make test` + `make test-functional`)
 - Bucket C functional (L2 L3 L4 L5)
-- Bucket C perf (PERF=recv / dispatch / l3 / send) with `perf_check.py` ratchet
+- Bucket C perf via `scripts/perf_push.sh` (1 run, 75 % tolerance — loose gate; the strict best-of-3 / 50 % gate is the nightly cron)
 - ~14 min. Fires on every `git push`. **The honest "full test suite."**
 
 ### Manual invocation
@@ -91,9 +105,12 @@ Every-commit feedback should be cheap; every-push feedback should be thorough. T
 | Bucket B only | `scripts/qemu_tests.sh` |
 | One Bucket-C layer | `scripts/hw_tests.sh L4` |
 | Multiple Bucket-C layers | `scripts/hw_tests.sh L2 L4 L5` |
-| Bucket C functional + perf | `scripts/hw_tests.sh L2 L3 L4 L5 perf` |
+| Bucket C functional only | `scripts/hw_tests.sh L2 L3 L4 L5` |
+| Loose perf gate (1 run, 75 %) | `scripts/perf_push.sh` |
+| Strict perf cycle (best-of-3, 50 %) on demand | `scripts/hw_tests.sh perf` |
+| Strict perf cycle, wait for quiet host first | `scripts/perf_nightly.sh` |
 | Full pre-commit-heavy run (A + B + C-functional, no perf) | `scripts/pre_commit_tests.sh` |
-| Full pre-push run (A + B + C + perf) | `scripts/pre_push_tests.sh` |
+| Full pre-push run (A + B + C-functional + loose perf) | `scripts/pre_push_tests.sh` |
 | Reset perf baseline (after intentional regression) | `scripts/perf_set_baseline.sh PERF=recv "rationale"` |
 
 **Remote CI (no Pi access)** can run A + B but not C. Reserve C for local pre-push or manual runs where the Pi is attached.
