@@ -41,6 +41,7 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "timer.inc"
+.include "perf.inc"
 
 .global test_tcp
 
@@ -269,6 +270,8 @@ test_tcp:
     bl      test_tcp_sack_find_hole
     bl      test_tcp_sndbuf_build_at
     bl      test_tcp_sack_fast_retransmit
+    bl      test_tcp_state_count_dump_basic
+    bl      test_tcp_state_count_dump_full_timewait
     ldp     x29, x30, [sp], #16
     ret
 
@@ -13775,6 +13778,225 @@ test_tcp_sack_fast_retransmit:
     ret
 
 /* ========================================================================
+ * test_tcp_state_count_dump_basic — mixed-state TCP slot dump
+ *
+ * Seed tcp_conn_table with a known mix of states (LISTEN, ESTABLISHED,
+ * TIME_WAIT, FIN_WAIT_1) and verify tcp_state_count_dump produces the
+ * exact per-state counts, the correct NONCLOSED total, max=128, and
+ * the magic tag 0xDEADBEE2.
+ * ======================================================================== */
+test_tcp_state_count_dump_basic:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Zero the table — start from all-CLOSED. */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #(TCP_CONN_TABLE_SIZE / 16)
+.Lscd_zero:
+    stp     xzr, xzr, [x0], #16
+    subs    w1, w1, #1
+    b.ne    .Lscd_zero
+
+    /* Seed states:
+     *   slot 0      → LISTEN
+     *   slots 1..3  → ESTABLISHED (×3)
+     *   slots 4..5  → TIME_WAIT  (×2)
+     *   slot 6      → FIN_WAIT_1
+     * Remaining 121 slots stay CLOSED. */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #TCPS_LISTEN
+    strb    w1, [x0, #TCONN_STATE]
+
+    add     x0, x0, #TCONN_SIZE
+    mov     w1, #TCPS_ESTABLISHED
+    strb    w1, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    strb    w1, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    strb    w1, [x0, #TCONN_STATE]
+
+    add     x0, x0, #TCONN_SIZE
+    mov     w1, #TCPS_TIME_WAIT
+    strb    w1, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    strb    w1, [x0, #TCONN_STATE]
+
+    add     x0, x0, #TCONN_SIZE
+    mov     w1, #TCPS_FIN_WAIT_1
+    strb    w1, [x0, #TCONN_STATE]
+
+    /* Call the dump into tcp_test_buf. */
+    ldr     x0, =tcp_test_buf
+    bl      tcp_state_count_dump
+
+    ldr     x0, =tcp_test_buf
+
+    /* CLOSED count = 128 - 7 = 121 */
+    ldr     w1, [x0, #PERF_TCP_CLOSED]
+    cmp     w1, #121
+    b.ne    .Lfail_tcp_scdb
+
+    /* LISTEN count = 1 */
+    ldr     w1, [x0, #PERF_TCP_LISTEN]
+    cmp     w1, #1
+    b.ne    .Lfail_tcp_scdb
+
+    /* SYN_RCVD = 0 */
+    ldr     w1, [x0, #PERF_TCP_SYN_RCVD]
+    cbnz    w1, .Lfail_tcp_scdb
+
+    /* ESTABLISHED = 3 */
+    ldr     w1, [x0, #PERF_TCP_ESTABLISHED]
+    cmp     w1, #3
+    b.ne    .Lfail_tcp_scdb
+
+    /* CLOSE_WAIT = 0, LAST_ACK = 0 */
+    ldr     w1, [x0, #PERF_TCP_CLOSE_WAIT]
+    cbnz    w1, .Lfail_tcp_scdb
+    ldr     w1, [x0, #PERF_TCP_LAST_ACK]
+    cbnz    w1, .Lfail_tcp_scdb
+
+    /* FIN_WAIT_1 = 1 */
+    ldr     w1, [x0, #PERF_TCP_FIN_WAIT_1]
+    cmp     w1, #1
+    b.ne    .Lfail_tcp_scdb
+
+    /* FIN_WAIT_2 = 0 */
+    ldr     w1, [x0, #PERF_TCP_FIN_WAIT_2]
+    cbnz    w1, .Lfail_tcp_scdb
+
+    /* TIME_WAIT = 2 */
+    ldr     w1, [x0, #PERF_TCP_TIME_WAIT]
+    cmp     w1, #2
+    b.ne    .Lfail_tcp_scdb
+
+    /* CLOSING = 0 */
+    ldr     w1, [x0, #PERF_TCP_CLOSING]
+    cbnz    w1, .Lfail_tcp_scdb
+
+    /* NONCLOSED = 1 + 3 + 2 + 1 = 7 */
+    ldr     w1, [x0, #PERF_TCP_NONCLOSED]
+    cmp     w1, #7
+    b.ne    .Lfail_tcp_scdb
+
+    /* MAX = TCP_MAX_CONNS = 128 */
+    ldr     w1, [x0, #PERF_TCP_MAX]
+    cmp     w1, #TCP_MAX_CONNS
+    b.ne    .Lfail_tcp_scdb
+
+    /* MAGIC = 0xDEADBEE2 */
+    ldr     w1, [x0, #PERF_TCP_MAGIC]
+    ldr     w2, =PERF_TCP_MAGIC_VALUE
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_scdb
+
+    ldr     x0, =name_tcp_scdb
+    bl      test_pass
+    b       .Ldone_tcp_scdb
+.Lfail_tcp_scdb:
+    ldr     x0, =name_tcp_scdb
+    bl      test_fail
+.Ldone_tcp_scdb:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
+ * test_tcp_state_count_dump_full_timewait — wedge-scenario coverage
+ *
+ * Seed 127 slots to TIME_WAIT and 1 to LISTEN — the exhaustion shape we
+ * expect to see during the concurrent-burst wedge. Verifies the dump
+ * correctly reports TIME_WAIT=127, LISTEN=1, NONCLOSED=128 (full pool).
+ * ======================================================================== */
+test_tcp_state_count_dump_full_timewait:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Zero the table. */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #(TCP_CONN_TABLE_SIZE / 16)
+.Lscdf_zero:
+    stp     xzr, xzr, [x0], #16
+    subs    w1, w1, #1
+    b.ne    .Lscdf_zero
+
+    /* slot 0 → LISTEN */
+    ldr     x0, =tcp_conn_table
+    mov     w1, #TCPS_LISTEN
+    strb    w1, [x0, #TCONN_STATE]
+
+    /* slots 1..127 → TIME_WAIT */
+    add     x0, x0, #TCONN_SIZE
+    mov     w1, #TCPS_TIME_WAIT
+    mov     w2, #(TCP_MAX_CONNS - 1)
+.Lscdf_fill_tw:
+    strb    w1, [x0, #TCONN_STATE]
+    add     x0, x0, #TCONN_SIZE
+    subs    w2, w2, #1
+    b.ne    .Lscdf_fill_tw
+
+    /* Dump. */
+    ldr     x0, =tcp_test_buf
+    bl      tcp_state_count_dump
+
+    ldr     x0, =tcp_test_buf
+
+    /* CLOSED = 0 (pool fully occupied) */
+    ldr     w1, [x0, #PERF_TCP_CLOSED]
+    cbnz    w1, .Lfail_tcp_scdf
+
+    /* LISTEN = 1 */
+    ldr     w1, [x0, #PERF_TCP_LISTEN]
+    cmp     w1, #1
+    b.ne    .Lfail_tcp_scdf
+
+    /* All other intermediate states must be exactly 0 — this is
+     * the wedge shape we're confirming, anything in another bucket
+     * means the dump miscounted. */
+    ldr     w1, [x0, #PERF_TCP_SYN_RCVD]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_ESTABLISHED]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_CLOSE_WAIT]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_LAST_ACK]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_FIN_WAIT_1]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_FIN_WAIT_2]
+    cbnz    w1, .Lfail_tcp_scdf
+    ldr     w1, [x0, #PERF_TCP_CLOSING]
+    cbnz    w1, .Lfail_tcp_scdf
+
+    /* TIME_WAIT = 127 */
+    ldr     w1, [x0, #PERF_TCP_TIME_WAIT]
+    cmp     w1, #(TCP_MAX_CONNS - 1)
+    b.ne    .Lfail_tcp_scdf
+
+    /* NONCLOSED = 128 */
+    ldr     w1, [x0, #PERF_TCP_NONCLOSED]
+    cmp     w1, #TCP_MAX_CONNS
+    b.ne    .Lfail_tcp_scdf
+
+    /* MAX = TCP_MAX_CONNS = 128 */
+    ldr     w1, [x0, #PERF_TCP_MAX]
+    cmp     w1, #TCP_MAX_CONNS
+    b.ne    .Lfail_tcp_scdf
+
+    /* MAGIC */
+    ldr     w1, [x0, #PERF_TCP_MAGIC]
+    ldr     w2, =PERF_TCP_MAGIC_VALUE
+    cmp     w1, w2
+    b.ne    .Lfail_tcp_scdf
+
+    ldr     x0, =name_tcp_scdf
+    bl      test_pass
+    b       .Ldone_tcp_scdf
+.Lfail_tcp_scdf:
+    ldr     x0, =name_tcp_scdf
+    bl      test_fail
+.Ldone_tcp_scdf:
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* ========================================================================
  * Test data
  * ======================================================================== */
 .section .rodata
@@ -14451,6 +14673,8 @@ name_tcp_sp1:       .asciz "tcp_sack_parse_1block"
 name_tcp_sfh:       .asciz "tcp_sack_find_hole"
 name_tcp_sba2:      .asciz "tcp_sndbuf_build_at"
 name_tcp_sfr:       .asciz "tcp_sack_fast_retransmit"
+name_tcp_scdb:      .asciz "tcp_state_count_dump_basic"
+name_tcp_scdf:      .asciz "tcp_state_count_dump_full_timewait"
 
 tcp_send_payload:
     .ascii  "World"

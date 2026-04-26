@@ -104,6 +104,37 @@
 .equ PERF_CMD_DUMP_L3,       3   /* read perf_counters2 (64 bytes) */
 .equ PERF_CMD_DUMP_L3_RESET, 4   /* read then zero L3 counters
                                   * (magic tag preserved) */
+.equ PERF_CMD_DUMP_TCP,      5   /* read tcp_conn_table state-bucket
+                                  * counts (64 bytes, see PERF_TCP_*
+                                  * offsets below). Always available —
+                                  * pure inspection, no PERF gate. */
+
+/* --- TCP slot-state dump payload (cmd 5) --- */
+/*
+ * Walks all TCP_MAX_CONNS slots and counts how many are in each
+ * connection state. Layout matches the TCPS_* values in tcp.inc so
+ * payload[TCPS_xxx * 4] is the count for that state.
+ */
+.equ PERF_TCP_CLOSED,         0   /* u32: TCPS_CLOSED slot count */
+.equ PERF_TCP_LISTEN,         4   /* u32: TCPS_LISTEN slot count */
+.equ PERF_TCP_SYN_RCVD,       8   /* u32: TCPS_SYN_RCVD slot count */
+.equ PERF_TCP_ESTABLISHED,   12   /* u32: TCPS_ESTABLISHED slot count */
+.equ PERF_TCP_CLOSE_WAIT,    16   /* u32: TCPS_CLOSE_WAIT slot count */
+.equ PERF_TCP_LAST_ACK,      20   /* u32: TCPS_LAST_ACK slot count */
+.equ PERF_TCP_FIN_WAIT_1,    24   /* u32: TCPS_FIN_WAIT_1 slot count */
+.equ PERF_TCP_FIN_WAIT_2,    28   /* u32: TCPS_FIN_WAIT_2 slot count */
+.equ PERF_TCP_TIME_WAIT,     32   /* u32: TCPS_TIME_WAIT slot count */
+.equ PERF_TCP_CLOSING,       36   /* u32: TCPS_CLOSING slot count */
+.equ PERF_TCP_NONCLOSED,     40   /* u32: sum of non-CLOSED slots
+                                   * (= occupied pool size) */
+.equ PERF_TCP_MAX,           44   /* u32: TCP_MAX_CONNS, sanity tag */
+.equ PERF_TCP_RSVD1,         48   /* u32: reserved (zero) */
+.equ PERF_TCP_RSVD2,         52   /* u32: reserved (zero) */
+.equ PERF_TCP_RSVD3,         56   /* u32: reserved (zero) */
+.equ PERF_TCP_MAGIC,         60   /* u32: 0xDEADBEE2 sanity tag */
+
+.equ PERF_TCP_DUMP_SIZE,     64
+.equ PERF_TCP_MAGIC_VALUE,   0xDEADBEE2
 
 /* --- Probe macros --------------------------------------------------- */
 /*

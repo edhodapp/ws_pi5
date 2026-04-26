@@ -13,6 +13,7 @@
 .include "tcp.inc"
 .include "vmio.inc"
 .include "timer.inc"
+.include "perf.inc"
 
 .global tcp_checksum
 .global tcp_pseudo_csum
@@ -48,6 +49,7 @@
 .global tcp_persist_cb
 .global tcp_timewait_fin_handler
 .global tcp_timer_pool_ptr
+.global tcp_state_count_dump
 
 .section .text
 
@@ -182,6 +184,69 @@ tcp_init_secret:
     mrs     x0, CNTPCT_EL0
     ldr     x1, =tcp_isn_secret
     str     x0, [x1]
+    ret
+
+/*
+ * tcp_state_count_dump — Snapshot TCP slot-state distribution
+ *
+ * Walks tcp_conn_table[0..TCP_MAX_CONNS-1], counts how many slots are
+ * in each TCPS_* state, and writes a 64-byte report to the buffer at x0:
+ *   payload[TCPS_xxx * 4]      = u32 count of slots in that state
+ *   payload[PERF_TCP_NONCLOSED] = u32 sum of all non-CLOSED counts
+ *   payload[PERF_TCP_MAX]       = u32 TCP_MAX_CONNS (sanity tag)
+ *   payload[PERF_TCP_MAGIC]     = u32 0xDEADBEE2 (sanity tag)
+ *
+ * Always compiled — pure inspection of existing kernel state, used by
+ * the 0x88B6 perf-query handler under PERF_CMD_DUMP_TCP. Lets us
+ * confirm pool exhaustion (high TIME_WAIT count) during the wedge
+ * without needing a PERF build flavor.
+ *
+ * x0: destination buffer (64 bytes; may be unaligned — Normal memory)
+ * Returns: nothing
+ * Clobbers: x1-x6
+ */
+tcp_state_count_dump:
+    /* Zero the 64-byte destination first. Four 16-byte stp pairs. */
+    stp     xzr, xzr, [x0, #0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #32]
+    stp     xzr, xzr, [x0, #48]
+
+    /* Walk all 128 slots. */
+    ldr     x1, =tcp_conn_table
+    mov     w2, #TCP_MAX_CONNS
+    mov     w5, #0                   /* w5 = non-CLOSED accumulator */
+
+.Ltcp_dump_loop:
+    ldrb    w3, [x1, #TCONN_STATE]
+    /* Defense in depth: ignore states outside 0..9. tcp.S only
+     * writes valid states, but a corrupt slot must not index past
+     * the 10-u32 count region. */
+    cmp     w3, #TCP_N_STATES
+    b.hs    .Ltcp_dump_next
+
+    /* dest[state * 4] += 1 (lsl into a w-register zeroes the upper
+     * 32 bits, so x4 is a valid 64-bit byte offset). */
+    lsl     w4, w3, #2
+    ldr     w6, [x0, x4]
+    add     w6, w6, #1
+    str     w6, [x0, x4]
+
+    /* Bump non-CLOSED accumulator if state != 0 (CLOSED). */
+    cbz     w3, .Ltcp_dump_next
+    add     w5, w5, #1
+
+.Ltcp_dump_next:
+    add     x1, x1, #TCONN_SIZE
+    subs    w2, w2, #1
+    b.ne    .Ltcp_dump_loop
+
+    /* Trailer: total non-CLOSED, sanity max, magic. */
+    str     w5, [x0, #PERF_TCP_NONCLOSED]
+    mov     w3, #TCP_MAX_CONNS
+    str     w3, [x0, #PERF_TCP_MAX]
+    ldr     w3, =PERF_TCP_MAGIC_VALUE
+    str     w3, [x0, #PERF_TCP_MAGIC]
     ret
 
 /*

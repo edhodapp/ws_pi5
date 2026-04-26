@@ -420,12 +420,17 @@ PERF_CMD_DUMP_RESET = 1
 PERF_CMD_DUMP_REGS = 2
 PERF_CMD_DUMP_L3 = 3
 PERF_CMD_DUMP_L3_RESET = 4
+PERF_CMD_DUMP_TCP = 5
 
 # Expected PERF_L3 magic tag (lib/perf.S::perf_counters2 pre-
 # initializes this at link time). Reading a different value from a
 # DUMP_L3 reply means either the Pi isn't a PERF=l3 build or the
 # struct layout has drifted out of sync with include/perf.inc.
 PERF_L3_MAGIC_VALUE = 0xDEADBEE1
+
+# Magic tag emitted by lib/tcp.S::tcp_state_count_dump. Available in
+# every build (the TCP-state dump is not gated on PERF_COUNTERS).
+PERF_TCP_MAGIC_VALUE = 0xDEADBEE2
 
 # Minimum Ethernet frame (including FCS added by hardware) is 64
 # bytes, payload minimum 46 bytes. We send a 60-byte frame (14 B
@@ -450,9 +455,10 @@ def perf_query(
     """Query the Pi's perf state via ethertype 0x88B6.
 
     Sends a single request frame to the Pi and waits for the reply.
-    Requires the Pi to be running the corresponding PERF build —
-    the readout handler in lib/perf.S is only active under
-    PERF_COUNTERS; block="l3" additionally needs PERF_L3.
+    Most blocks require a corresponding PERF build (l2/l3 need
+    PERF_COUNTERS / PERF_L3, regs needs PLATFORM_PI4); block="tcp"
+    works in every build because it's pure inspection of
+    tcp_conn_table.
 
     Arguments:
       iface:      interface name (e.g. "enx00e04c0a2bed")
@@ -462,10 +468,12 @@ def perf_query(
                     "l2"   → perf_counters (default)
                     "l3"   → perf_counters2
                     "regs" → GENET register + driver state snapshot
+                    "tcp"  → tcp_conn_table per-state slot counts
+                             (always available — no PERF build needed)
                   `dump_regs=True` is a legacy alias for `block="regs"`.
       reset:      if True, Pi zeros the selected line AFTER snapshot.
                   The returned dict still shows the pre-reset values.
-                  Not valid for block="regs".
+                  Not valid for block="regs" or block="tcp".
       dump_regs:  deprecated — use `block="regs"` instead. If True,
                   overrides `block`.
       timeout_ms: max wait for the reply
@@ -476,11 +484,13 @@ def perf_query(
                       the PERF_L3 magic tag; raises WireError if
                       the tag is wrong)
       - block="regs": dict from _parse_genet_regs
+      - block="tcp":  dict from _parse_perf_tcp (validates the
+                      PERF_TCP magic tag)
 
     Raises:
       WireError on timeout (Pi unreachable or wrong PERF build),
       short reply, socket errors, contradictory arguments, or a
-      magic-tag mismatch on the l3 path.
+      magic-tag mismatch on the l3 / tcp path.
     """
     if len(pi_mac) != 6 or len(laptop_mac) != 6:
         raise WireError(
@@ -492,23 +502,22 @@ def perf_query(
     if dump_regs:
         block = "regs"
 
-    if block not in ("l2", "l3", "regs"):
+    spec = _PERF_BLOCK_TABLE.get(block)
+    if spec is None:
         raise WireError(
             f"perf_query: unknown block={block!r}, "
-            f"expected one of: l2, l3, regs"
+            f"expected one of: {', '.join(sorted(_PERF_BLOCK_TABLE))}"
         )
-    if reset and block == "regs":
-        raise WireError(
-            "perf_query: reset=True is not valid with block='regs' "
-            "(the register snapshot is stateless on the Pi side)"
-        )
-
-    if block == "regs":
-        cmd = PERF_CMD_DUMP_REGS
-    elif block == "l3":
-        cmd = PERF_CMD_DUMP_L3_RESET if reset else PERF_CMD_DUMP_L3
-    else:  # block == "l2"
-        cmd = PERF_CMD_DUMP_RESET if reset else PERF_CMD_DUMP
+    cmd_normal, cmd_reset, _parser = spec
+    if reset:
+        if cmd_reset is None:
+            raise WireError(
+                f"perf_query: reset=True is not valid with "
+                f"block={block!r} (snapshot is stateless on the Pi side)"
+            )
+        cmd = cmd_reset
+    else:
+        cmd = cmd_normal
 
     # 14 B eth header (dst=pi, src=laptop, etype=0x88B6) +
     # 1 B cmd + 45 B zero pad = 60 B.
@@ -543,12 +552,7 @@ def perf_query(
             f"perf_query reply too short: {len(reply)} bytes "
             f"(expected at least {expected_min})"
         )
-    payload = reply[14:14 + 64]
-    if block == "regs":
-        return _parse_genet_regs(payload)
-    if block == "l3":
-        return _parse_perf_counters2(payload)
-    return _parse_perf_counters(payload)
+    return spec[2](reply[14:14 + 64])
 
 
 def _is_perf_reply(frame: bytes) -> bool:
@@ -667,6 +671,61 @@ def _parse_perf_counters2(payload: bytes) -> dict:
     return result
 
 
+# tcp_state_count_dump payload — TCP slot-state distribution.
+# MUST stay in sync with include/perf.inc's PERF_TCP_* offsets.
+#
+#   off  size  name              meaning
+#   0    4     closed            TCPS_CLOSED count
+#   4    4     listen            TCPS_LISTEN count
+#   8    4     syn_rcvd          TCPS_SYN_RCVD count
+#   12   4     established       TCPS_ESTABLISHED count
+#   16   4     close_wait        TCPS_CLOSE_WAIT count
+#   20   4     last_ack          TCPS_LAST_ACK count
+#   24   4     fin_wait_1        TCPS_FIN_WAIT_1 count
+#   28   4     fin_wait_2        TCPS_FIN_WAIT_2 count
+#   32   4     time_wait         TCPS_TIME_WAIT count
+#   36   4     closing           TCPS_CLOSING count
+#   40   4     nonclosed         sum of non-CLOSED slots
+#   44   4     max_conns         TCP_MAX_CONNS sanity tag (= 128)
+#   48   4     rsvd1             reserved (zero)
+#   52   4     rsvd2             reserved (zero)
+#   56   4     rsvd3             reserved (zero)
+#   60   4     magic             0xDEADBEE2
+_PERF_TCP_STRUCT = struct.Struct("<16I")
+assert _PERF_TCP_STRUCT.size == 64
+
+_TCP_STATE_NAMES = (
+    "closed", "listen", "syn_rcvd", "established",
+    "close_wait", "last_ack", "fin_wait_1", "fin_wait_2",
+    "time_wait", "closing",
+)
+
+
+def _parse_perf_tcp(payload: bytes) -> dict[str, int]:
+    """Parse the 64-byte TCP slot-state count payload into a dict.
+
+    Raises WireError if the magic tag is wrong (struct drift between
+    include/perf.inc and hw_test/wire.py, or a non-TCP-dump frame
+    landed in the receive queue).
+    """
+    if len(payload) != 64:
+        raise WireError(
+            f"_parse_perf_tcp: expected 64 bytes, got {len(payload)}"
+        )
+    f = _PERF_TCP_STRUCT.unpack(payload)
+    result = {name: f[i] for i, name in enumerate(_TCP_STATE_NAMES)}
+    result["nonclosed"] = f[10]
+    result["max_conns"] = f[11]
+    result["magic"] = f[15]
+    if result["magic"] != PERF_TCP_MAGIC_VALUE:
+        raise WireError(
+            f"perf_tcp magic mismatch: got {result['magic']:#010x}, "
+            f"expected {PERF_TCP_MAGIC_VALUE:#010x}. include/perf.inc "
+            f"has drifted from hw_test/wire.py."
+        )
+    return result
+
+
 # GENET register + driver state snapshot layout.
 # MUST stay in sync with platform/pi/drivers/genet.S::genet_dump_state.
 # All 16 fields are u32 little-endian. Two fields are reserved
@@ -718,6 +777,19 @@ def _parse_genet_regs(payload: bytes) -> dict:
         "state_tx_pidx":        f[14],
         "state_tx_ridx":        f[15],
     }
+
+
+# perf_query dispatch table:
+#   block → (cmd_normal, cmd_reset_or_None, parser_fn)
+# Defined here (after the parser fns above) so module load succeeds.
+_PERF_BLOCK_TABLE = {
+    "l2":   (PERF_CMD_DUMP,      PERF_CMD_DUMP_RESET,
+             _parse_perf_counters),
+    "l3":   (PERF_CMD_DUMP_L3,   PERF_CMD_DUMP_L3_RESET,
+             _parse_perf_counters2),
+    "regs": (PERF_CMD_DUMP_REGS, None, _parse_genet_regs),
+    "tcp":  (PERF_CMD_DUMP_TCP,  None, _parse_perf_tcp),
+}
 
 
 # --- Capture ---

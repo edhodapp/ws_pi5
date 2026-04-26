@@ -2,15 +2,29 @@
  * perf.S — Performance-counter storage + readout handler
  *
  * `perf_counters` (BSS, one 64-byte cache line) is emitted only under
- * PERF_COUNTERS. Default production builds pay zero storage.
+ * PERF_COUNTERS. `perf_counters2` (L3 line) is emitted only under
+ * PERF_L3. Default production builds pay zero storage for both.
  *
- * `perf_handle` is always linked — net_recv_one dispatches the
- * PERF_ETHERTYPE (0x88B6) query frame to it unconditionally. Under
- * PERF_COUNTERS the handler builds a reply containing a snapshot of
- * the counter struct; otherwise it drops the frame silently. That
- * way default builds and PERF builds have the same dispatch code in
- * net_recv_one, and the only behavioural difference is whether the
- * 0x88B6 query actually gets a response.
+ * `perf_handle` is always linked and always compiled. The function
+ * body is no longer wrapped in `.ifdef PERF_COUNTERS` — that gate
+ * has moved inward to wrap only the cmd 0/1 (perf_counters) branch
+ * of the dispatch. net_recv_one dispatches the PERF_ETHERTYPE
+ * (0x88B6) query frame to it unconditionally; the handler decodes
+ * the command byte and routes to the appropriate branch:
+ *
+ *   cmd 0/1 (PERF_CMD_DUMP / DUMP_RESET)         → perf_counters
+ *                                                  (gated PERF_COUNTERS)
+ *   cmd 2   (PERF_CMD_DUMP_REGS)                 → genet_dump_state
+ *                                                  (gated PLATFORM_PI4)
+ *   cmd 3/4 (PERF_CMD_DUMP_L3 / L3_RESET)        → perf_counters2
+ *                                                  (gated PERF_L3)
+ *   cmd 5   (PERF_CMD_DUMP_TCP)                  → tcp_state_count_dump
+ *                                                  (always compiled)
+ *
+ * Commands not supported by the current build flavour fall through
+ * to .Lperf_drop and reply nothing. Default builds therefore answer
+ * the cmd 5 TCP-state query without needing any PERF flag, which is
+ * what the wedge-investigation probe relies on.
  *
  * Probe macros and struct offsets live in include/perf.inc. Kernel
  * hot-path probe call sites are wired under PERF=recv / PERF=send /
@@ -31,8 +45,12 @@
  *   [0..5]   eth_dst   = our MAC
  *   [6..11]  eth_src   = peer MAC
  *   [12..13] etype     = 0x88B6
- *   [14]     cmd       = PERF_CMD_DUMP (0), PERF_CMD_DUMP_RESET (1),
- *                        or PERF_CMD_DUMP_REGS (2)
+ *   [14]     cmd       = one of PERF_CMD_DUMP (0),
+ *                        PERF_CMD_DUMP_RESET (1),
+ *                        PERF_CMD_DUMP_REGS (2),
+ *                        PERF_CMD_DUMP_L3 (3),
+ *                        PERF_CMD_DUMP_L3_RESET (4),
+ *                        PERF_CMD_DUMP_TCP (5)
  *   [15..]   pad       (ignored)
  *
  * Reply frame (built in-place in the same rx_buf):
@@ -48,23 +66,29 @@
  *            genet_dump_state. See platform/pi/drivers/genet.S
  *            for the exact layout — it is NOT the same shape as
  *            the perf_counters struct.
+ *   cmd 3/4: copy of perf_counters2 (L3 timing/event counters).
+ *            cmd 4 also zeros the source after snapshot (the magic
+ *            tag is preserved).
+ *   cmd 5:   tcp_conn_table per-state slot counts via
+ *            tcp_state_count_dump. See lib/tcp.S for the layout.
  *
- * Under PERF_COUNTERS undef, cmd 0/1 drop silently (no counter
- * struct to read). cmd 2 still works because genet_dump_state is
- * platform code, not instrumentation. We keep the whole handler
- * behind PERF_COUNTERS for now so default builds have zero
- * overhead on the 0x88B6 dispatch path.
+ * Build-flag gating per command:
+ *   cmd 0/1 — needs PERF_COUNTERS
+ *   cmd 2   — needs PLATFORM_PI4
+ *   cmd 3/4 — needs PERF_L3
+ *   cmd 5   — always available (pure inspection of tcp_conn_table)
+ * Commands the build does not support fall through the dispatch
+ * tree to .Lperf_drop and reply nothing.
  *
  * x0: frame buffer pointer (same buffer used for reply)
  * w1: frame length
  * Returns:
  *   w0 = 78 on successful reply built in-place (14 + 64)
- *   w0 = 0  on drop (PERF build disabled; frame too short;
- *           unknown command)
- * Clobbers: x0-x7, x30. Saves x30 because cmd 2 does a bl.
+ *   w0 = 0  on drop (frame too short; unsupported command in this
+ *           build flavour; cmd > PERF_CMD_DUMP_TCP)
+ * Clobbers: x0-x7, x30. Saves x30 because the dispatch may bl.
  */
 perf_handle:
-.ifdef PERF_COUNTERS
     stp     x29, x30, [sp, #-16]!   /* prologue: save link reg for bl */
     mov     x29, sp
 
@@ -72,23 +96,12 @@ perf_handle:
     cmp     w1, #15
     b.lt    .Lperf_drop
 
-    /* Read command byte at offset 14. Reject anything above the
-     * highest defined command for this build flavour.
-     *
-     * PERF_CMD_DUMP_REGS is Pi 4 only (register dump touches
-     * GENET hardware). PERF_CMD_DUMP_L3 / _L3_RESET are only
-     * available when PERF_L3 is set (perf_counters2 exists).
-     * The highest-cap test picks whichever is active. */
+    /* Read command byte at offset 14. Bound at the highest defined
+     * command (PERF_CMD_DUMP_TCP=5). Anything higher → drop.
+     * Commands the build does not support fall through the dispatch
+     * tree below to .Lperf_drop. */
     ldrb    w2, [x0, #14]
-.ifdef PERF_L3
-    cmp     w2, #PERF_CMD_DUMP_L3_RESET
-.else
-.ifdef PLATFORM_PI4
-    cmp     w2, #PERF_CMD_DUMP_REGS
-.else
-    cmp     w2, #PERF_CMD_DUMP_RESET
-.endif
-.endif
+    cmp     w2, #PERF_CMD_DUMP_TCP
     b.hi    .Lperf_drop
 
     /* ---- Build Ethernet header in place ---- */
@@ -114,7 +127,12 @@ perf_handle:
     rev16   w4, w4
     strh    w4, [x0, #12]
 
-    /* ---- Branch on cmd to fill the 64-byte payload ---- */
+    /* ---- Dispatch on cmd ---- */
+
+    /* Cmd 5 — TCP slot-state dump. Always compiled. */
+    cmp     w2, #PERF_CMD_DUMP_TCP
+    b.eq    .Lperf_tcp
+
 .ifdef PLATFORM_PI4
     cmp     w2, #PERF_CMD_DUMP_REGS
     b.eq    .Lperf_regs
@@ -126,6 +144,7 @@ perf_handle:
     b.eq    .Lperf_l3
 .endif
 
+.ifdef PERF_COUNTERS
     /* Cmd 0 or 1: copy perf_counters (64 bytes) to payload at
      * offset 14. Four 16-byte ldp/stp pairs. */
     ldr     x4, =perf_counters
@@ -151,6 +170,20 @@ perf_handle:
     stp     xzr, xzr, [x4, #32]
     stp     xzr, xzr, [x4, #48]
     b       .Lperf_ret
+.else
+    /* No PERF_COUNTERS — cmd 0/1 are unsupported in this build. */
+    b       .Lperf_drop
+.endif
+
+.Lperf_tcp:
+    /* tcp_state_count_dump takes x0 = destination buffer (64 bytes)
+     * and writes the per-state slot counts. Save frame base across
+     * the call so we can return reply length. */
+    stp     x0, xzr, [sp, #-16]!
+    add     x0, x0, #14
+    bl      tcp_state_count_dump
+    ldp     x0, xzr, [sp], #16
+    b       .Lperf_ret
 
 .ifdef PLATFORM_PI4
 .Lperf_regs:
@@ -165,12 +198,7 @@ perf_handle:
     add     x0, x0, #14
     bl      genet_dump_state
     ldp     x0, xzr, [sp], #16
-.ifdef PERF_L3
-    /* Needed only when the L3 block below actually exists —
-     * otherwise the original fall-through to .Lperf_ret is
-     * correct and this branch would be dead code. */
     b       .Lperf_ret
-.endif
 .endif
 
 .ifdef PERF_L3
@@ -236,12 +264,6 @@ perf_handle:
     mov     w0, #0
     ldp     x29, x30, [sp], #16
     ret
-
-.else
-    /* PERF not compiled — silently drop any 0x88B6 frames. */
-    mov     w0, #0
-    ret
-.endif
 
 
 .ifdef PERF_COUNTERS
