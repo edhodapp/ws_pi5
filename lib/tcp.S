@@ -1252,6 +1252,17 @@ tcp_handle:
     cmn     w0, #1
     b.eq    .Ltcp_no_conn
 
+    /* RST in LISTEN is silently dropped per RFC 793. The RFC 5961
+     * SEQ validation below is only meaningful for connected states
+     * with a real RCV_NXT; on a LISTEN slot RCV_NXT is 0 and the
+     * window check would treat any in-range SEQ as "in window" and
+     * emit a Challenge ACK — which RFC 793 forbids in LISTEN. */
+    cmp     w20, #TCPS_LISTEN
+    b.ne    .Ltcp_rst_seq_validate
+    cmp     w0, #TCP_EVT_RST
+    b.eq    .Ltcp_drop
+
+.Ltcp_rst_seq_validate:
     /* RST SEQ validation (RFC 5961) — only for connected states */
     cmp     w0, #TCP_EVT_RST
     b.ne    .Ltcp_fsa_lookup

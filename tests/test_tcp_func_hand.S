@@ -1632,10 +1632,21 @@ test_func_wscale_e2e:
     b       .Lfwe_find
 .Lfwe_found:
 
-    /* SND_WND should be 65535 << 4 = 1048560 (from SYN window, scaled)
-     * The handshake ACK's window is not applied by synrcvd_ack_handler. */
+    /* SND_WND should be 65535 (raw SYN window, unshifted).
+     *
+     * RFC 7323 §2.2: "The Window field in a SYN (i.e., a <SYN> or
+     * <SYN,ACK>) segment itself is never scaled."  So the SYN's
+     * window field is stored raw, and the handshake ACK's window is
+     * not applied by synrcvd_ack_handler — SND_WND remains at the
+     * SYN-time raw value until a non-SYN segment updates it after
+     * the ESTABLISHED transition.
+     *
+     * This matches the unit-test pair test_tcp_wscale_syn_window_
+     * unscaled (which pins the unshifted-on-SYN behavior) and
+     * test_tcp_wscale_window_apply (which pins the shifted-on-ACK
+     * behavior in ESTABLISHED). */
     ldr     w0, [x21, #TCONN_SND_WND]
-    ldr     w1, =1048560
+    mov     w1, #65535
     cmp     w0, w1
     b.ne    .Lfwe_fail
 

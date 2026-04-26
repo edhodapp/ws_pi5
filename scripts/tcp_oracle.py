@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# flake8: noqa: E501,E221
+# pylint: disable=line-too-long,too-many-locals,too-many-branches
+# pylint: disable=missing-function-docstring,inconsistent-quotes
+# pylint: disable=unused-argument,unused-variable,import-outside-toplevel
+# mypy: ignore-errors
 """
 TCP functional test oracle — generates binary test vectors for tcp_handle.
 
@@ -437,9 +442,17 @@ def oracle(conn_state, flags, port_match, payload, checksum, header):
         return (0, next_state, 0, 0, 0, PRE_RCV_NXT, 0, PRE_SND_UNA)
 
     if handler == 'finwait1_fin':
-        next_state = entry[0]
+        # FIN_WAIT_1 + FIN: peer closed too. The transition target
+        # depends on whether the same segment also ACKs our FIN
+        # (simultaneous close completes → TIME_WAIT) or only ACKs
+        # earlier data (→ CLOSING, still waiting for our FIN's ACK).
+        # Mirrors lib/tcp.S tcp_finwait1_fin_handler's D4 check.
         reply_seq = to_nbo_ldr(PRE_SND_NXT)
         reply_ack = to_nbo_ldr(PRE_RCV_NXT + 1)
+        if (tcp_flags & TCP_ACK_FLAG) and tcp_ack_host == PRE_SND_NXT:
+            next_state = TCPS_TIME_WAIT
+        else:
+            next_state = entry[0]  # CLOSING per FSA table
         return (54, next_state, TCP_ACK_FLAG, reply_seq, reply_ack,
                 PRE_RCV_NXT + 1, 0, PRE_SND_UNA)
 
