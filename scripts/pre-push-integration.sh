@@ -14,5 +14,10 @@
 #   ln -sf scripts/pre_push_tests.sh .git/hooks/pre-push
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When this script is invoked via the .git/hooks/pre-push symlink,
+# BASH_SOURCE[0] points at the symlink, not the real file. Resolve
+# the symlink so SCRIPT_DIR lands in scripts/ where pre_push_tests.sh
+# actually lives.
+REAL_SOURCE="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$REAL_SOURCE")" && pwd)"
 exec bash "$SCRIPT_DIR/pre_push_tests.sh" "$@"
