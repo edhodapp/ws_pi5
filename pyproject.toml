@@ -15,6 +15,7 @@ markers = [
     "l4: layer-4 (TCP) hardware integration test",
     "l5: layer-5 (HTTP/appliance) hardware integration test",
     "perf: perf-instrumented test; requires PERF=<flavor> kernel build",
+    "dispatch: net_recv_one dispatch-path perf test; requires PERF=dispatch",
     "dut_reset: requires a DTR-based DUT reset before the test runs",
     "requires_hardware: needs HW_TEST=1 + Pi reachable",
     "slow: takes multiple seconds of real wall-clock time",
