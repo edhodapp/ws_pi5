@@ -161,9 +161,24 @@ run_perf_phase() {
     : "${PERF_TOLERANCE:=0.50}"
     for i in $(seq 1 "$PERF_RUNS"); do
         echo "=== [$label] perf run $i/$PERF_RUNS (-m \"$marker_expr\") ==="
-        if ! HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" --tb=short -q -s 2>&1 | tee "$out"; then
+        # Pytest exit codes: 0 = pass, 1 = fail, 5 = no tests collected.
+        # We tolerate 5 here because some PERF flavors (e.g.
+        # perf-dispatch) have a build configuration but no associated
+        # test suite yet — "no tests" is not a failure, it's a no-op.
+        # Use a temp-file PIPESTATUS dance because `tee` clobbers $? .
+        set +e
+        HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" \
+            --tb=short -q -s 2>&1 | tee "$out"
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [ "$rc" -eq 5 ]; then
+            echo "  (no tests matched -m \"$marker_expr\" — phase is a build-only no-op, skipping)"
             rm -f "$out"
-            echo "FAIL: $label perf run $i tests failed"
+            return 0
+        fi
+        if [ "$rc" -ne 0 ]; then
+            rm -f "$out"
+            echo "FAIL: $label perf run $i tests failed (exit=$rc)"
             exit 1
         fi
         # Append this run's stats with its own header — perf_check
