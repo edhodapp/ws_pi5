@@ -9,20 +9,27 @@
  * of the time, so caching adds complexity for no benefit.
  *
  * Receives a kernel image in Intel HEX format over UART0 (GPIO 14/15)
- * with per-line checksums and ACK/NAK flow control, then jumps to 0x200000.
- * Uses CTS/RTS hardware flow control (GPIO 16/17).
+ * with per-line checksums and ACK/NAK flow control. Two-stage handoff:
+ * HEX records land at 0x200000 (firmware/DMA may still be touching the
+ * 0x80000 region while CPU is active — see attempts 11-18 in
+ * debug_log_0x80000.md), then once UART work is finished we memcpy the
+ * staged image down to 0x80000 and jump there. Same address SD-direct
+ * boot uses, so one kernel binary serves both paths.
  *
  * Protocol:
  *   1. Chainloader prints "READY\r\n" when initialized
- *   2. Host sends Intel HEX records (ASCII, \r\n terminated)
+ *   2. Host sends Intel HEX records (ASCII, \r\n terminated) targeting
+ *      addresses starting at 0x200000 (hw_send.py default base_addr)
  *   3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK (len + cksum^0xFF)
- *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x200000
+ *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", memcpy to 0x80000, jump to 0x80000
  *   5. Host resets Pi via DTR (GLOBAL_EN) when needed
  */
 
 /* Pi 4 UART0 (PL011) — firmware configures GPIO 14/15 via enable_uart=1 */
 .equ CL_UART_BASE,    0xFE201000
-.equ CL_KERNEL_ADDR,  0x200000    /* firmware VC agent owns 0x80000 */
+.equ CL_STAGING_ADDR, 0x200000    /* HEX records land here */
+.equ CL_KERNEL_ADDR,  0x80000     /* memcpy target + jump destination */
+.equ CL_KERNEL_SIZE,  0x800000    /* 8 MB — covers any realistic kernel */
 
 /* PL011 register offsets */
 .equ PL011_DR,         0x000
@@ -180,8 +187,38 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
-    /* Jump to kernel (loaded directly at 0x200000, no staging needed) */
-    mov     x0, #CL_KERNEL_ADDR
+    /* --- memcpy staged image from 0x200000 down to 0x80000 ---
+     * HEX records targeted 0x200000+ (CL_STAGING_ADDR) to avoid the
+     * firmware-DMA-active 0x80000 region while the UART transfer was
+     * in progress. Now that UART traffic is done, copy the kernel to
+     * 0x80000 — the address SD-direct firmware boot also lands the
+     * kernel at, so linker_hw.ld targets that single address.
+     *
+     * Copy CL_KERNEL_SIZE bytes (8 MB) regardless of actual kernel
+     * size. Anything past the end of the real image is BSS-resident
+     * zeros (NOLOAD section) and harmless to overwrite. */
+    ldr     x0, =CL_STAGING_ADDR           /* src */
+    ldr     x1, =CL_KERNEL_ADDR            /* dst */
+    ldr     x2, =CL_KERNEL_SIZE            /* bytes */
+.Lmemcpy_loop:
+    ldp     x3, x4, [x0], #16
+    stp     x3, x4, [x1], #16
+    subs    x2, x2, #16
+    b.ne    .Lmemcpy_loop
+
+    /* Cache + barrier hand-off: kernel will execute from 0x80000.
+     * The chainloader runs MMU-off so memcpy writes hit RAM directly,
+     * but the I-side cache may still hold stale lines from 0x80000
+     * region (firmware armstub or earlier execution). dsb sy fences
+     * the writes; ic iallu invalidates I-cache; isb flushes prefetch.
+     * Same sequence Linux/Circle use immediately before kernel jump. */
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+
+    /* Jump to kernel at 0x80000 — same address SD-direct boot uses. */
+    ldr     x0, =CL_KERNEL_ADDR
     br      x0
 
 /* =======================================================================
