@@ -2,9 +2,14 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* 0x200000 (2MB): firmware VC agent owns 0x80000, writing there kills UART.
-     * Used by: make PLATFORM=pi4 (chainloader loads kernel here). */
-    . = 0x200000;
+    /* 0x80000 — Pi 4 firmware default kernel load address.
+     * Per attempt 38 in debug_log_0x80000.md: SD-direct boot to 0x80000
+     * works once `overlays/disable-bt.dtbo` is on the SD card. Downstream
+     * issue (GENET init silent hang) is a separate problem under active
+     * debug. Chainloader path expects bytes at 0x80000 too — chainloader
+     * stages at 0x200000 then memcpy's to 0x80000 before jump (see
+     * chainload/boot.S). */
+    . = 0x80000;
 
     .text : {
         *(.text._start)
