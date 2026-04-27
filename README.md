@@ -7,6 +7,13 @@
 
 ## Installation
 
+> ⚠️ **INSTALLATION INSTRUCTIONS ARE A WORK IN PROGRESS — DO NOT USE.**
+> Network configuration (IP / netmask / gateway / hostname / mDNS / factory
+> MAC from Pi OTP) is being redesigned. The current path assumes a
+> hardcoded `10.0.0.0/24` subnet with the Pi at `.2` and a hardcoded
+> locally-administered MAC, neither of which will work on a typical home
+> network. Quick-Start will return once the config-file path lands.
+
 Two paths, pick the one that matches what you want to do.
 
 ### Deploy a site (no compiler needed)
@@ -37,6 +44,12 @@ git pull   # sanity check — if you cloned weeks ago, the build scripts
            # an old clone catches up. Either way takes seconds.
 wget -O kernel8.img https://github.com/edhodapp/ws_pi5/releases/latest/download/kernel8.img
 ```
+
+The prebuilt is one-size-fits-all with the full 256 MiB content slab
+reserved (~268 MB total), so the resulting SD image will be ~265 MiB.
+For a smaller SD, jump to [Build from source](#build-from-source-developer-setup)
+below and use `scripts/mk_sd.sh --build` — that auto-sizes the slab
+to your site (typically a few MiB).
 
 Skip to [Deploy Your Site](#deploy-your-site) below.
 
@@ -139,9 +152,14 @@ If you'd rather drive the steps manually:
 SITE_BYTES=$(du -sb public/ | cut -f1)
 # round up, add ~25 % slack for HTTP header overhead
 CONTENT_MAX=$(( (SITE_BYTES * 5 / 4 + 1048575) / 1048576 * 1048576 ))
-make clean && make PLATFORM=pi4 CONTENT_MAX=$CONTENT_MAX
+make clean && make PLATFORM=pi4 SHIP=1 CONTENT_MAX=$CONTENT_MAX
 scripts/mk_appliance.py --content-max $CONTENT_MAX kernel8.img public/ out.img
 ```
+
+`SHIP=1` links the kernel at 0x80000 (the firmware default kernel
+load address) so SD-direct boot lands the kernel exactly where the
+linker expects it. Without `SHIP=1` the kernel links at 0x200000,
+which only works via the UART chainloader (dev-time path).
 
 The `CONTENT_MAX` value must match on both sides. An `HDR_KSIZE` field
 is baked into the kernel's placeholder slab at compile time; the
@@ -317,8 +335,13 @@ From source:
 
 ```
 sudo apt install binutils-aarch64-linux-gnu   # Debian/Ubuntu; use brew on macOS
-make PLATFORM=pi4
+make PLATFORM=pi4 SHIP=1
 ```
+
+`SHIP=1` is required for SD-direct boot — it links the kernel at
+the firmware default address (0x80000). Omit it only if you'll be
+flashing via the UART chainloader (dev-time workflow), in which
+case the kernel needs to be at 0x200000 to match the chainloader.
 
 ### 2. Package your site into the kernel
 
@@ -404,6 +427,7 @@ Assemble a Pi 4 SD-boot bundle (for shipping a packaged appliance
 without a UART host):
 
 ```
+make PLATFORM=pi4 SHIP=1                                 # kernel linked at 0x80000
 scripts/mk_appliance.py kernel8.img public/ appliance.img
 scripts/mk_sd.sh appliance.img sd_boot/
 # Then: cp -r sd_boot/* /media/<user>/boot/
@@ -439,7 +463,14 @@ The chainloader protocol:
 2. Chainloader prints `READY\r\n` when initialized
 3. Host sends Intel HEX records with `\r\n` terminators
 4. Chainloader verifies each record's checksum, sends 2-byte ACK (line length + checksum) or NAK (line length + checksum XOR 0xFF)
-5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), `memcpy` the staged image from 0x200000 down to 0x80000, then jump to 0x80000 — the same address SD-direct firmware boot uses, so one kernel binary serves both paths
+5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), jump to kernel at 0x200000
+
+The chainloader's kernel address (0x200000) and the SD-direct ship
+path's kernel address (0x80000) are deliberately different — see the
+`SHIP=1` discussion above. `make PLATFORM=pi4` (no flag) builds for
+the chainloader; `make PLATFORM=pi4 SHIP=1` builds for SD-direct.
+Two builds, two binaries, no overlap. Inner-loop dev stays fast and
+unchanged from yesterday.
 
 The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
 
@@ -621,7 +652,7 @@ make fuzz-corpus-seq
 ### Raspberry Pi 4 (BCM2711)
 
 - **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
-- **Kernel load:** `0x200000` (2 MB) — see [firmware 0x80000 conflict](#firmware-0x80000-conflict) below
+- **Kernel load:** dev-time chainloader path → `0x200000` (default `make PLATFORM=pi4`); SD-direct ship path → `0x80000` (`make PLATFORM=pi4 SHIP=1`). See [firmware 0x80000 conflict](#firmware-0x80000-conflict) for the original chainloader-side finding and [debug_log_0x80000.md](debug_log_0x80000.md) for the 2026-04-26 SD-direct verification.
 - **Boot:** EL2 → EL1 drop, MMU setup (4 GB identity map, Normal + Device), caches enabled
 - **Ethernet:** GENET v5 Gigabit MAC (native, under development). USB CDC-ECM fallback via DWC2.
 - **UART:** PL011 UART0 on GPIO 14/15 — serial debug and chainloader
@@ -724,19 +755,38 @@ The chainloader is complete and reliable. Development loop: build → DTR reset 
 | **DTR reset** | Done | CP2102N DTR → GLOBAL_EN for deterministic Pi reset from host |
 | **Host tool** | Done | `hw_send.py` — raw termios, no pyserial dependency |
 
-### Firmware 0x80000 Conflict
+### Firmware 0x80000 Conflict (chainloader-only)
 
-The Pi 4 GPU firmware (start4.elf) retains an active agent that references memory at 0x80000 — the default AArch64 kernel load address — after handing control to the ARM cores. Writing to this region during UART operation causes phantom data in the PL011 RX FIFO; writing 27+ KB kills the UART entirely (the VC-managed UART clock stops).
+The Pi 4 GPU firmware (start4.elf) retains an active agent that
+references memory at 0x80000 *during the chainloader's UART transfer
+phase*. ARM-side writes to that region while the chainloader is
+running (HEX records being received) corrupt the PL011 RX FIFO;
+sustained writes kill the UART entirely (the VC-managed UART clock
+stops). This was discovered empirically in 2026-04 and not
+documented anywhere in BCM2711 docs.
 
-**Findings from hardware debugging:**
+**Solution for the chainloader path:** the chainloader (`chainload/boot.S`)
+writes directly to 0x200000 and jumps to 0x200000. The dev-time
+kernel build (`make PLATFORM=pi4`, no flag) links at 0x200000 to
+match. The firmware's 0x80000 region is never touched while UART
+work is in flight.
+
+**SD-direct ship path is different.** The conflict is between
+*chainloader writes* and the firmware's 0x80000 agent — *not* with
+the firmware loading a kernel there itself. The firmware's own load
+of `kernel8.img` at the default 0x80000 works correctly (the agent
+isn't active during firmware-side load; the CPU is held off until
+hand-off). So `make PLATFORM=pi4 SHIP=1` links at 0x80000 to match
+the firmware default, and the SD-direct boot bundle from
+`scripts/mk_sd.sh` deploys with no `kernel_address=` override
+needed. End-to-end verification at 2026-04-26 in
+[debug_log_0x80000.md](debug_log_0x80000.md) attempts 38–40.
+
+**Findings from the chainloader-side hardware debugging:**
 - SCTLR_EL1 = 0x00C50838 and SCTLR_EL2 = 0x30C50830 at boot — MMU and caches are OFF at both exception levels. This is not a cache coherency issue.
 - Resetting ARM-side DMA channels 0-10 partially mitigates the problem (shifts the failure point) but does not eliminate it. The agent appears to be on the VideoCore side, inaccessible from ARM.
 - Writing identical data to 0x200000 instead of 0x80000 works perfectly. The trigger is the address, not the data or the write pattern.
-- A 27 KB write to 0x80000 makes the PL011 completely unresponsive — even brute-force writes to DR produce no output. The UART clock (managed by the VC) appears to stop.
-
-**Solution:** Link the kernel at 0x200000 instead of 0x80000. The chainloader writes directly to 0x200000 (no staging or memcpy needed). The firmware's 0x80000 region is never touched.
-
-This is not documented in the BCM2711 datasheet or Raspberry Pi firmware documentation. It was found empirically through binary search of the failure mode.
+- A 27 KB write to 0x80000 (during chainloader UART transfer) makes the PL011 completely unresponsive — even brute-force writes to DR produce no output. The UART clock (managed by the VC) appears to stop.
 
 ### GENET Gigabit Ethernet
 
