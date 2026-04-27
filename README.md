@@ -32,12 +32,20 @@ Then clone the repo and grab a prebuilt kernel from the
 ```
 git clone https://github.com/edhodapp/ws_pi5.git
 cd ws_pi5
+git pull   # sanity check — if you cloned weeks ago, the build scripts
+           # may have moved underneath you. A fresh clone is a no-op;
+           # an old clone catches up. Either way takes seconds.
 wget -O kernel8.img https://github.com/edhodapp/ws_pi5/releases/latest/download/kernel8.img
 ```
 
 Skip to [Deploy Your Site](#deploy-your-site) below.
 
 ### Build from source (developer setup)
+
+If your clone is older than a couple of days, `git pull` first — the
+build scripts (Makefile knobs, mk_sd.sh, linker_hw.ld) and the
+ship-vs-dev address split moved several times this week. A stale
+clone produces SD images that quietly don't boot.
 
 Adds the AArch64 cross-assembler + QEMU for running the QEMU test
 suite, plus `pict` for the functional-test oracle.
