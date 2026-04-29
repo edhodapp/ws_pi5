@@ -268,7 +268,20 @@ def verify_kernel_ksize(image: bytes, slab_off: int) -> None:
 def package(
     kernel_path: Path, public_dir: Path, output_path: Path,
 ) -> int:
-    """Produce a packaged appliance image. Returns 0 on success."""
+    """Produce a packaged appliance image. Returns 0 on success.
+
+    The slab is reserved at compile time at its full APPLIANCE_CONTENT_MAX
+    capacity (256 MiB by default), but only `clen` bytes of that hold
+    real content after packaging. The unused tail is zeros, plus a small
+    guard region. Both are unreferenced at runtime — the kernel only
+    reads up to clen bytes of content, and the guard exists only to
+    absorb hypothetical overruns. So we TRUNCATE the output image after
+    the actual content; firmware loads only what's there, and the
+    resulting kernel.img is sized to the site rather than the
+    compile-time cap. A 256 MiB-cap kernel with a 2.6 MiB site goes
+    from 268 MB on disk to ~6 MB. RAM layout is unchanged: BSS is NOLOAD,
+    its PA range is fixed by the linker and not affected by file size.
+    """
     image = kernel_path.read_bytes()
     slab_off = find_slab_offset(image)
     verify_kernel_ksize(image, slab_off)
@@ -283,9 +296,19 @@ def package(
 
     new_image = bytearray(image)
     new_image[slab_off:slab_off + APPLIANCE_SLAB_SIZE] = slab
-    output_path.write_bytes(bytes(new_image))
+
+    # Truncate after the last used content byte. clen lives in the
+    # slab header at HDR_CLEN; we just wrote it via build_slab.
+    clen = struct.unpack_from("<I", slab, HDR_CLEN)[0]
+    truncate_at = slab_off + APPLIANCE_CONTENT_OFF + clen
+    output_path.write_bytes(bytes(new_image[:truncate_at]))
 
     print(f"  packaged {len(routes)} route(s) → {output_path}")
+    print(
+        f"  image size: {len(image):,} B in → "
+        f"{truncate_at:,} B out "
+        f"(saved {len(image) - truncate_at:,} B of unused slab tail)"
+    )
     for route in routes:
         print(f"    {route.path}  ({len(route.body)} B, {route.mime})")
     return 0

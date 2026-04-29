@@ -205,7 +205,14 @@ def test_collect_routes_basic(tmp_path: Path) -> None:
 
 
 def test_package_end_to_end(tmp_path: Path) -> None:
-    """Stub a kernel image with the marker, package, verify slab lands."""
+    """Stub a kernel image with the marker, package, verify slab lands.
+
+    package() truncates the output after the last used content byte
+    (firmware only loads what's there; the unused slab tail is dead
+    weight on disk). So pre-slab bytes survive but post-slab filler
+    does NOT — leaving `post` in the input image is the test for
+    "truncation actually happened."
+    """
     kernel_path = tmp_path / "kernel.img"
     # Pre-marker filler, marker-padded slab region, post-marker filler.
     pre = b"\xAA" * 128
@@ -221,11 +228,16 @@ def test_package_end_to_end(tmp_path: Path) -> None:
     assert rc == 0
 
     out_bytes = output.read_bytes()
-    # The packaged image must preserve the pre- and post-slab bytes.
+    # Pre-slab bytes survive verbatim.
     assert out_bytes[:128] == pre
-    assert out_bytes[128 + M.APPLIANCE_SLAB_SIZE:] == post
-    # Slab region must now start with WSPIAPLI, not WSPINONE.
-    slab_out = out_bytes[128:128 + M.APPLIANCE_SLAB_SIZE]
+    # Post-slab filler must NOT survive — and the output as a whole
+    # must be shorter than the full pre+slab+post input, proving
+    # truncation occurred. With a 256 MiB slab cap and only ~25 KiB
+    # of real routes, the output should be vastly smaller than
+    # 128 + APPLIANCE_SLAB_SIZE + 128.
+    assert len(out_bytes) < 128 + M.APPLIANCE_SLAB_SIZE
+    # Slab region runs from offset 128 to end of file (truncated).
+    slab_out = out_bytes[128:]
     assert slab_out[:8] == M.MAGIC_V1
     # rcount should be 2 (/index.html + /)
     rcount = struct.unpack_from("<I", slab_out, M.HDR_RCOUNT)[0]
