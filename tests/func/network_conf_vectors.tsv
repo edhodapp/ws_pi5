@@ -46,4 +46,7 @@ p_mac_uppercase	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngatewa
 f_ip_leading_zero	FAIL	E_IP	# WSPI5CFG\nip=010.0.0.1\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 f_hostname_hash_midtoken	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=my#name
 f_only_magic	FAIL	E_REQ	# WSPI5CFG
+f_hostname_ends_hyphen	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=foo-
+f_ip_unicode_digit	FAIL	E_IP	# WSPI5CFG\nip=١0.0.0.1\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_magic_with_trailing_comment	PASS	NONE	# WSPI5CFG # version 1.0\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 

@@ -67,7 +67,13 @@ class LintResult(BaseModel):
 # --- Per-value validators ---------------------------------------------------
 
 def _is_valid_octet(p: str) -> bool:
-    if not p or not p.isdigit():
+    if not p:
+        return False
+    # `isascii() and isdigit()` rejects non-ASCII Unicode digits like
+    # '١' that `isdigit()` alone accepts. The bare-metal asm
+    # parser will only handle ASCII '0'-'9'; a divergence here would
+    # break the linter-is-the-executable-spec contract.
+    if not (p.isascii() and p.isdigit()):
         return False
     # Reject leading-zero octets like "010" — different IP stacks
     # interpret them inconsistently (some as octal, e.g. CVE-2021-29921
@@ -91,7 +97,9 @@ def _validate_ip(s: str) -> bool:
 def _validate_hostname(s: str) -> bool:
     if not s or len(s) > HOSTNAME_MAX_LEN:
         return False
-    if s[0] not in _LDH_FIRST:
+    # RFC 1123 requires hostname labels to start AND end with a
+    # letter or digit; only the interior may contain hyphens.
+    if s[0] not in _LDH_FIRST or s[-1] not in _LDH_FIRST:
         return False
     return all(c in _LDH for c in s)
 
@@ -149,18 +157,31 @@ def _strip_inline_comment(s: str) -> str:
     return s
 
 
+def _strip_magic_trailing_comment(s: str) -> str:
+    # Magic line's own leading '#' is part of the magic itself, not
+    # a comment marker. So we scan starting at index 1 for a SECOND
+    # '#' preceded by whitespace and treat that as the inline-comment
+    # boundary. This keeps `# WSPI5CFG # version 1.0` valid for
+    # consistency with how KV lines treat inline comments.
+    for i in range(1, len(s)):
+        if s[i] == "#" and s[i - 1].isspace():
+            return s[:i]
+    return s
+
+
 def _check_magic(lines: list[str]) -> tuple[int, LintError | None]:
     """Return (1-indexed magic line, None) on success;
     (0, LintError) on failure (line=0 means "no magic anywhere")."""
     for i, raw in enumerate(lines, start=1):
-        if not raw.strip():
+        stripped = _strip_magic_trailing_comment(raw).strip()
+        if not stripped:
             continue
-        if raw.strip() == MAGIC:
+        if stripped == MAGIC:
             return i, None
         return 0, LintError(
             line=i, code="E_MAGIC",
             message=(f"first non-empty line must be {MAGIC!r}; "
-                     f"got {raw.strip()!r}"),
+                     f"got {stripped!r}"),
         )
     return 0, LintError(
         line=0, code="E_MAGIC",
