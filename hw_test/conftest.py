@@ -425,7 +425,11 @@ def wire_capture(request, eth_iface):
     failure-forensics: on failure the pcap is moved to artifacts/
     with a unique name; on success it's deleted.
     """
-    cap = wire.WireCapture(eth_iface, bpf="")
+    # auto_cleanup=False so cap.pcap_path is still readable after
+    # __exit__ — the failure-forensics copy below needs to read it
+    # AFTER pytest's pytest_runtest_makereport hook has populated
+    # request.node.rep_call, which fires after the test body.
+    cap = wire.WireCapture(eth_iface, bpf="", auto_cleanup=False)
     cap.__enter__()
     try:
         yield cap
@@ -450,11 +454,9 @@ def wire_capture(request, eth_iface):
                 print(f"\n[wire] saved failure pcap → {dst}")
             except OSError as e:
                 print(f"\n[wire] failed to save pcap: {e}")
-        # Always clean up the scratch pcap
-        try:
-            cap.pcap_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # cap.cleanup() removes the whole ephemeral tmpdir, which
+        # subsumes the prior `pcap_path.unlink` call.
+        cap.cleanup()
 
 
 # pytest hook to expose call-phase outcome to fixtures (so the wire

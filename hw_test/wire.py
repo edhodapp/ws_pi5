@@ -824,12 +824,22 @@ class WireCapture:
         snaplen: int = 0,
         keep_artifact_dir: Optional[Path] = None,
         verify_ready: bool = True,
+        auto_cleanup: bool = True,
     ):
+        # auto_cleanup=False is for callers that need to read pcap_path
+        # AFTER the with-block exits (e.g. the conftest wire_capture
+        # fixture, which copies the pcap to artifacts/ on test failure
+        # using rep.failed which is only populated after __exit__).
+        # Those callers must invoke cap.cleanup() explicitly when done.
+        # __enter__'s except branch always cleans up regardless of the
+        # flag — there's no consumer to read the pcap when the
+        # with-block never started.
         self.iface = iface
         self.bpf = bpf
         self.ready_timeout_ms = ready_timeout_ms
         self.snaplen = snaplen
         self.verify_ready = verify_ready
+        self._auto_cleanup = auto_cleanup
 
         if keep_artifact_dir is not None:
             keep_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -838,7 +848,17 @@ class WireCapture:
                 prefix="wirecap-", suffix=".pcap", dir=str(keep_artifact_dir)
             )
         else:
-            self._tmpdir = tempfile.mkdtemp(prefix="wirecap-")
+            # Ephemeral pcap goes on tmpfs (/dev/shm) when available so
+            # readiness probes don't compete with disk I/O from
+            # concurrent processes (e.g. `make clean && make` between
+            # phases of the nightly perf cron). Disk-bound pcap writes
+            # were measured pushing readiness latency to ~1.2 s under
+            # heavy disk contention vs ~70 ms idle, occasionally tipping
+            # past the 1500 ms timeout. Falls back to the default
+            # tempdir on hosts without /dev/shm; those hosts are
+            # presumed not to be running the cron's disk-thrash pattern.
+            tmpfs_dir = "/dev/shm" if Path("/dev/shm").is_dir() else None
+            self._tmpdir = tempfile.mkdtemp(prefix="wirecap-", dir=tmpfs_dir)
             fd, path = tempfile.mkstemp(
                 prefix="cap-", suffix=".pcap", dir=self._tmpdir
             )
@@ -884,8 +904,10 @@ class WireCapture:
             if self.verify_ready:
                 self._wait_until_ready()
         except Exception:
-            # Don't leak tcpdump if readiness check fails
+            # Don't leak tcpdump or the tmpdir if readiness fails —
+            # __exit__ won't run because the with-block never started.
             self._kill_proc()
+            self._cleanup_tmpdir()
             raise
         return self
 
@@ -930,6 +952,14 @@ class WireCapture:
         the Pi never emits and which we OR into the BPF filter so the
         probe is captured even if the user's filter would otherwise
         reject it.
+
+        On timeout, the WireError carries diagnostic context describing
+        which stage of the readiness pipeline failed (tcpdump never
+        wrote, probe never appeared in pcap, repeated send errors,
+        repeated reader errors). This lets the next failure tell us
+        *what* went wrong, not just *that* it timed out — without it,
+        a 1500 ms timeout collapses four very different failure modes
+        into one indistinguishable error message.
         """
         # Importing scapy.layers.l2 registers DLT_EN10MB so PcapReader
         # doesn't emit "unknown LL type [1]" warnings.
@@ -945,11 +975,19 @@ class WireCapture:
 
         probe = self._build_probe_frame(laptop_mac)
 
-        deadline = time.monotonic() + self.ready_timeout_ms / 1000.0
-        last_err: Optional[Exception] = None
+        # --- diagnostic accounting (only used on the timeout path) ---
+        t_start = time.monotonic()
+        polls = 0
+        first_pcap_growth_ms: Optional[int] = None
+        pcap_size_at_end = 0
+        send_errors: dict[str, int] = {}
+        reader_errors: dict[str, int] = {}
+
+        deadline = t_start + self.ready_timeout_ms / 1000.0
         # Send a probe immediately, then keep re-sending while polling.
         # Re-sending ensures we don't lose to a single-packet drop.
         while time.monotonic() < deadline:
+            polls += 1
             # Has tcpdump exited?
             rc = self._proc.poll() if self._proc else None
             if rc is not None:
@@ -962,11 +1000,17 @@ class WireCapture:
             try:
                 send_frame(self.iface, probe)
             except WireError as e:
-                last_err = e
+                key = f"{type(e).__name__}: {e}"
+                send_errors[key] = send_errors.get(key, 0) + 1
                 # try again next loop
             # Try to peek at the pcap and look for the probe ethertype
             try:
-                if self._pcap_path.stat().st_size > 24:  # > pcap header
+                pcap_size_at_end = self._pcap_path.stat().st_size
+                if pcap_size_at_end > 24:  # > pcap header
+                    if first_pcap_growth_ms is None:
+                        first_pcap_growth_ms = int(
+                            (time.monotonic() - t_start) * 1000
+                        )
                     with PcapReader(str(self._pcap_path)) as rd:
                         for pkt in rd:
                             data = bytes(pkt)
@@ -975,14 +1019,32 @@ class WireCapture:
                                 READY_PROBE_ETHERTYPE & 0xFF,
                             ]):
                                 return
-            except Exception:  # noqa: BLE001 - reader can raise during writes
-                pass
+            except Exception as e:  # noqa: BLE001 - reader can raise during writes
+                key = f"{type(e).__name__}: {e}"
+                reader_errors[key] = reader_errors.get(key, 0) + 1
             time.sleep(READY_PROBE_POLL_INTERVAL_S)
 
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        tcpdump_pid = self._proc.pid if self._proc else None
+        diag_lines = [
+            f"polls={polls} elapsed={elapsed_ms}ms tcpdump_pid={tcpdump_pid}",
+            f"pcap_first_grow_ms={first_pcap_growth_ms}"
+            f" pcap_final_size={pcap_size_at_end}B",
+        ]
+        if send_errors:
+            top = sorted(send_errors.items(), key=lambda kv: -kv[1])[:3]
+            diag_lines.append(
+                "send_errors: " + "; ".join(f"{c}× {msg}" for msg, c in top)
+            )
+        if reader_errors:
+            top = sorted(reader_errors.items(), key=lambda kv: -kv[1])[:3]
+            diag_lines.append(
+                "reader_errors: " + "; ".join(f"{c}× {msg}" for msg, c in top)
+            )
         raise WireError(
             f"tcpdump on {self.iface} did not become ready within "
-            f"{self.ready_timeout_ms} ms"
-            + (f" (last send err: {last_err})" if last_err else "")
+            f"{self.ready_timeout_ms} ms\n  diag: "
+            + "\n  diag: ".join(diag_lines)
         )
 
     @staticmethod
@@ -1002,38 +1064,60 @@ class WireCapture:
     # --- exit / drain / parse ---
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._exited = True
-        if self._proc is None:
-            return
-        # tcpdump only flushes the pcap on SIGINT (not SIGTERM).
+        # Outer try/finally guarantees that, when auto_cleanup is on,
+        # the ephemeral tmpdir is cleaned up on every exit path:
+        # early-out (no _proc), SIGINT-flush timeout, parse failure,
+        # success. When auto_cleanup is off the consumer is responsible
+        # for calling cap.cleanup() once they are done reading
+        # pcap_path. keep_artifact_dir runs leave self._tmpdir == None
+        # so _cleanup_tmpdir is a no-op for them either way.
         try:
-            self._proc.send_signal(signal.SIGINT)
-        except ProcessLookupError:
-            pass
-
-        try:
-            self._proc.wait(timeout=SIGINT_FLUSH_DEADLINE_S)
-        except subprocess.TimeoutExpired:
-            self._kill_proc()
-            raise WireError(
-                f"tcpdump did not exit within {SIGINT_FLUSH_DEADLINE_S}s "
-                f"of SIGINT — pcap may be truncated"
-            )
-
-        # Drain stderr so the pipe doesn't keep the process attached
-        if self._proc.stderr:
+            self._exited = True
+            if self._proc is None:
+                return
+            # tcpdump only flushes the pcap on SIGINT (not SIGTERM).
             try:
-                _ = self._proc.stderr.read()
-            except Exception:  # noqa: BLE001
+                self._proc.send_signal(signal.SIGINT)
+            except ProcessLookupError:
                 pass
 
-        # Parse pcap into raw frame bytes (filter out our own probes).
-        try:
-            self._frames_bytes = self._read_pcap_filtering_probes()
-        except FileNotFoundError:
-            self._frames_bytes = []
-        except Exception as e:  # noqa: BLE001
-            raise WireError(f"failed to parse pcap {self._pcap_path}: {e}") from e
+            try:
+                self._proc.wait(timeout=SIGINT_FLUSH_DEADLINE_S)
+            except subprocess.TimeoutExpired:
+                self._kill_proc()
+                raise WireError(
+                    f"tcpdump did not exit within {SIGINT_FLUSH_DEADLINE_S}s "
+                    f"of SIGINT — pcap may be truncated"
+                )
+
+            # Drain stderr so the pipe doesn't keep the process attached
+            if self._proc.stderr:
+                try:
+                    _ = self._proc.stderr.read()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # Parse pcap into raw frame bytes (filter out our own probes).
+            try:
+                self._frames_bytes = self._read_pcap_filtering_probes()
+            except FileNotFoundError:
+                self._frames_bytes = []
+            except Exception as e:  # noqa: BLE001
+                raise WireError(
+                    f"failed to parse pcap {self._pcap_path}: {e}"
+                ) from e
+        finally:
+            if self._auto_cleanup:
+                self._cleanup_tmpdir()
+
+    def cleanup(self) -> None:
+        """Remove the ephemeral tmpdir explicitly.
+
+        Required for callers that constructed WireCapture with
+        ``auto_cleanup=False`` and need to read ``pcap_path`` after
+        ``__exit__``. Idempotent — second call is a no-op.
+        """
+        self._cleanup_tmpdir()
 
     def _read_pcap_filtering_probes(self) -> list[bytes]:
         import scapy.layers.l2  # noqa: F401  # register DLT_EN10MB
@@ -1060,6 +1144,14 @@ class WireCapture:
                 self._proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 pass
+
+    def _cleanup_tmpdir(self) -> None:
+        # No-op for keep_artifact_dir runs (self._tmpdir is None).
+        # ignore_errors=True so a half-removed tree or permission glitch
+        # never masks the real test exception.
+        if self._tmpdir is not None:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
 
 
 # --- High-level convenience: capture-and-wait ---
