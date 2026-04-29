@@ -10,4 +10,7 @@ __pycache__/
 .coverage
 .pytest_cache/
 .mutmut-cache
-.claude/
+.claude/*
+# Whitelist committed safe-defaults; everything else (settings.local.json,
+# agents/, hooks/, etc.) stays ignored as before.
+!.claude/settings.json
