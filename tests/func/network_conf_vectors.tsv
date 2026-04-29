@@ -1,0 +1,49 @@
+name	expected	code	input
+p_minimal	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_with_ntp	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nntp_server=10.0.0.10
+p_with_mac	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=de:ad:be:ef:ca:fe
+p_with_all_optional	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nntp_server=10.0.0.10\nmac=de:ad:be:ef:ca:fe
+p_with_comments	PASS	NONE	# WSPI5CFG\n# This is a comment\nip=10.0.0.2\n# Another comment\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_with_blanks	PASS	NONE	# WSPI5CFG\n\nip=10.0.0.2\n\nnetmask=255.255.255.0\n\ngateway=10.0.0.1\nhostname=wspi5
+p_inline_comment	PASS	NONE	# WSPI5CFG\nip=10.0.0.2 # the static IP\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_trailing_whitespace	PASS	NONE	# WSPI5CFG  \nip = 10.0.0.2  \nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_hostname_single	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=a
+p_hostname_max_len	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=a234567890123456789012345678901234567890123456789012345678901xy
+p_hostname_with_digits	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=pi4-1
+p_hostname_uppercase	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=WsPi5
+p_zero_octets_ok	PASS	NONE	# WSPI5CFG\nip=0.0.0.0\nnetmask=255.255.255.0\ngateway=0.0.0.0\nhostname=wspi5
+p_max_octets_ok	PASS	NONE	# WSPI5CFG\nip=255.255.255.255\nnetmask=255.255.255.0\ngateway=255.255.255.255\nhostname=wspi5
+f_no_magic	FAIL	E_MAGIC	ip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_wrong_magic	FAIL	E_MAGIC	# WSPICFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_magic_not_first	FAIL	E_MAGIC	ip=10.0.0.2\n# WSPI5CFG\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_missing_ip	FAIL	E_REQ	# WSPI5CFG\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_missing_netmask	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\ngateway=10.0.0.1\nhostname=wspi5
+f_missing_gateway	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\nhostname=wspi5
+f_missing_hostname	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1
+f_unknown_key	FAIL	E_KEY	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nfoo=bar
+f_duplicate_ip	FAIL	E_DUP	# WSPI5CFG\nip=10.0.0.2\nip=10.0.0.3\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_ip_three_octets	FAIL	E_IP	# WSPI5CFG\nip=10.0.0\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_ip_five_octets	FAIL	E_IP	# WSPI5CFG\nip=10.0.0.2.3\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_ip_octet_overflow	FAIL	E_IP	# WSPI5CFG\nip=256.0.0.0\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_ip_negative	FAIL	E_IP	# WSPI5CFG\nip=-1.0.0.0\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_ip_letters	FAIL	E_IP	# WSPI5CFG\nip=abc.def.ghi.jkl\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_netmask_malformed	FAIL	E_IP	# WSPI5CFG\nip=10.0.0.2\nnetmask=24\ngateway=10.0.0.1\nhostname=wspi5
+f_gateway_malformed	FAIL	E_IP	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=not-an-ip\nhostname=wspi5
+f_hostname_starts_hyphen	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=-foo
+f_hostname_underscore	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=ws_pi5
+f_hostname_too_long	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=a2345678901234567890123456789012345678901234567890123456789012345
+f_hostname_empty	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=
+f_hostname_dot	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=foo.local
+f_hostname_space	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=my host
+f_mac_too_short	FAIL	E_MAC	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=de:ad:be:ef:ca
+f_mac_bad_hex	FAIL	E_MAC	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=zz:ad:be:ef:ca:fe
+f_mac_wrong_sep	FAIL	E_MAC	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=de-ad-be-ef-ca-fe
+f_mac_three_digit	FAIL	E_MAC	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=ded:ad:be:ef:ca:fe
+f_line_no_equals	FAIL	E_LINE	# WSPI5CFG\nip 10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_empty_value	FAIL	E_IP	# WSPI5CFG\nip=\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_crlf_line_endings	PASS	NONE	# WSPI5CFG\r\nip=10.0.0.2\r\nnetmask=255.255.255.0\r\ngateway=10.0.0.1\r\nhostname=wspi5
+p_mac_uppercase	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=DE:AD:BE:EF:CA:FE
+f_ip_leading_zero	FAIL	E_IP	# WSPI5CFG\nip=010.0.0.1\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+f_hostname_hash_midtoken	FAIL	E_HOST	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=my#name
+f_only_magic	FAIL	E_REQ	# WSPI5CFG
+
