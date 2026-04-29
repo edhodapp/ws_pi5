@@ -9,12 +9,17 @@
 # Behaviour:
 #   * Polls the 1-minute load average every POLL_SECS seconds.
 #   * As soon as load is below LOAD_THRESHOLD, fires the strict perf
-#     cycle (best-of-3, 50% tolerance) — same defaults as the bare
-#     `hw_tests.sh perf` invocation.
+#     cycle (best-of-3, 50% tolerance) with --continue-on-fail — every
+#     phase runs, every per-phase run records its telemetry, and the
+#     wrapper exits non-zero at the end if anything failed. This is
+#     intentionally different from the interactive `hw_tests.sh perf`
+#     default (which still bails on first failure for fast feedback).
+#     The cron wants regression-trend data; bailing early loses runs
+#     2/3 of one phase and the entire next phase.
 #   * Gives up at the local-time deadline (default 08:00 today).
 #   * Exits 0 on either "ran perf cleanly" OR "deadline hit, no run
-#     today" — both are normal outcomes; only a real perf regression
-#     or a build failure should non-zero exit.
+#     today". Non-zero exit means at least one phase or run failed —
+#     check perf_runs.log and the cron log for which.
 #
 # Trigger uses local time (matches sleep schedule).
 # Log timestamps inside perf_runs.log stay UTC (matches the rest of
@@ -46,12 +51,14 @@ while [ "$(date +%s)" -lt "$DEADLINE_TS" ]; do
     if awk -v l="$load" -v t="$LOAD_THRESHOLD" 'BEGIN{exit !(l < t)}'; then
         echo "[$(date -Iseconds)] perf_nightly: load=$load < $LOAD_THRESHOLD — running strict perf cycle"
         # Inherits PERF_RUNS=3 / PERF_TOLERANCE=0.50 defaults from hw_tests.sh.
-        if bash "$SCRIPT_DIR/hw_tests.sh" perf; then
+        # --continue-on-fail keeps every phase running even if one fails so
+        # the trend log gets a full night's data.
+        if bash "$SCRIPT_DIR/hw_tests.sh" --continue-on-fail perf; then
             echo "[$(date -Iseconds)] perf_nightly: PASS"
             exit 0
         else
             rc=$?
-            echo "[$(date -Iseconds)] perf_nightly: FAIL (exit=$rc) — perf regression or build failure; investigate"
+            echo "[$(date -Iseconds)] perf_nightly: FAIL (exit=$rc) — one or more phases/runs failed; check perf_runs.log"
             exit "$rc"
         fi
     fi
