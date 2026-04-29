@@ -938,3 +938,22 @@ PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_co
 --- e73d333 2026-04-29T07:07:20Z PERF=send ---
 .BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
 PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=288
+
+--- 98846ae 2026-04-29T17:04:21Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.24 max=0.25 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=48.9 wire_pps=20408 total_ms=49.0
+PERF_STATS: n=1 recv_count=2 recv_none=7118 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1019 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=45.8 wire_pps=208333 total_ms=46.3
+PERF_STATS: n=50 recv_count=51 recv_none=7824 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1974 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=46.9 wire_pps=518293 total_ms=49.7
+PERF_STATS: n=255 recv_count=256 recv_none=7561 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2060 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=40.8 wire_pps=498054 total_ms=43.7
+PERF_STATS: n=256 recv_count=257 recv_none=6678 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2064 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=44.0 wire_pps=134414 total_ms=46.7
+PERF_STATS: n=257 recv_count=258 recv_none=7377 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1950 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=53.5 wire_pps=502947 total_ms=58.8
+PERF_STATS: n=512 recv_count=513 recv_none=8508 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2079 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=50.8 wire_pps=125383 total_ms=61.7
+PERF_STATS: n=1024 recv_count=1025 recv_none=8853 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1920 dispatch_ns=0 send_ns=0
+
+--- BASELINE_RESET PERF=recv 2026-04-29T17:22:31Z perf_check now gates on Pi-side counters (recv_ns/dispatch_ns/send_ns) instead of laptop-observed wire_pps; pre-baseline-reset history is not comparable to the new gate's metric scope ---

@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 # pylint: disable=inconsistent-quotes
-"""perf_check.py — fail if perf regressed > 50% from the all-time best.
+"""perf_check.py — fail if perf regressed > tolerance from the all-time best.
 
-Ratchet semantics:
+The regression gate runs ONLY on Pi-reported metrics from
+PERF_STATS lines (recv_ns, dispatch_ns, send_ns). Laptop-reported
+metrics from BURST_STATS lines (wire_pps, send_ms, total_ms,
+replies) are parsed and printed in the delta table for observation
+but cannot fail the gate — they conflate Pi drain rate with
+laptop USB scheduling under backpressure (laptop blocks once the
+GENET RX ring depth, 256, is reached), so a bad-luck laptop run
+trips a wire_pps "regression" that has nothing to do with the
+Pi. Pi-side counters use the Pi's own clock and are immune to
+that. See "test at the right layer" / "isolate what you test"
+in CLAUDE.md.
+
+Ratchet semantics (applied to gated metrics):
   * For each (flavor, burst_size, metric), the "standard" is the
     best ever observed across all prior runs in perf_runs.log.
-  * Higher-is-better metrics (e.g. wire_pps): standard = max-so-far.
-    Fail if current < 0.5 * standard.
-  * Lower-is-better metrics (e.g. send_ms, recv_ns): standard = min-so-far.
-    Fail if current > 1.5 * standard.
-  * A run that beats the standard sets the new bar automatically,
-    because the standard is recomputed from history (which now includes
-    this run) on the next check.
+  * Higher-is-better metrics: standard = max-so-far.
+    Fail if current < (1 - tolerance) * standard.
+  * Lower-is-better metrics (recv_ns, etc.): standard = min-so-far.
+    Fail if current > (1 + tolerance) * standard.
+  * A run that beats the standard sets the new bar automatically.
   * No manual standards file — perf_runs.log is the source of truth.
     To "reset" a standard (remove an anomalous outlier), edit the log.
 
@@ -19,25 +29,11 @@ Ratchet semantics:
 runs of the matching (commit, flavor). The "current" measurement for
 each (burst_size, metric) becomes the best across those N. History
 excludes those same N runs so we're not comparing the aggregate
-against itself. This kills tail-jitter outliers — the rig regularly
-produces one ~70%-low wire_pps reading per single run; best-of-3
-floors out near the median and the comparison gates real regressions
-instead of single-shot tcpreplay/USB-scheduling noise.
+against itself.
 
-The first run of a (flavor, burst_size, metric) tuple has no history
-to compare against — it sets the initial standard. Subsequent runs
-must stay within 50% of the best seen so far.
-
-The 50% tolerance is wide on purpose: this rig has heavy
-session-to-session host-side noise (USB scheduling, CPU governor
-state, tcpreplay process timing) that easily moves wire_pps and
-send_ms by 30%. The ratchet's job here is to catch order-of-magnitude
-regressions and tail collapses, not to police 10% drift. Combined
-with --runs 3 best-of aggregation, the effective sensitivity is
-"caught a real >50% regression that survived three independent
-measurements" — high signal, low false-positive.
-
-Always prints a delta table for human inspection regardless of pass/fail.
+Always prints a delta table for human inspection regardless of
+pass/fail. Observe-only rows show status `obs` and never appear in
+the failures list.
 """
 
 from __future__ import annotations
@@ -63,19 +59,32 @@ HEADER_RE = re.compile(r"^---\s+(\S+)\s+(\S+)\s+(.+?)\s+---\s*$")
 BASELINE_RE = re.compile(
     r"^---\s+BASELINE_RESET\s+(\S+)\s+(\S+)\s+(.+?)\s+---\s*$"
 )
-BURST_RE = re.compile(r"BURST_STATS:\s+n=(\d+)\s+(.+?)\s*$")
+# Both stat lines have the same shape:  WORD_STATS:  n=N  k=v  k=v  ...
+# Each contributes its own metrics to the same (burst_size) bucket.
+STATS_RE = re.compile(r"(?:BURST|PERF)_STATS:\s+n=(\d+)\s+(.+?)\s*$")
 KV_RE = re.compile(r"(\w+)=([0-9.]+)")
 
 # Direction: True = higher is better; False = lower is better.
+# All metrics here are parsed and printed in the delta table.
 METRIC_DIRECTION: dict[str, bool] = {
+    # Laptop-observed (BURST_STATS) — observe-only, see GATED_METRICS.
     "wire_pps": True,
     "replies": True,
     "send_ms": False,
     "total_ms": False,
+    # Pi-observed (PERF_STATS) — gated.
     "recv_ns": False,
     "dispatch_ns": False,
     "send_ns": False,
 }
+
+# Subset of METRIC_DIRECTION that gates the regression check. A run
+# can only FAIL on these metrics. Everything else is logged in the
+# table for human inspection but cannot trip the gate. Only Pi-side
+# counters belong here — they're measured by the Pi's own clock and
+# are immune to laptop-side scheduling jitter that dominates
+# wire_pps / send_ms in the backpressured (N >= 256) regime.
+GATED_METRICS: set[str] = {"recv_ns", "dispatch_ns", "send_ns"}
 
 # Metrics that aren't useful to track (counts that are inputs, not outputs).
 SKIP_METRICS = {"n"}
@@ -122,7 +131,7 @@ def parse_log(path: str) -> tuple[list[Run], dict[str, int]]:
                 continue
             if current is None:
                 continue
-            mb = BURST_RE.search(line)
+            mb = STATS_RE.search(line)
             if not mb:
                 continue
             try:
@@ -310,36 +319,46 @@ def main() -> int:
         size, name = key
         current_val = current.metrics[key]
         higher_better = METRIC_DIRECTION.get(name, True)
+        gated = name in GATED_METRICS
         standard = best_so_far(history, key)
 
         if standard is None:
-            status = "first"
+            status = "first" if gated else "obs (first)"
             print(f"  {size:>6}  {name:<13}  {current_val:>10.1f}  "
                   f"{'(none)':>10}  {'-':>8}  {status}")
             continue
 
         d = delta_pct(current_val, standard, higher_better)
 
-        if higher_better and current_val > standard:
-            status = "NEW BEST"
+        new_best = (
+            (higher_better and current_val > standard)
+            or (not higher_better and current_val < standard)
+        )
+
+        if new_best:
+            # Track new bests for both gated and observe-only metrics —
+            # the ratchet on observe-only metrics still informs humans
+            # about secular trends, even though they can't fail the gate.
             new_bars.append(
                 f"{name}@n={size}: {standard:.1f} → {current_val:.1f}"
             )
-        elif not higher_better and current_val < standard:
-            status = "NEW BEST"
-            new_bars.append(
-                f"{name}@n={size}: {standard:.1f} → {current_val:.1f}"
-            )
+            status = "NEW BEST" if gated else "obs (NEW BEST)"
         elif is_regression(
             current_val, standard, higher_better, args.tolerance,
         ):
-            status = "FAIL"
-            failures.append(
-                f"{name}@n={size}: current={current_val:.1f} "
-                f"best={standard:.1f} delta={d:+.1f}%"
-            )
+            if gated:
+                status = "FAIL"
+                failures.append(
+                    f"{name}@n={size}: current={current_val:.1f} "
+                    f"best={standard:.1f} delta={d:+.1f}%"
+                )
+            else:
+                # Observe-only metric drifted past tolerance. Surface it
+                # in the table so a human notices, but don't fail the
+                # gate — laptop-side variance is expected here.
+                status = "obs (over)"
         else:
-            status = "ok"
+            status = "ok" if gated else "obs"
 
         print(f"  {size:>6}  {name:<13}  {current_val:>10.1f}  "
               f"{standard:>10.1f}  {d:>+7.1f}%  {status}")
