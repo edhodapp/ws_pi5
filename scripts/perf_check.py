@@ -146,7 +146,20 @@ def parse_log(path: str) -> tuple[list[Run], dict[str, int]]:
                     val = float(kv.group(2))
                 except ValueError:
                     continue
-                current.metrics[(size, name)] = val
+                key = (size, name)
+                if key in current.metrics:
+                    # BURST_STATS and PERF_STATS contribute different
+                    # metric names today, so no (size, name) tuple should
+                    # appear twice in one run. If a future field is added
+                    # to both lines (or duplicated within one line), a
+                    # silent overwrite would lose data and bias the
+                    # ratchet. Fail loudly so the log gets fixed.
+                    raise ValueError(
+                        f"perf_check: metric collision in {path}: "
+                        f"({size}, {name}) appears more than once in run "
+                        f"{current.commit}/{current.timestamp}"
+                    )
+                current.metrics[key] = val
     if current is not None:
         runs.append(current)
     return runs, reset_after
@@ -313,7 +326,8 @@ def main() -> int:
     print(f"  {'-'*6}  {'-'*13}  {'-'*10}  {'-'*10}  {'-'*8}  ------")
 
     failures: list[str] = []
-    new_bars: list[str] = []
+    new_bars_gated: list[str] = []
+    new_bars_obs: list[str] = []
 
     for key in sorted(current.metrics.keys()):
         size, name = key
@@ -336,13 +350,17 @@ def main() -> int:
         )
 
         if new_best:
-            # Track new bests for both gated and observe-only metrics —
-            # the ratchet on observe-only metrics still informs humans
-            # about secular trends, even though they can't fail the gate.
-            new_bars.append(
-                f"{name}@n={size}: {standard:.1f} → {current_val:.1f}"
-            )
-            status = "NEW BEST" if gated else "obs (NEW BEST)"
+            # Track new bests for gated and observe-only metrics in
+            # separate buckets — only gated bests tighten the gate.
+            # Observe-only bests are reported for humans to spot
+            # secular trends but don't move any threshold.
+            entry = f"{name}@n={size}: {standard:.1f} → {current_val:.1f}"
+            if gated:
+                new_bars_gated.append(entry)
+                status = "NEW BEST"
+            else:
+                new_bars_obs.append(entry)
+                status = "obs (NEW BEST)"
         elif is_regression(
             current_val, standard, higher_better, args.tolerance,
         ):
@@ -364,12 +382,20 @@ def main() -> int:
               f"{standard:>10.1f}  {d:>+7.1f}%  {status}")
 
     print()
-    if new_bars:
+    if new_bars_gated:
         print(
-            f"perf_check: {len(new_bars)} new best(s) — "
-            f"these now define the bar:"
+            f"perf_check: {len(new_bars_gated)} gated new best(s) — "
+            f"these tighten the regression gate:"
         )
-        for nb in new_bars:
+        for nb in new_bars_gated:
+            print(f"  + {nb}")
+        print()
+    if new_bars_obs:
+        print(
+            f"perf_check: {len(new_bars_obs)} observe-only new best(s) — "
+            f"informational, do not affect the gate:"
+        )
+        for nb in new_bars_obs:
             print(f"  + {nb}")
         print()
 
