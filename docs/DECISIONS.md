@@ -441,3 +441,56 @@ stranger following the README literally — is the gate that the
 rewrite is good enough.
 
 **Date:** 2026-04-28
+
+---
+
+## D016 — Perf cron is data-gathering, not gating
+
+**Decision:** The nightly perf cron (`scripts/perf_nightly.sh`)
+records data into `hw_test/perf_runs.log` and exits non-zero only
+on a hang or harness crash. Pytest assertion failures are recorded
+as data points but do NOT fail the cron. `scripts/perf_check.py`
+is invoked only by `scripts/pre-push-integration.sh`; the cron
+calls `hw_tests.sh --data-only perf` which skips the regression
+gate entirely.
+
+A "hang" is defined as: a perf phase exceeding `PHASE_TIMEOUT_S`
+wall-clock seconds (default 600 s, overridable via env var). Each
+pytest run within a phase is wrapped in `timeout` with the
+remaining phase budget; expired runs return exit 124 which the
+runner translates into a HANG marker appended to `perf_runs.log`.
+
+**Scope refinement of D014.** D014 still describes the test plan
+and acceptance criteria; D016 narrows where the perf gate fires.
+Pre-push integration retains the strict gating behaviour (D014's
+P1/P2/P3 perf-regression methodology applies there).
+
+**Rationale:** Across the runs observed during the
+network-config redesign session and after, every cron failure was
+either environmental noise (laptop USB scheduling, host
+contention, cold-cache jitter) or a documented stochastic
+behaviour we widened tolerance for (L2 1024-burst loss). Not
+once did a cron failure flag a real bug we wouldn't have noticed
+otherwise. The signal-to-noise ratio of per-run threshold gates
+on a noisy rig is poor — a human reading the trend log catches
+real drift better than any single-point comparison can.
+
+A hang, by contrast, is unambiguous: the harness is broken, the
+SUT is wedged, or a cable is unplugged. Always worth waking up an
+operator. Hangs surface in `perf_runs.log` as `--- HANG ... ---`
+markers alongside the data, so trend-readers see them in
+context.
+
+This applies the same "test at the right layer" principle that
+drove the perf_check.py rewrite to gate on Pi-side counters
+instead of laptop-observed wire_pps (commits 00db7f6, 7a465a0):
+the metric the cron measures should not bake in noise the cron
+can't distinguish from regression.
+
+**Revisit if:** A real regression goes unnoticed in trend-watching
+for more than ~3 days because the human review cadence missed it.
+At that point, consider lightweight thresholding (e.g. flagging
+deltas > 50 % from rolling-7-day median) rather than reverting
+to per-run gates.
+
+**Date:** 2026-04-30

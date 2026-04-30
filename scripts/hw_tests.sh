@@ -28,6 +28,9 @@
 #                                                # all runs, exit non-zero
 #                                                # at end if any failed
 #                                                # (regression-trend cron)
+#   scripts/hw_tests.sh --data-only perf         # cron mode: record data,
+#                                                # only fail on hang or
+#                                                # harness crash (D016)
 #
 # After perf phases run, scripts/perf_check.py validates wire_pps
 # hasn't regressed > 10% versus the median of the last 10 runs.
@@ -52,9 +55,15 @@ COMMIT=$(git rev-parse --short HEAD)
 RESTORE_DEFAULT=true
 NO_REFLASH=false
 CONTINUE_ON_FAIL=false
+DATA_ONLY=false
 ANY_FAIL=0
 FAILED_LABELS=()
 PHASES=()
+
+# Per-phase wall-clock budget in seconds (overridable via env).
+# 600 s is generous: a quiet host typically finishes a perf phase in
+# ~3 min. Hangs blow past 600 s; legitimate slow runs do not.
+: "${PHASE_TIMEOUT_S:=600}"
 
 # --- arg parse -------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -62,6 +71,17 @@ while [ $# -gt 0 ]; do
         --no-reflash) NO_REFLASH=true; shift ;;
         --no-restore) RESTORE_DEFAULT=false; shift ;;
         --continue-on-fail) CONTINUE_ON_FAIL=true; shift ;;
+        --data-only)
+            # --data-only is for the perf cron — record stats, do
+            # not gate. Implies --continue-on-fail (always) and
+            # disables the perf_check.py regression call. The only
+            # things that fail with --data-only are hangs (phase
+            # exceeds PHASE_TIMEOUT_S wall-clock) and harness
+            # crashes (build failure, missing venv, etc.). See D016.
+            DATA_ONLY=true
+            CONTINUE_ON_FAIL=true
+            shift
+            ;;
         L2|L3|L4|L5) PHASES+=("$1"); shift ;;
         L2-L3) PHASES+=(L2 L3); shift ;;
         L2-L4) PHASES+=(L2 L3 L4); shift ;;
@@ -72,7 +92,7 @@ while [ $# -gt 0 ]; do
         perf) PHASES+=(perf-l2 perf-dispatch perf-l3 perf-l4); shift ;;
         perf-l2|perf-dispatch|perf-l3|perf-l4) PHASES+=("$1"); shift ;;
         -h|--help)
-            sed -n '2,35p' "$0"
+            sed -n '2,38p' "$0"
             exit 0
             ;;
         *)
@@ -158,6 +178,24 @@ run_pytest() {
     HW_TEST=1 "$VENV" -m pytest hw_test/ "$@" --tb=short -q
 }
 
+# _record_hang <label> <perf_flavor> <reason>
+# Append a HANG marker to perf_runs.log and bump ANY_FAIL. Used when
+# a perf phase exceeds PHASE_TIMEOUT_S. The marker is in the same
+# file as the data so a human (or perf_check.py) reading the log
+# sees the hang in trend context. Per D016.
+_record_hang() {
+    local label="$1"
+    local perf_flavor="$2"
+    local reason="$3"
+    echo "=== HANG: [$label] $reason ===" >&2
+    {
+        echo ""
+        echo "--- HANG $COMMIT $(date -u +%Y-%m-%dT%H:%M:%SZ) PERF=$perf_flavor $reason ---"
+    } >> "$PERF_LOG"
+    FAILED_LABELS+=("${label}-HANG")
+    ANY_FAIL=1
+}
+
 # --- per-phase runners ----------------------------------------------
 run_layer_functional() {
     local layer="$1"
@@ -199,18 +237,48 @@ run_perf_phase() {
     : "${PERF_RUNS:=3}"
     : "${PERF_TOLERANCE:=0.50}"
     local phase_failed=0
+    # Phase budget starts AFTER flash_and_wait. flash_and_wait has its
+    # own internal 150 s boot-poll timeout, so a wedged flash is
+    # bounded already; charging it against PHASE_TIMEOUT_S would
+    # synthetic-fail later runs that haven't actually hung.
+    local phase_start_s=$SECONDS
     for i in $(seq 1 "$PERF_RUNS"); do
-        echo "=== [$label] perf run $i/$PERF_RUNS (-m \"$marker_expr\") ==="
+        # Wall-clock budget: a phase that hasn't completed by
+        # PHASE_TIMEOUT_S wall-clock is a hang. Check before each
+        # new run so we don't start one that's guaranteed to bust
+        # the budget. Each run also wraps pytest in `timeout` with
+        # the remaining budget so a single hung run can't run past
+        # the phase budget. See D016.
+        local elapsed_s=$((SECONDS - phase_start_s))
+        local remaining_s=$((PHASE_TIMEOUT_S - elapsed_s))
+        if [ $remaining_s -le 0 ]; then
+            _record_hang "$label" "$perf_flavor" \
+                "phase exceeded ${PHASE_TIMEOUT_S}s wall-clock before run $i/$PERF_RUNS started"
+            rm -f "$out"
+            return 1
+        fi
+        echo "=== [$label] perf run $i/$PERF_RUNS (-m \"$marker_expr\", remaining=${remaining_s}s) ==="
         # Pytest exit codes: 0 = pass, 1 = fail, 5 = no tests collected.
-        # We tolerate 5 here because some PERF flavors (e.g.
-        # perf-dispatch) have a build configuration but no associated
-        # test suite yet — "no tests" is not a failure, it's a no-op.
-        # Use a temp-file PIPESTATUS dance because `tee` clobbers $? .
+        # 124 = `timeout` SIGTERM'd; --kill-after=10s SIGKILLs 10 s
+        # later if SIGTERM was ignored (pytest in a blocking syscall,
+        # scapy sniff loop, etc.). timeout's default mode places the
+        # command in a new process group and signals the whole group,
+        # so descendants (hw_send.py, scapy children) die too.
+        # Pytest doesn't currently emit 124 itself; the assumption
+        # is "rc=124 ⇒ timeout fired" until/unless pytest does.
+        # The PIPESTATUS dance is because `tee` clobbers $?.
         set +e
-        HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" \
+        timeout --kill-after=10s "${remaining_s}s" \
+            env HW_TEST=1 "$VENV" -m pytest hw_test/ -m "$marker_expr" \
             --tb=short -q -s 2>&1 | tee "$out"
         rc=${PIPESTATUS[0]}
         set -e
+        if [ "$rc" -eq 124 ]; then
+            _record_hang "$label" "$perf_flavor" \
+                "run $i/$PERF_RUNS killed by timeout after ${remaining_s}s"
+            rm -f "$out"
+            return 1
+        fi
         if [ "$rc" -eq 5 ]; then
             echo "  (no tests matched -m \"$marker_expr\" — phase is a build-only no-op, skipping)"
             rm -f "$out"
@@ -250,6 +318,12 @@ run_perf_phase() {
     if [ "$phase_failed" -ne 0 ]; then
         echo "  [skip perf_check: $label had per-run failures; trend log retains the data]"
         return 1
+    fi
+    # In --data-only mode, the cron is data-gathering, not gating.
+    # perf_check.py is invoked only by pre-push-integration.sh. See D016.
+    if [ "$DATA_ONLY" = "true" ]; then
+        echo "  [skip perf_check: --data-only — trend log retains the data]"
+        return 0
     fi
     if ! "$VENV" "$SCRIPT_DIR/perf_check.py" --flavor "PERF=$perf_flavor" \
             --commit "$COMMIT" --runs "$PERF_RUNS" \

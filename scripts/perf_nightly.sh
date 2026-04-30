@@ -6,20 +6,23 @@
 #   0 0 * * * /home/ed/ws_pi5/scripts/perf_nightly.sh \
 #       >> /tmp/perf_nightly.log 2>&1
 #
-# Behaviour:
+# Behaviour (D016: cron is data-gathering, not gating):
 #   * Polls the 1-minute load average every POLL_SECS seconds.
-#   * As soon as load is below LOAD_THRESHOLD, fires the strict perf
-#     cycle (best-of-3, 50% tolerance) with --continue-on-fail — every
-#     phase runs, every per-phase run records its telemetry, and the
-#     wrapper exits non-zero at the end if anything failed. This is
-#     intentionally different from the interactive `hw_tests.sh perf`
-#     default (which still bails on first failure for fast feedback).
-#     The cron wants regression-trend data; bailing early loses runs
-#     2/3 of one phase and the entire next phase.
+#   * As soon as load is below LOAD_THRESHOLD, fires the perf cycle
+#     in --data-only mode. Every phase runs, every per-phase run
+#     records its telemetry, and the cron exits non-zero ONLY if a
+#     phase hangs (exceeds PHASE_TIMEOUT_S wall-clock) or the
+#     harness itself crashes. Pytest assertion failures and
+#     perf_check regressions are recorded as data points but do
+#     not fail the cron — single-point thresholds are noise; the
+#     human-readable trend in perf_runs.log is the signal.
+#   * Pre-push-integration.sh keeps the gated behaviour (different
+#     role: catching regressions before they ship).
 #   * Gives up at the local-time deadline (default 08:00 today).
-#   * Exits 0 on either "ran perf cleanly" OR "deadline hit, no run
-#     today". Non-zero exit means at least one phase or run failed —
-#     check perf_runs.log and the cron log for which.
+#   * Exits 0 on either "ran perf, recorded data" (regardless of
+#     individual run outcomes) OR "deadline hit, no run today".
+#     Non-zero exit indicates a hang or harness crash — operator
+#     should investigate.
 #
 # Trigger uses local time (matches sleep schedule).
 # Log timestamps inside perf_runs.log stay UTC (matches the rest of
@@ -49,16 +52,16 @@ echo "[$(date -Iseconds)] perf_nightly: waiting for quiet host (load < $LOAD_THR
 while [ "$(date +%s)" -lt "$DEADLINE_TS" ]; do
     load=$(awk '{print $1}' /proc/loadavg)
     if awk -v l="$load" -v t="$LOAD_THRESHOLD" 'BEGIN{exit !(l < t)}'; then
-        echo "[$(date -Iseconds)] perf_nightly: load=$load < $LOAD_THRESHOLD — running strict perf cycle"
-        # Inherits PERF_RUNS=3 / PERF_TOLERANCE=0.50 defaults from hw_tests.sh.
-        # --continue-on-fail keeps every phase running even if one fails so
-        # the trend log gets a full night's data.
-        if bash "$SCRIPT_DIR/hw_tests.sh" --continue-on-fail perf; then
-            echo "[$(date -Iseconds)] perf_nightly: PASS"
+        echo "[$(date -Iseconds)] perf_nightly: load=$load < $LOAD_THRESHOLD — running data-only perf cycle"
+        # --data-only: the cron records data, not gates. Inherits
+        # PERF_RUNS=3 from hw_tests.sh; PHASE_TIMEOUT_S defaults to 600 s
+        # but can be overridden in the cron environment if needed.
+        if bash "$SCRIPT_DIR/hw_tests.sh" --data-only perf; then
+            echo "[$(date -Iseconds)] perf_nightly: data recorded; check perf_runs.log for trends"
             exit 0
         else
             rc=$?
-            echo "[$(date -Iseconds)] perf_nightly: FAIL (exit=$rc) — one or more phases/runs failed; check perf_runs.log"
+            echo "[$(date -Iseconds)] perf_nightly: FAIL (exit=$rc) — phase hang or harness crash; check perf_runs.log for HANG markers"
             exit "$rc"
         fi
     fi
