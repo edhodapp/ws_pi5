@@ -201,6 +201,29 @@ enable_uart=1
 dtoverlay=disable-bt
 EOF
 
+# Lint network.conf if one is present in the bundle (D012: linter is
+# the executable spec). Today this is a no-op — the default
+# network.conf isn't shipped yet (I3). Once it is, AND for any
+# future flow that drops a user-supplied network.conf into the
+# bundle dir before this line, the lint catches malformed configs
+# at build time rather than at first boot. Hard-fail on lint
+# error: shipping an SD image with an invalid config means a Pi
+# that won't boot for the user.
+if [[ -f "$BUNDLE_DIR/network.conf" ]]; then
+    if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+        LINT_PY="$PROJECT_DIR/.venv/bin/python"
+    else
+        LINT_PY="python3"
+    fi
+    echo "mk_sd: linting $BUNDLE_DIR/network.conf"
+    if ! "$LINT_PY" "$PROJECT_DIR/scripts/lint_network_conf.py" \
+            --quiet "$BUNDLE_DIR/network.conf"; then
+        echo "mk_sd: network.conf failed lint — refusing to ship the SD image" >&2
+        echo "       (fix the file and re-run; see D003/D006 for format rules)" >&2
+        exit 1
+    fi
+fi
+
 if [[ "$MODE" == "image" ]]; then
     python3 "$PROJECT_DIR/scripts/mk_sd_image.py" "$BUNDLE_DIR" "$TARGET"
 else
