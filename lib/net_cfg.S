@@ -1,9 +1,20 @@
 /*
- * net_cfg.S — MAC address and IP address labeled data
+ * net_cfg.S — MAC, IP, hostname configuration storage.
  *
- * DHCP migration: move net_our_ip from .rodata to .data,
- * have DHCP client write to it. Rest of stack loads from
- * same label — no API change.
+ * Per D005, the configurable fields live in .data so the network.conf
+ * parser (I4) can populate them at boot. The compile-time values
+ * here serve as initial defaults until the parser overwrites them on
+ * Pi 4 — and as the permanent values on QEMU, which has no SD card
+ * and no network.conf.
+ *
+ * D005's "Pi 4 defaults are zero" requirement lands in I5, when
+ * config_parser is wired into the boot sequence. Until then, Pi 4
+ * defaults preserve the working hw_test integration values so the
+ * pre-push gate stays green during the redesign's intermediate
+ * commits.
+ *
+ * net_broadcast_mac is universal (FF:FF:FF:FF:FF:FF) and stays in
+ * .rodata as a true constant.
  */
 
 .include "net.inc"
@@ -13,14 +24,28 @@
 .global net_our_ip
 .global net_gw_ip
 .global net_ntp_ip
+.global net_netmask
+.global net_hostname
+.global net_hostname_len
 .global net_gw_mac
 .global net_gw_mac_valid
 .global net_hw_csum_tx
 
+/* --- Invariant constants (.rodata) --- */
 .section .rodata
 
-/* Locally administered, unicast MAC
- * Must match the MAC programmed into the network controller */
+.balign 4
+net_broadcast_mac:
+    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+
+/* --- Parser-writable storage (.data) --- */
+.section .data
+
+/* Locally administered, unicast MAC.
+ * Must match the MAC programmed into the network controller.
+ * I5 will zero this on Pi 4 once config_parser sets it from either
+ * the mailbox factory MAC (D011) or a `mac=` override. */
+.balign 4
 net_our_mac:
 .ifdef PLATFORM_PI4
     .byte   0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE
@@ -28,12 +53,9 @@ net_our_mac:
     .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
 .endif
 
-net_broadcast_mac:
-    .byte   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-
-/* IP stored as raw wire-format bytes (network byte order).
- * ldr w from this label gives the same value as ldr w from
- * a wire buffer, enabling zero-cost comparison with no rev. */
+/* IPv4 fields stored as raw wire-format bytes (network byte order).
+ * `ldr w` from these labels gives the same value as `ldr w` from a
+ * wire buffer, enabling zero-cost comparison without rev. */
 .balign 4
 net_our_ip:
 .ifdef PLATFORM_PI4
@@ -54,7 +76,32 @@ net_gw_ip:
 net_ntp_ip:
     .byte   0xD8, 0xEF, 0x23, 0x00     /* 216.239.35.0 */
 
-.section .data
+/* New labels per D005. Netmask is recorded for documentation
+ * only — D010 fixed the routing model as always-via-gateway, so
+ * the runtime never reads this. Zero default is a reasonable
+ * "uninitialized" sentinel; QEMU keeps 255.255.255.0 for symmetry
+ * with the dotted-decimal it would receive from a network.conf. */
+.balign 4
+net_netmask:
+.ifdef PLATFORM_PI4
+    .word   0
+.else
+    .byte   0xFF, 0xFF, 0xFF, 0x00     /* 255.255.255.0 (QEMU default) */
+.endif
+
+/* Hostname storage: 1..HOSTNAME_MAX_LEN bytes per D006, plus a
+ * 4-byte length. The buffer is sized one octet larger than the
+ * RFC 1123 max (63) so a future caller that wants C-string
+ * semantics has room for a trailing NUL without overrunning. */
+.balign 4
+net_hostname_len:
+    .word   0                           /* 0..63 */
+
+.balign 4
+net_hostname:
+    .space  64                          /* 63 LDH chars + slack */
+
+/* --- Runtime-managed (existing) --- */
 
 .balign 4
 net_gw_mac:
