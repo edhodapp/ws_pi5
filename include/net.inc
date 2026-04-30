@@ -180,4 +180,6 @@
 /* Static IP configuration (network byte order for zero-cost wire comparison) */
 .equ NET_IP_NBO,       0x0A00020F      /* 10.0.2.15 */
 .equ NET_GW_NBO,       0x0A000202      /* 10.0.2.2 */
-.equ NET_MASK_NBO,     0xFFFFFF00      /* 255.255.255.0 */
+/* NET_MASK_NBO removed per D010 — stack uses always-via-gateway,
+ * no subnet logic; the constant was dead code. The regression guard
+ * at scripts/test_d010_regression.py blocks reintroduction. */
