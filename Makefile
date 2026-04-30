@@ -95,7 +95,21 @@ ifneq ($(MAX_ROUTES),)
   APPLIANCE_OVERRIDE_ASFLAGS += --defsym MAX_ROUTES_OVERRIDE=$(MAX_ROUTES)
 endif
 
-ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(APPLIANCE_OVERRIDE_ASFLAGS)
+# ---------------------------------------------------------------------------
+# Network-config initramfs address (D004)
+#   Single source of truth: defined here, propagated to asm via
+#   --defsym, will also be the value mk_sd.sh writes into config.txt's
+#   `initramfs network.conf <addr>` line. Kernel boot.S saves the
+#   firmware-passed DTB pointer (in x0) so config_parser can locate
+#   the loaded blob via the DTB at runtime.
+#   0x20000000 is well above the kernel load address (0x80000) and BSS,
+#   no overlap risk on any current build target.
+# ---------------------------------------------------------------------------
+INITRAMFS_ADDR := 0x20000000
+
+ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ \
+          --defsym INITRAMFS_ADDR=$(INITRAMFS_ADDR) \
+          $(PLATFORM_ASFLAGS) $(PERF_ASFLAGS) $(APPLIANCE_OVERRIDE_ASFLAGS)
 LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib $(LDFLAGS_EXTRA)
 
 # Shorthand for platform include directories

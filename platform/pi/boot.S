@@ -14,6 +14,17 @@ _start:
     str     w10, [x9]
 .endif
 
+    /* Save firmware-passed DTB pointer (x0) before any code that
+     * clobbers it (the next instruction reads mpidr_el1 into x0).
+     * Stored in .data (loaded with the kernel image, not zeroed by
+     * the BSS loop below) so config_parser can read it after
+     * boot setup completes. Per D004. On the chainloader path x0
+     * holds whatever the chainloader left it as — config_parser
+     * is responsible for validating it before dereferencing. */
+    adrp    x9, _saved_dtb_ptr
+    add     x9, x9, :lo12:_saved_dtb_ptr
+    str     x0, [x9]
+
     /* Only let core 0 proceed, park other cores */
     mrs     x0, mpidr_el1
     and     x0, x0, #3
@@ -353,3 +364,14 @@ _exc_hex64:
     b.ge    2b
     mov     x30, x15               /* restore LR */
     ret
+
+/* ================================================================
+ * Firmware-passed boot args, saved at _start before clobber.
+ * In .data (loaded with the image, NOT in BSS) so the BSS-zero
+ * loop in _start doesn't clear them. Per D004.
+ * ================================================================ */
+.section .data
+.balign 8
+.global _saved_dtb_ptr
+_saved_dtb_ptr:
+    .quad 0
