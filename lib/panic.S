@@ -13,7 +13,7 @@
  *
  * Stack-free by design: every primitive is a GAS macro expanded
  * inline. After a fatal error the stack may be corrupt, so we don't
- * use `bl` to subroutines. Each panic_* function uses x9..x14 as
+ * use `bl` to subroutines. Each panic_* function uses x9..x13 as
  * scratch and never returns. Running on QEMU (Pi 3) executes the
  * same instruction sequence — there's no visible LED in QEMU's
  * raspi3b model but the GPIO writes are harmless.
@@ -43,7 +43,6 @@
 .equ _GPSET1,           _GPIO_BASE + 0x20
 .equ _GPCLR1,           _GPIO_BASE + 0x2C
 .equ _ACT_BIT,          (1 << 10)
-.equ _ACT_FSEL_SHIFT,   6
 .equ _ACT_FSEL_MASK,    (7 << 6)        /* 0x1C0 — clear all 3 fsel bits */
 .equ _ACT_FSEL_OUT,     (1 << 6)        /* 0x040 — fsel=001 = output */
 
@@ -55,7 +54,10 @@
 
 /* PANIC_SETUP: configure GPIO 42 as output (RMW so we don't disturb
  * other pins controlled by GPFSEL4). Idempotent — re-running on a
- * pin already configured as output is a no-op store-back. */
+ * pin already configured as output is a no-op store-back. The
+ * trailing `dsb sy` ensures the fsel write is observable before
+ * any subsequent GPIO operation; on AArch64 Device-memory writes
+ * are not ordered with later instructions otherwise. */
 .macro PANIC_SETUP
     ldr     x9, =_GPFSEL4
     ldr     w10, [x9]
@@ -65,6 +67,7 @@
     mov     w11, #_ACT_FSEL_OUT
     orr     w10, w10, w11
     str     w10, [x9]
+    dsb     sy
 .endm
 
 /* DELAY_MS \ms — busy-wait \ms milliseconds using CNTPCT_EL0.
@@ -85,17 +88,23 @@
 .endm
 
 /* LED_ON / LED_OFF — single-write (GPSET1/GPCLR1 are write-only;
- * writing 1 sets/clears the corresponding pin, writing 0 is no-op). */
+ * writing 1 sets/clears the corresponding pin, writing 0 is no-op).
+ * `dsb sy` after the write ensures the LED transition is observable
+ * before the timing loop begins, so each blink's perceived width
+ * matches the spec'd ms count rather than starting some Device-write
+ * latency in the past. */
 .macro LED_ON
     ldr     x9, =_GPSET1
     mov     w10, #_ACT_BIT
     str     w10, [x9]
+    dsb     sy
 .endm
 
 .macro LED_OFF
     ldr     x9, =_GPCLR1
     mov     w10, #_ACT_BIT
     str     w10, [x9]
+    dsb     sy
 .endm
 
 .macro DIT
