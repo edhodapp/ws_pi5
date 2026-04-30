@@ -126,7 +126,7 @@ SHARED_OBJS = \
     $(BUILD)/store.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o \
-    $(BUILD)/http_output_fsa.o
+    $(BUILD)/http_output_fsa.o $(BUILD)/panic.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -408,6 +408,9 @@ $(BUILD)/md5.o: lib/md5.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/perf.o: lib/perf.S include/perf.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/panic.o: lib/panic.S $(PI_INC)/platform.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===========================================================================
