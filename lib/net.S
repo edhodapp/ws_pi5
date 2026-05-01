@@ -30,7 +30,10 @@ net_recv_one:
     cmp     w20, #ETH_HDR_LEN
     b.lt    .Lnr_drop
 
-    /* Filter: destination MAC must be ours or broadcast */
+    /* Filter: destination MAC must be ours, broadcast, or
+     * mdns_mac (per D007/D008 — the IPv4 mDNS multicast group
+     * 01:00:5e:00:00:fb). All three are explicit; promiscuous
+     * mode and a wider multicast accept aren't used. */
     /* x0 = frame pointer (ETH_DST at offset 0) */
     ldr     x1, =net_our_mac
     bl      eth_mac_eq
@@ -38,6 +41,11 @@ net_recv_one:
 
     mov     x0, x19
     ldr     x1, =net_broadcast_mac
+    bl      eth_mac_eq
+    cbnz    w0, .Lnr_mac_ok
+
+    mov     x0, x19
+    ldr     x1, =mdns_mac
     bl      eth_mac_eq
     cbz     w0, .Lnr_drop_mac
 

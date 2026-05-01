@@ -25,6 +25,7 @@
 .global test_mdns_aaaa_query_drop
 .global test_mdns_dispatch_a_match
 .global test_mdns_dispatch_no_reply
+.global test_mdns_net_recv_e2e
 
 .section .text
 
@@ -371,6 +372,49 @@ test_mdns_dispatch_no_reply:
     ret
 
 
+/* ========================================================================
+ * test_mdns_net_recv_e2e — full L2→L3→L4→mDNS dispatch.
+ *
+ * Builds the same multicast mDNS query frame and hands it to
+ * net_recv_one (the entry point net.S uses for incoming
+ * packets). Pre-fix this drops at the L2 dst-MAC filter (which
+ * accepts only our_mac or broadcast); after I15 (3/N) net.S
+ * also accepts mdns_mac and ip.S accepts the 224.0.0.251
+ * destination, so the path completes end-to-end and a non-zero
+ * reply length comes back.
+ * ======================================================================== */
+test_mdns_net_recv_e2e:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_dispatch_in_frame
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_len
+    bl      _mdns_test_memcpy
+
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_len
+    bl      net_recv_one
+    cbz     w0, .Ltme_fail
+    /* Same expected length as the dispatch test. */
+    cmp     w0, #86
+    b.ne    .Ltme_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_net_recv_e2e
+    bl      test_pass
+    b       .Ltme_done
+.Ltme_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_net_recv_e2e
+    bl      test_fail
+.Ltme_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -394,6 +438,8 @@ _mdns_name_dispatch_match:
     .asciz "mdns_dispatch_a_match"
 _mdns_name_dispatch_no_reply:
     .asciz "mdns_dispatch_no_reply"
+_mdns_name_net_recv_e2e:
+    .asciz "mdns_net_recv_e2e"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
@@ -471,14 +517,16 @@ _mdns_dispatch_in_frame:
     .byte 0xde, 0xad, 0xbe, 0xef, 0x01, 0x23
     .byte 0x08, 0x00
     /* IP: ver/IHL=0x45, TOS=0, totlen=56 (IP+UDP+DNS),
-     * id=0, flags/frag=0, ttl=255, proto=17 (UDP), checksum=0 (test),
+     * id=0, flags/frag=0, ttl=255, proto=17 (UDP),
+     * checksum=0xd0b4 (computed: ~one's-complement-sum over the
+     * other 9 16-bit words; ip_handle validates this).
      * src=10.0.0.5, dst=224.0.0.251. */
     .byte 0x45, 0x00
     .byte 0x00, 0x38
     .byte 0x00, 0x00
     .byte 0x00, 0x00
     .byte 0xff, 0x11
-    .byte 0x00, 0x00
+    .byte 0xd0, 0xb4
     .byte 0x0a, 0x00, 0x00, 0x05
     .byte 0xe0, 0x00, 0x00, 0xfb
     /* UDP: sport=5353, dport=5353, len=36 (UDP+DNS), checksum=0. */
