@@ -378,6 +378,7 @@ _mdns_memcpy:
 .equ MDNS_PORT_NBO,             0xE914          /* 5353 in BE: 0x14 0xE9 */
 
 .global mdns_dispatch
+.global mdns_build_probe_payload
 
 mdns_dispatch:
     stp     x29, x30, [sp, #-48]!
@@ -525,3 +526,119 @@ mdns_dispatch:
 .balign 8
 _mdns_payload_scratch:
     .space 256                      /* mDNS responses are tiny */
+
+
+.section .text
+
+/* ===========================================================================
+ * mdns_build_probe_payload — build an RFC 6762 §8.1 boot-time
+ * probe query for our own hostname.
+ *
+ *   x0 = output buffer
+ * Returns:
+ *   w0 = packet length (DNS hdr + question), or 0 if hostname is unset
+ *
+ * The probe is structurally a regular DNS query: id=0, flags=0
+ * (QR=0, no AA), QDCOUNT=1, AN/NS/AR=0. The single question is
+ * for "<net_hostname>.local" with QTYPE=ANY (255) and QCLASS=IN.
+ * RFC 6762 §8.1 specifies QTYPE=ANY so any peer holding ANY record
+ * type for the name will respond, surfacing a name conflict.
+ *
+ * This function builds only the DNS payload; the timer-driven
+ * boot phase (4/N completion + 5/N) wraps it in Eth+IP+UDP
+ * multicast headers and sends three copies 250 ms apart per
+ * RFC 6762 §8.1, halting with panic_n on conflict per D008.
+ *
+ * Reads net_hostname / net_hostname_len. Returns 0 if length is
+ * zero (unset hostname) — caller (boot ordering, future I5)
+ * should panic_n on that case rather than send a meaningless
+ * probe for the empty name.
+ *
+ * Register convention:
+ *   x19 buffer cursor (callee-saved)
+ *   w20 hostname length (callee-saved)
+ *   x21 net_hostname pointer (callee-saved)
+ * =========================================================================== */
+mdns_build_probe_payload:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    mov     x19, x0                 /* cursor at start of buffer */
+
+    /* Read hostname length; bail if zero. */
+    adrp    x21, net_hostname_len
+    add     x21, x21, :lo12:net_hostname_len
+    ldr     w20, [x21]
+    cbz     w20, .Lpb_drop
+
+    adrp    x21, net_hostname
+    add     x21, x21, :lo12:net_hostname
+
+    /* DNS header (12 bytes): id=0, flags=0, qd=1, an/ns/ar=0. */
+    strb    wzr, [x19, #0]
+    strb    wzr, [x19, #1]
+    strb    wzr, [x19, #2]
+    strb    wzr, [x19, #3]
+    strb    wzr, [x19, #4]
+    mov     w0, #1
+    strb    w0, [x19, #5]
+    strb    wzr, [x19, #6]
+    strb    wzr, [x19, #7]
+    strh    wzr, [x19, #8]
+    strh    wzr, [x19, #10]
+    add     x19, x19, #12
+
+    /* QNAME label 1: [hostname_len] hostname-bytes. */
+    strb    w20, [x19], #1
+    mov     x9, x21                 /* src cursor over net_hostname */
+    mov     w10, w20                /* count */
+.Lpb_h_copy:
+    cbz     w10, .Lpb_h_done
+    ldrb    w11, [x9], #1
+    strb    w11, [x19], #1
+    sub     w10, w10, #1
+    b       .Lpb_h_copy
+.Lpb_h_done:
+
+    /* QNAME label 2: [5] "local" + terminator [0]. */
+    mov     w0, #5
+    strb    w0, [x19], #1
+    mov     w0, #'l'
+    strb    w0, [x19], #1
+    mov     w0, #'o'
+    strb    w0, [x19], #1
+    mov     w0, #'c'
+    strb    w0, [x19], #1
+    mov     w0, #'a'
+    strb    w0, [x19], #1
+    mov     w0, #'l'
+    strb    w0, [x19], #1
+    strb    wzr, [x19], #1
+
+    /* QTYPE = ANY (0x00FF, big-endian). */
+    strb    wzr, [x19], #1
+    mov     w0, #0xff
+    strb    w0, [x19], #1
+    /* QCLASS = IN (0x0001, big-endian). */
+    strb    wzr, [x19], #1
+    mov     w0, #1
+    strb    w0, [x19], #1
+
+    /* Total length = cursor - original_buf. */
+    mov     x0, x19
+    /* Recover original buffer pointer from the saved x29 frame:
+     * we no longer hold it in a reg; instead, recompute as
+     * 12 (header) + 1 + hostname_len + 7 (5+"local"+0) + 4 (qtype+qclass)
+     * = 24 + hostname_len. */
+    add     w0, w20, #24
+    b       .Lpb_done
+
+.Lpb_drop:
+    mov     w0, #0
+.Lpb_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret

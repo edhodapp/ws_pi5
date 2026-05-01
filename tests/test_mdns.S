@@ -26,6 +26,7 @@
 .global test_mdns_dispatch_a_match
 .global test_mdns_dispatch_no_reply
 .global test_mdns_net_recv_e2e
+.global test_mdns_build_probe
 
 .section .text
 
@@ -415,6 +416,99 @@ test_mdns_net_recv_e2e:
     ret
 
 
+/* ========================================================================
+ * test_mdns_build_probe — verify mdns_build_probe_payload produces a
+ * well-formed RFC 6762 §8.1 probe query packet for the configured
+ * hostname.
+ *
+ * Expected packet for net_hostname="qemu":
+ *   Header: id (any), flags=0x0000 (query), QDCOUNT=1, AN/NS/AR=0
+ *   Question: QNAME=[4]"qemu"[5]"local"[0], QTYPE=ANY (255),
+ *             QCLASS=IN (1)
+ *   Total length = 12 + 12 + 4 = 28 bytes.
+ * ======================================================================== */
+test_mdns_build_probe:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_resp_buf         /* reuse the dispatch resp buf */
+    bl      mdns_build_probe_payload
+    cbz     w0, .Ltbp_fail
+    cmp     w0, #28
+    b.ne    .Ltbp_fail
+
+    ldr     x0, =_mdns_resp_buf
+
+    /* Header bytes 2-3: flags should be 0x0000 (query, no QR/AA). */
+    ldrb    w1, [x0, #2]
+    cbnz    w1, .Ltbp_fail
+    ldrb    w1, [x0, #3]
+    cbnz    w1, .Ltbp_fail
+
+    /* QDCOUNT (bytes 4-5) = 0x0001. */
+    ldrb    w1, [x0, #4]
+    cbnz    w1, .Ltbp_fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, #1
+    b.ne    .Ltbp_fail
+
+    /* ANCOUNT (bytes 6-7) = 0x0000. */
+    ldrb    w1, [x0, #6]
+    cbnz    w1, .Ltbp_fail
+    ldrb    w1, [x0, #7]
+    cbnz    w1, .Ltbp_fail
+
+    /* QNAME starts at offset 12: [4]'q','e','m','u'[5]'l','o','c','a','l'[0]. */
+    ldrb    w1, [x0, #12]
+    cmp     w1, #4
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #13]
+    cmp     w1, #'q'
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #16]
+    cmp     w1, #'u'
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #17]
+    cmp     w1, #5
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #18]
+    cmp     w1, #'l'
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #22]
+    cmp     w1, #'l'
+    b.ne    .Ltbp_fail
+    ldrb    w1, [x0, #23]
+    cbnz    w1, .Ltbp_fail              /* terminator */
+
+    /* QTYPE (bytes 24-25) = 0x00FF (ANY). */
+    ldrb    w1, [x0, #24]
+    cbnz    w1, .Ltbp_fail
+    ldrb    w1, [x0, #25]
+    cmp     w1, #0xff
+    b.ne    .Ltbp_fail
+
+    /* QCLASS (bytes 26-27) = 0x0001 (IN). */
+    ldrb    w1, [x0, #26]
+    cbnz    w1, .Ltbp_fail
+    ldrb    w1, [x0, #27]
+    cmp     w1, #1
+    b.ne    .Ltbp_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe
+    bl      test_pass
+    b       .Ltbp_done
+.Ltbp_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe
+    bl      test_fail
+.Ltbp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -440,6 +534,8 @@ _mdns_name_dispatch_no_reply:
     .asciz "mdns_dispatch_no_reply"
 _mdns_name_net_recv_e2e:
     .asciz "mdns_net_recv_e2e"
+_mdns_name_build_probe:
+    .asciz "mdns_build_probe"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
