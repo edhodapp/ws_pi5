@@ -180,7 +180,17 @@ if [[ ! -f "$FW_DIR/overlays/disable-bt.dtbo" ]]; then
 fi
 cp "$FW_DIR/overlays/disable-bt.dtbo" "$BUNDLE_DIR/overlays/disable-bt.dtbo"
 
-cat > "$BUNDLE_DIR/config.txt" <<'EOF'
+# Read INITRAMFS_ADDR from the Makefile so config.txt's `initramfs`
+# directive stays in sync with the address asm sees via --defsym.
+# Single source of truth per D004; if the value ever moves, the
+# asm parser and the firmware load both follow.
+INITRAMFS_ADDR="$(make -s -C "$PROJECT_DIR" print-INITRAMFS_ADDR)"
+if [ -z "$INITRAMFS_ADDR" ]; then
+    echo "mk_sd: failed to read INITRAMFS_ADDR from Makefile" >&2
+    exit 1
+fi
+
+cat > "$BUNDLE_DIR/config.txt" <<EOF
 # Pi 4 boot config for the ws_pi5 appliance.
 #
 # linker_hw.ld targets 0x80000 (the firmware default kernel load
@@ -194,11 +204,63 @@ cat > "$BUNDLE_DIR/config.txt" <<'EOF'
 # matching .dtbo file in overlays/), the firmware silently points
 # PL011 at BT and serial output disappears even on a clean boot.
 # Lost a whole-day session 1 to this one — see attempt 38.
+#
+# initramfs network.conf <addr>: tells the firmware to load the
+# network configuration text file to physical address INITRAMFS_ADDR
+# (read from the Makefile at SD-bundle build time so the kernel asm
+# and this directive stay in sync — see D004). The kernel's boot.S
+# saves the firmware-passed DTB pointer (in x0); config_parser
+# uses the DTB's /chosen/linux,initrd-{start,end} properties to
+# locate the loaded blob.
 
 arm_64bit=1
 kernel=kernel8.img
 enable_uart=1
 dtoverlay=disable-bt
+initramfs network.conf $INITRAMFS_ADDR
+EOF
+
+# Default network.conf — placeholder values that pass the linter
+# (D003 syntax) but won't bring up the network on most home LANs
+# (gateway 0.0.0.0 → ARP fails → panic_g per D013). Failing loudly
+# with the panic LED is the right behaviour: it tells the user to
+# pop the SD out, edit network.conf, and re-flash. Defaults that
+# happened to "work" by accident on the user's network would mask
+# the user's failure-to-customize.
+cat > "$BUNDLE_DIR/network.conf" <<'EOF'
+# WSPI5CFG
+#
+# Edit these values for your home network, then save and reinsert
+# the SD card. See README.md for details on each field, and
+# docs/PANIC_PATTERNS.md for what the LED is telling you if the Pi
+# halts during boot.
+
+# Required: this Pi's static IPv4 address.
+ip=0.0.0.0
+
+# Required: subnet netmask. The runtime currently ignores this
+# (D010 — stack uses always-via-gateway routing); it's recorded
+# here for documentation. Use whatever your home router shows.
+netmask=255.255.255.0
+
+# Required: IPv4 of your router / default gateway. The Pi ARPs
+# this at boot; if it doesn't answer, the kernel halts with panic
+# pattern G (`——·`).
+gateway=0.0.0.0
+
+# Required: this Pi's hostname (1-63 LDH chars: letters, digits,
+# hyphens; first char must be a letter or digit). Reachable as
+# <hostname>.local once mDNS comes up.
+hostname=wspi5
+
+# Optional: NTP server IPv4 address. Comment out to skip NTP.
+#ntp_server=216.239.35.0
+
+# Optional: explicit MAC override. Comment out to use the factory
+# MAC from the Pi 4 OTP fuses (mailbox tag 0x00010003). If the
+# mailbox call fails AND no override is provided, the kernel
+# halts with panic pattern M (`——`) — see D011.
+#mac=de:ad:be:ef:ca:fe
 EOF
 
 # Lint network.conf if one is present in the bundle (D012: linter is

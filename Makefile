@@ -190,7 +190,7 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table print-INITRAMFS_ADDR
 
 all: kernel8.img
 
@@ -206,6 +206,15 @@ kernel8.img: $(BUILD)/kernel8.elf
 # ---------------------------------------------------------------------------
 verify-fsa-table: $(BUILD)/kernel8.elf
 	@python3 scripts/verify_fsa_table.py $< tests/func/http_output_fsa_vectors.tsv
+
+# ---------------------------------------------------------------------------
+# print-INITRAMFS_ADDR — emit the INITRAMFS_ADDR value defined above
+# so non-Make consumers (mk_sd.sh writing config.txt) read the same
+# value the asm sees via --defsym. Keeps the firmware-load address
+# single-source. Per D004.
+# ---------------------------------------------------------------------------
+print-INITRAMFS_ADDR:
+	@echo $(INITRAMFS_ADDR)
 
 $(BUILD)/kernel8.elf: $(KERNEL_OBJS) $(LINKER_SCRIPT)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
