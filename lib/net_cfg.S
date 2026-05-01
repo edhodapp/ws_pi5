@@ -92,31 +92,17 @@ net_netmask:
 /* Hostname storage: 1..HOSTNAME_MAX_LEN bytes per D006, plus a
  * 4-byte length. The buffer is sized one octet larger than the
  * RFC 1123 max (63) so a future caller that wants C-string
- * semantics has room for a trailing NUL without overrunning.
- *
- * Pi 4 builds get a default of "wspi5" so mdns_start arms even
- * before network.conf wiring lands. QEMU / test builds default to
- * length 0 (mdns_start silently no-ops). When config_parse-from-SD
- * is wired the parser overwrites both fields. */
+ * semantics has room for a trailing NUL without overrunning. */
 .balign 4
 net_hostname_len:
-.ifdef PLATFORM_PI4
-    .word   5
-.else
-    .word   0
-.endif
+    .word   0                           /* 0..63 */
 
 /* 8-byte alignment is load-bearing: lib/config_parser.S's
  * _store_hostname zeroes the buffer with `stp xzr, xzr, [x3, ...]`
  * which requires 8-byte alignment under MMU-on. */
 .balign 8
 net_hostname:
-.ifdef PLATFORM_PI4
-    .ascii  "wspi5"
-    .space  59                          /* pad to full 64 */
-.else
     .space  64                          /* 63 LDH chars + slack */
-.endif
 
 /* --- Runtime-managed (existing) --- */
 
