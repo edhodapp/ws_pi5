@@ -43,6 +43,28 @@ main:
     ldr     x0, =msg_hello_pi4
     bl      uart_puts
 
+    /* Parse user-editable network.conf from initramfs (D004).
+     * The firmware loads the file to INITRAMFS_ADDR per config.txt's
+     * `initramfs network.conf $INITRAMFS_ADDR` directive (mk_sd.sh
+     * keeps the kernel and the SD bundle in sync via the Makefile's
+     * print-INITRAMFS_ADDR target).
+     *
+     * Length: hardcoded at 4 KB. network.conf is < 1 KB in practice,
+     * and config_parse handles EOF mid-stream cleanly per the I12
+     * regression-guard tests. A follow-up commit will replace this
+     * with a DTB walker that reads /chosen/linux,initrd-{start,end}
+     * for the exact blob size.
+     *
+     * Failure → panic_k (D013 config error, Morse "K" `─·─`). The
+     * user pulls the SD, fixes network.conf, reflashes. */
+    ldr     x0, =INITRAMFS_ADDR
+    mov     w1, #4096
+    bl      config_parse
+    cbnz    w0, .Lcfg_fail
+
+    ldr     x0, =msg_cfg_ok
+    bl      uart_puts
+
     /* Initialize GENET Ethernet */
     ldr     x0, =GENET_BASE
     ldr     x1, =genet_state
@@ -188,6 +210,14 @@ main:
     ldr     x0, =msg_net_fail
     bl      uart_puts
     mov     w0, #1
+    b       .Ldone
+
+.ifdef PLATFORM_PI4
+.Lcfg_fail:
+    ldr     x0, =msg_cfg_fail
+    bl      uart_puts
+    bl      panic_k                /* never returns */
+.endif
 
 .Ldone:
     ldp     x29, x30, [sp], #16
@@ -340,6 +370,8 @@ msg_ecm_active: .asciz "CDC-ECM data interface active\r\n"
 .ifdef PLATFORM_PI4
 msg_hello_pi4:  .asciz "Hello from bare-metal Pi 4!\r\n"
 msg_genet_ok:   .asciz "GENET Gigabit Ethernet initialized\r\n"
+msg_cfg_ok:     .asciz "network.conf parsed\r\n"
+msg_cfg_fail:   .asciz "network.conf parse failed — check SD\r\n"
 .endif
 msg_net_fail:   .asciz "Network bring-up failed\r\n"
 msg_entering_loop: .asciz "Entering net_loop\r\n"
