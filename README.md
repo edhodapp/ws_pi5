@@ -7,12 +7,15 @@
 
 ## Installation
 
-> ⚠️ **INSTALLATION INSTRUCTIONS ARE A WORK IN PROGRESS — DO NOT USE.**
-> Network configuration (IP / netmask / gateway / hostname / mDNS / factory
-> MAC from Pi OTP) is being redesigned. The current path assumes a
-> hardcoded `10.0.0.0/24` subnet with the Pi at `.2` and a hardcoded
-> locally-administered MAC, neither of which will work on a typical home
-> network. Quick-Start will return once the config-file path lands.
+> ⚠️ **Network configuration is mid-redesign.** The user-facing format
+> (`network.conf` on the SD card — see [the reference](#networkconf-reference) below) is final and
+> `scripts/mk_sd.sh` ships a default that's lint-validated at build
+> time. The kernel-side parser (D004) and boot-time wiring (D014's I5)
+> are still in flight — kernels built today still use the hardcoded
+> values in `lib/net_cfg.S`, **not** what's in `network.conf` on the
+> SD. If you're flashing right now, edit `lib/net_cfg.S` for your
+> network and rebuild. The full `network.conf` flow goes live with
+> the next batch of commits.
 
 Two paths, pick the one that matches what you want to do.
 
@@ -366,12 +369,107 @@ scripts/mk_sd.sh --image appliance.img pi4_sd.img
 ```
 
 Flash `pi4_sd.img` to an SD card with **Raspberry Pi Imager** (choose
-"Use custom"), **balenaEtcher**, or `dd`. Insert the SD into the Pi
-4, power on, and the appliance is live on `http://<pi-ip>/`.
+"Use custom"), **balenaEtcher**, or `dd`.
+
+### 4. Edit `network.conf` for your network
+
+Before booting, edit `network.conf` on the SD card's FAT boot
+partition. Mount the SD card on your laptop (Imager and Etcher
+re-eject it after flashing — re-insert), open the boot partition,
+and edit the four required keys: `ip`, `netmask`, `gateway`, and
+`hostname`. The default values fail by design (gateway `0.0.0.0`
+won't ARP) so the Pi halts with [panic pattern G](docs/PANIC_PATTERNS.md)
+until you customize.
+
+See the [`network.conf` reference](#networkconf-reference) below for
+each field's format and the optional keys (`ntp_server`, `mac`).
+`scripts/mk_sd.sh` lint-validated whatever it shipped, so a malformed
+default would have failed the build before you got here — but if you
+edit by hand on the SD, you're outside that gate; double-check
+syntax against the reference if the Pi halts with
+[panic pattern N](docs/PANIC_PATTERNS.md).
+
+Insert the SD into the Pi 4, power on, and the appliance is live on
+`http://<hostname>.local/` once mDNS comes up (D006). The `<pi-ip>` you
+configured in `network.conf` also works.
 
 > If you'd rather drop files onto a pre-formatted FAT32 card by hand
 > (no `mtools` dependency), run `scripts/mk_sd.sh appliance.img
 > sd_boot/` for the directory form and `cp -r sd_boot/* /media/.../boot/`.
+> Edit `network.conf` in `sd_boot/` before the copy.
+
+## `network.conf` reference
+
+`network.conf` lives at the FAT root of the SD card and configures
+the Pi's network identity. Format and validation rules are normative
+in [`docs/DECISIONS.md`](docs/DECISIONS.md) (D003 / D006 / D012);
+this section is the user-facing summary.
+
+The first non-empty line MUST be the magic sentinel:
+
+```
+# WSPI5CFG
+```
+
+A file without this line is rejected (the linter at build time, the
+asm parser at boot — both produce [panic pattern N](docs/PANIC_PATTERNS.md)
+on mismatch).
+
+### Keys
+
+| Key | Required? | Type | Notes |
+|---|---|---|---|
+| `ip` | yes | dotted-decimal IPv4 | This Pi's static address |
+| `netmask` | yes | dotted-decimal IPv4 | Recorded for documentation; the runtime uses always-via-gateway routing per D010 and ignores the value |
+| `gateway` | yes | dotted-decimal IPv4 | Default gateway; ARPed at boot, [panic pattern G](docs/PANIC_PATTERNS.md) on timeout |
+| `hostname` | yes | RFC 1123 LDH, 1–63 chars | Reachable as `<hostname>.local` via mDNS |
+| `ntp_server` | no | dotted-decimal IPv4 | NTP source; omit to skip NTP |
+| `mac` | no | six colon-separated hex bytes | Override the factory MAC; omit to use Pi 4 OTP fuses (mailbox tag `0x00010003`). If the mailbox call fails AND no `mac=` override is given, the kernel halts with [panic pattern M](docs/PANIC_PATTERNS.md) per D011 |
+
+### Syntax rules
+
+- `key=value` per line. Whitespace around `=` is allowed and stripped.
+- `#` starts a comment. Whitespace must precede `#` for it to be
+  treated as an inline comment (so `hostname=my#name` is a
+  syntactically invalid hostname rather than silently truncated to
+  `my`); a `#` at the start of a line is always a comment.
+- Blank lines are ignored.
+- Values are validated by key:
+  - IPv4 octets must be plain decimal `0–255`. Leading-zero octets
+    like `010` are rejected (different stacks interpret them
+    inconsistently).
+  - Hostnames are LDH (letters, digits, hyphens) per RFC 1123; first
+    AND last character must be a letter or digit.
+  - MAC bytes are case-insensitive 2-digit hex (`de:ad:be:ef:ca:fe`
+    and `DE:AD:BE:EF:CA:FE` both work).
+
+### Example
+
+```
+# WSPI5CFG
+# My home network appliance.
+
+ip=192.168.1.50
+netmask=255.255.255.0
+gateway=192.168.1.1
+hostname=hodapp-www
+
+# Optional: pin a specific NTP server.
+ntp_server=216.239.35.0
+```
+
+### When the lint catches you
+
+The linter at `scripts/lint_network_conf.py` runs at SD-build time
+and fires a clear diagnostic if `network.conf` is malformed. Run it
+manually to debug a hand-edited file:
+
+```
+.venv/bin/python scripts/lint_network_conf.py /path/to/network.conf
+```
+
+Exit codes: `0` valid, `1` invalid (per-error diagnostics on stderr),
+`2` IO error.
 
 ## Building
 
