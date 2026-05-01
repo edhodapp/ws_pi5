@@ -196,12 +196,28 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table print-INITRAMFS_ADDR
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table print-INITRAMFS_ADDR pi4-test
 
 all: kernel8.img
 
 kernel8.img: $(BUILD)/kernel8.elf
 	$(OBJCOPY) -O binary $< $@
+
+# ---------------------------------------------------------------------------
+# pi4-test — minimal kernel for hardware integration testing
+#
+# Builds with the smallest viable appliance slab (CONTENT_MAX=64 KiB,
+# MAX_ROUTES=8) so the resulting kernel8.img is ~150 KiB instead of
+# the 257 MiB default. Use this for mDNS / DHCP / HTTP-light hardware
+# tests where the appliance content isn't being exercised.
+#
+# Release builds are unaffected — `make PLATFORM=pi4` still produces
+# the full-slab kernel, and `mk_sd.sh --build public/ sd.img` still
+# auto-sizes from public/ size.
+# ---------------------------------------------------------------------------
+pi4-test:
+	$(MAKE) clean
+	$(MAKE) PLATFORM=pi4 CONTENT_MAX=65536 MAX_ROUTES=8
 
 # ---------------------------------------------------------------------------
 # verify-fsa-table — cross-check tests/func/http_output_fsa_vectors.tsv

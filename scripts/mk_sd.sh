@@ -55,17 +55,31 @@
 set -euo pipefail
 
 MODE="dir"
-case "${1:-}" in
-    --image) MODE="image"; shift ;;
-    --build) MODE="build"; shift ;;
-esac
+TESTRIG=0
+# Parse leading flags. --testrig is dev-only: overwrites the default
+# placeholder network.conf with the hw_test rig values
+# (10.0.0.2 / 10.0.0.1 / wspi5) so dev iteration doesn't have to
+# hand-edit the file every time. Release users never pass it.
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --image)   MODE="image"; shift ;;
+        --build)   MODE="build"; shift ;;
+        --testrig) TESTRIG=1; shift ;;
+        *)         echo "mk_sd: unknown flag $1" >&2; exit 2 ;;
+    esac
+done
 
 if [[ $# -ne 2 ]]; then
     cat >&2 <<USAGE
 usage:
-  $(basename "$0")          <packaged_kernel.img> <output_dir>
-  $(basename "$0") --image  <packaged_kernel.img> <output_image.img>
+  $(basename "$0")          [--testrig] <packaged_kernel.img> <output_dir>
+  $(basename "$0") --image  [--testrig] <packaged_kernel.img> <output_image.img>
   $(basename "$0") --build  <public_dir> <output_image.img>
+
+flags:
+  --testrig   dev-only: overlay 10.0.0.2 / 10.0.0.1 / wspi5 onto the
+              default network.conf so the SD boots straight to the
+              standard hw_test wiring without manual edits.
 USAGE
     exit 2
 fi
@@ -169,6 +183,26 @@ for f in "${FW_FILES[@]}"; do
     cp "$FW_DIR/$f" "$BUNDLE_DIR/$f"
 done
 
+# Soft sanity: warn if the kernel looks like a default-slab build
+# (256 MiB CONTENT_MAX) and we're NOT in --build mode (which sized
+# the slab deliberately from public/). Catches the dev-iteration
+# trap of forgetting CONTENT_MAX. Doesn't abort — release users
+# legitimately ship large kernels and we don't want a false-positive
+# blocking them.
+if [[ "$MODE" != "build" ]]; then
+    KSIZE=$(stat -c '%s' "$BUNDLE_DIR/kernel8.img")
+    if (( KSIZE > 50 * 1024 * 1024 )); then
+        cat >&2 <<MKSDWARN
+mk_sd: notice — kernel8.img is $((KSIZE / 1024 / 1024)) MiB.
+       If this is a hardware test (mDNS / DHCP / L4) and you don't need the
+       full appliance content, rebuild with:
+           make pi4-test
+       which uses CONTENT_MAX=65536 MAX_ROUTES=8 → ~150 KiB kernel.
+       Continuing as-is.
+MKSDWARN
+    fi
+fi
+
 # overlays/disable-bt.dtbo is load-bearing: without it the firmware
 # silently keeps PL011 routed to the BT chip and our kernel's UART
 # debug output disappears (debug_log_0x80000.md attempt 38).
@@ -262,6 +296,18 @@ hostname=wspi5
 # halts with panic pattern M (`——`) — see D011.
 #mac=de:ad:be:ef:ca:fe
 EOF
+
+# --testrig: replace the placeholder ip / gateway with the standard
+# hw_test wiring (Pi 4 at 10.0.0.2 on 10.0.0.0/24, laptop gateway
+# at 10.0.0.1, hostname=wspi5). Hostname is already wspi5 in the
+# default — no edit needed there. This keeps the dev iteration
+# friction-free without affecting release SDs (no flag → placeholders
+# fail loudly at boot per the original D013 design).
+if (( TESTRIG == 1 )); then
+    sed -i 's/^ip=0\.0\.0\.0/ip=10.0.0.2/' "$BUNDLE_DIR/network.conf"
+    sed -i 's/^gateway=0\.0\.0\.0/gateway=10.0.0.1/' "$BUNDLE_DIR/network.conf"
+    echo "mk_sd: --testrig applied (ip=10.0.0.2, gateway=10.0.0.1)"
+fi
 
 # Lint network.conf if one is present in the bundle (D012: linter is
 # the executable spec). Today this is a no-op — the default
