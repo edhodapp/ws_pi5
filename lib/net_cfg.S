@@ -97,7 +97,10 @@ net_netmask:
 net_hostname_len:
     .word   0                           /* 0..63 */
 
-.balign 4
+/* 8-byte alignment is load-bearing: lib/config_parser.S's
+ * _store_hostname zeroes the buffer with `stp xzr, xzr, [x3, ...]`
+ * which requires 8-byte alignment under MMU-on. */
+.balign 8
 net_hostname:
     .space  64                          /* 63 LDH chars + slack */
 

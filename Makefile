@@ -126,7 +126,8 @@ SHARED_OBJS = \
     $(BUILD)/store.o \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o \
-    $(BUILD)/http_output_fsa.o $(BUILD)/panic.o
+    $(BUILD)/http_output_fsa.o $(BUILD)/panic.o \
+    $(BUILD)/config_parser.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -169,7 +170,8 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_ntp.o $(BUILD)/test_md5.o $(BUILD)/test_http.o \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
     $(BUILD)/test_genet_rx_err.o \
-    $(BUILD)/test_http_output_fsa.o
+    $(BUILD)/test_http_output_fsa.o \
+    $(BUILD)/test_config_parser.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
@@ -422,6 +424,9 @@ $(BUILD)/perf.o: lib/perf.S include/perf.inc | $(BUILD)
 $(BUILD)/panic.o: lib/panic.S $(PI_INC)/platform.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/config_parser.o: lib/config_parser.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # ===========================================================================
 # Pi platform drivers (platform/pi/)
 # ===========================================================================
@@ -471,6 +476,9 @@ $(BUILD)/test_store.o: tests/test_store.S include/store.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_eth.o: tests/test_eth.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_config_parser.o: tests/test_config_parser.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_arp.o: tests/test_arp.S include/net.inc | $(BUILD)
