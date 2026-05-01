@@ -103,6 +103,7 @@
 .equ UDP_CHECKSUM,     6
 .equ UDP_HDR_LEN,      8
 .equ UDP_ECHO_PORT,    7
+.equ MDNS_PORT,        5353
 
 /* IP fragment reassembly — slot layout
  *

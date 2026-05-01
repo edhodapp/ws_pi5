@@ -23,6 +23,8 @@
 .global test_mdns_a_query_match
 .global test_mdns_a_query_no_match
 .global test_mdns_aaaa_query_drop
+.global test_mdns_dispatch_a_match
+.global test_mdns_dispatch_no_reply
 
 .section .text
 
@@ -224,6 +226,162 @@ test_mdns_aaaa_query_drop:
     ret
 
 
+/* ========================================================================
+ * test_mdns_dispatch_a_match — frame-level test of mdns_dispatch.
+ * Builds a synthetic ETH+IP+UDP frame containing a query for
+ * "qemu.local", calls mdns_dispatch, and asserts the response
+ * frame has the right multicast headers (eth dst = 01:00:5e:00:00:fb,
+ * ip dst = 224.0.0.251, ttl = 255, ports 5353/5353), our identity
+ * in the src fields, and a well-formed mDNS response payload.
+ * ======================================================================== */
+test_mdns_dispatch_a_match:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    /* Copy the synthetic input frame into a writable BSS buffer
+     * so mdns_dispatch can rewrite it in place. */
+    ldr     x0, =_mdns_dispatch_in_frame
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_len
+    bl      _mdns_test_memcpy
+
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_len
+    bl      mdns_dispatch
+    cbz     w0, .Ltmd_fail
+    /* Expect frame length: ETH(14) + IP(20) + UDP(8) + payload(44) = 86. */
+    cmp     w0, #86
+    b.ne    .Ltmd_fail
+
+    ldr     x0, =_mdns_frame_buf
+
+    /* Eth dst = 01:00:5e:00:00:fb */
+    ldrb    w1, [x0, #0]
+    cmp     w1, #0x01
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #1]
+    cbnz    w1, .Ltmd_fail
+    ldrb    w1, [x0, #2]
+    cmp     w1, #0x5e
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, #0xfb
+    b.ne    .Ltmd_fail
+
+    /* Eth src = net_our_mac (02:00:00:00:00:01 per the QEMU default). */
+    ldrb    w1, [x0, #6]
+    cmp     w1, #0x02
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #11]
+    cmp     w1, #0x01
+    b.ne    .Ltmd_fail
+
+    /* IP TTL = 255 per RFC 6762 §11. */
+    ldrb    w1, [x0, #(14 + 8)]     /* ETH_HDR_LEN + IP_TTL */
+    cmp     w1, #255
+    b.ne    .Ltmd_fail
+
+    /* IP src = our IP (10.0.2.15). */
+    ldrb    w1, [x0, #(14 + 12)]
+    cmp     w1, #10
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #(14 + 15)]
+    cmp     w1, #15
+    b.ne    .Ltmd_fail
+
+    /* IP dst = 224.0.0.251. */
+    ldrb    w1, [x0, #(14 + 16)]
+    cmp     w1, #224
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #(14 + 19)]
+    cmp     w1, #251
+    b.ne    .Ltmd_fail
+
+    /* UDP sport (offset 14+20=34) = 5353 (0x14E9). */
+    ldrb    w1, [x0, #34]
+    cmp     w1, #0x14
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #35]
+    cmp     w1, #0xE9
+    b.ne    .Ltmd_fail
+    /* UDP dport = 5353. */
+    ldrb    w1, [x0, #36]
+    cmp     w1, #0x14
+    b.ne    .Ltmd_fail
+    ldrb    w1, [x0, #37]
+    cmp     w1, #0xE9
+    b.ne    .Ltmd_fail
+
+    /* mDNS payload starts at offset 42. Header byte 2 = 0x84 (flags hi). */
+    ldrb    w1, [x0, #(42 + 2)]
+    cmp     w1, #0x84
+    b.ne    .Ltmd_fail
+    /* ANCOUNT (bytes 42+6, 42+7) = 0x00 0x01. */
+    ldrb    w1, [x0, #(42 + 6)]
+    cbnz    w1, .Ltmd_fail
+    ldrb    w1, [x0, #(42 + 7)]
+    cmp     w1, #1
+    b.ne    .Ltmd_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_match
+    bl      test_pass
+    b       .Ltmd_done
+.Ltmd_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_match
+    bl      test_fail
+.Ltmd_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_dispatch_no_reply — frame-level negative test.
+ * A query for "other.local" → mdns_dispatch returns 0.
+ * ======================================================================== */
+test_mdns_dispatch_no_reply:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_dispatch_in_other
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_other_len
+    bl      _mdns_test_memcpy
+
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_other_len
+    bl      mdns_dispatch
+    cbnz    w0, .Ltmnr_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_no_reply
+    bl      test_pass
+    b       .Ltmnr_done
+.Ltmnr_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_no_reply
+    bl      test_fail
+.Ltmnr_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
+ * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
+_mdns_test_memcpy:
+    cbz     x2, 9f
+1:  ldrb    w3, [x0], #1
+    strb    w3, [x1], #1
+    sub     x2, x2, #1
+    cbnz    x2, 1b
+9:  ret
+
+
 .section .rodata
 
 _mdns_name_match:
@@ -232,6 +390,10 @@ _mdns_name_no_match:
     .asciz "mdns_a_query_no_match"
 _mdns_name_aaaa_drop:
     .asciz "mdns_aaaa_query_drop"
+_mdns_name_dispatch_match:
+    .asciz "mdns_dispatch_a_match"
+_mdns_name_dispatch_no_reply:
+    .asciz "mdns_dispatch_no_reply"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
@@ -298,6 +460,84 @@ _mdns_q_qemu_aaaa:
 .equ _mdns_q_qemu_aaaa_len, (. - _mdns_q_qemu_aaaa)
 
 
+/* Synthetic ETH+IP+UDP+DNS frame: a sender at 10.0.0.5 / MAC
+ * de:ad:be:ef:01:23 sending an mDNS A query for "qemu.local" to
+ * the IPv4 mDNS multicast group 224.0.0.251 / 01:00:5e:00:00:fb.
+ * Layout: 14 (ETH) + 20 (IP) + 8 (UDP) + 28 (DNS) = 70 bytes. */
+.balign 4
+_mdns_dispatch_in_frame:
+    /* Eth: dst=01:00:5e:00:00:fb, src=de:ad:be:ef:01:23, type=0x0800 */
+    .byte 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb
+    .byte 0xde, 0xad, 0xbe, 0xef, 0x01, 0x23
+    .byte 0x08, 0x00
+    /* IP: ver/IHL=0x45, TOS=0, totlen=56 (IP+UDP+DNS),
+     * id=0, flags/frag=0, ttl=255, proto=17 (UDP), checksum=0 (test),
+     * src=10.0.0.5, dst=224.0.0.251. */
+    .byte 0x45, 0x00
+    .byte 0x00, 0x38
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0xff, 0x11
+    .byte 0x00, 0x00
+    .byte 0x0a, 0x00, 0x00, 0x05
+    .byte 0xe0, 0x00, 0x00, 0xfb
+    /* UDP: sport=5353, dport=5353, len=36 (UDP+DNS), checksum=0. */
+    .byte 0x14, 0xe9
+    .byte 0x14, 0xe9
+    .byte 0x00, 0x24
+    .byte 0x00, 0x00
+    /* DNS: id=0x1234, flags=0, qd=1, an=ns=ar=0,
+     *      QNAME=[4]"qemu"[5]"local"[0], QTYPE=A, QCLASS=IN. */
+    .byte 0x12, 0x34
+    .byte 0x00, 0x00
+    .byte 0x00, 0x01
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 4
+    .ascii "qemu"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x00, 0x01
+.equ _mdns_dispatch_in_len, (. - _mdns_dispatch_in_frame)
+
+/* Same shape but query for "other.local" — should not produce
+ * a reply when net_hostname is "qemu". */
+.balign 4
+_mdns_dispatch_in_other:
+    .byte 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb
+    .byte 0xde, 0xad, 0xbe, 0xef, 0x01, 0x23
+    .byte 0x08, 0x00
+    .byte 0x45, 0x00
+    .byte 0x00, 0x39
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0xff, 0x11
+    .byte 0x00, 0x00
+    .byte 0x0a, 0x00, 0x00, 0x05
+    .byte 0xe0, 0x00, 0x00, 0xfb
+    .byte 0x14, 0xe9
+    .byte 0x14, 0xe9
+    .byte 0x00, 0x25
+    .byte 0x00, 0x00
+    .byte 0x12, 0x34
+    .byte 0x00, 0x00
+    .byte 0x00, 0x01
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 5
+    .ascii "other"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x00, 0x01
+.equ _mdns_dispatch_in_other_len, (. - _mdns_dispatch_in_other)
+
+
 .section .bss
 .balign 8
 _mdns_resp_buf:
@@ -306,3 +546,10 @@ _mdns_resp_buf:
 .balign 8
 _mdns_save_buf:
     .space 80                   /* 64 hostname + 4 len + 4 ip + 8 pad */
+
+/* Writable scratch frame for mdns_dispatch — copied from .rodata
+ * synthetic frames at test setup, then mdns_dispatch rewrites in
+ * place. ETH_FRAME_MAX is 1514; round to a power of two. */
+.balign 8
+_mdns_frame_buf:
+    .space 256

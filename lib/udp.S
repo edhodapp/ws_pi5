@@ -143,6 +143,9 @@ udp_handle:
     b.eq    .Ludp_echo
     cmp     w0, #NTP_PORT
     b.eq    .Ludp_ntp
+    movz    w1, #MDNS_PORT
+    cmp     w0, w1
+    b.eq    .Ludp_mdns
 
     /* Unknown port → ICMP Port Unreachable (type 3, code 3) */
     mov     x0, x19
@@ -151,6 +154,16 @@ udp_handle:
     mov     w3, #ICMP_CODE_PORT_UNREACH
     bl      icmp_send_error
     b       .Ludp_drop
+
+.Ludp_mdns:
+    /* mDNS: hand the entire frame to mdns_dispatch (D008/D009).
+     * It rewrites the frame in place to a multicast response and
+     * returns the total reply frame length, or 0 if the query
+     * doesn't match our hostname / isn't an A or ANY query. */
+    mov     x0, x19
+    mov     w1, w20
+    bl      mdns_dispatch
+    b       .Ludp_done
 
 .Ludp_ntp:
     /* NTP response: get current ticks, extract NTP payload, call ntp_handle */

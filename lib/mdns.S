@@ -78,6 +78,16 @@ _local_label:
 _local_str:
     .ascii "local"
 
+/* L2 multicast MAC for IPv4 mDNS, derived from group 224.0.0.251
+ * per RFC 1112 §6.4. Originally lived in genet.S (I14) but moved
+ * here so QEMU builds — which don't link genet.S — can still
+ * resolve the symbol for unit tests of the responder. Same bytes,
+ * same global symbol. */
+.balign 2
+.global mdns_mac
+mdns_mac:
+    .byte 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb
+
 
 .section .text
 
@@ -337,3 +347,181 @@ _mdns_memcpy:
     sub     x2, x2, #1
     cbnz    x2, 1b
 9:  ret
+
+
+/* ===========================================================================
+ * mdns_dispatch — UDP-port-5353 frame handler.
+ *
+ *   x0 = frame buffer (Eth + IP + UDP + DNS payload)
+ *   w1 = frame length in bytes
+ * Returns:
+ *   w0 = total response frame length, or 0 if no reply
+ *
+ * Validates the UDP payload as an mDNS query for our hostname,
+ * builds the response payload via mdns_build_response, then
+ * rewrites the frame's Eth + IP + UDP headers in place to
+ * become a multicast response to 224.0.0.251 / 01:00:5e:00:00:fb,
+ * with our MAC + IP as source and TTL=255 per RFC 6762 §11.
+ *
+ * The response payload is built in a scratch BSS buffer first
+ * (since it can be longer than the request) and copied into the
+ * frame after the headers are rewritten.
+ *
+ * Register convention:
+ *   x19 frame buffer (callee-saved)
+ *   w20 input frame length / output cursor scratch
+ *   w21 response payload length (callee-saved)
+ *   x22 scratch ptr (callee-saved across bl)
+ * =========================================================================== */
+
+.equ MDNS_FRAME_PAYLOAD_OFF,    (14 + 20 + 8)   /* 42: ETH+IP+UDP */
+.equ MDNS_PORT_NBO,             0xE914          /* 5353 in BE: 0x14 0xE9 */
+
+.global mdns_dispatch
+
+mdns_dispatch:
+    stp     x29, x30, [sp, #-48]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+
+    mov     x19, x0
+    mov     w20, w1
+
+    /* Need at least ETH + IP + UDP headers. */
+    cmp     w20, #MDNS_FRAME_PAYLOAD_OFF
+    b.lt    .Lmd_drop
+
+    /* Build the response payload in scratch. */
+    add     x0, x19, #MDNS_FRAME_PAYLOAD_OFF
+    sub     w1, w20, #MDNS_FRAME_PAYLOAD_OFF
+    adrp    x2, _mdns_payload_scratch
+    add     x2, x2, :lo12:_mdns_payload_scratch
+    bl      mdns_build_response
+    cbz     w0, .Lmd_drop
+    mov     w21, w0                 /* response payload length */
+
+    /* --- Rewrite Eth header. --- */
+    /* Eth dst = mdns_mac (6 bytes). */
+    adrp    x22, mdns_mac
+    add     x22, x22, :lo12:mdns_mac
+    ldrb    w0, [x22, #0];  strb w0, [x19, #0]
+    ldrb    w0, [x22, #1];  strb w0, [x19, #1]
+    ldrb    w0, [x22, #2];  strb w0, [x19, #2]
+    ldrb    w0, [x22, #3];  strb w0, [x19, #3]
+    ldrb    w0, [x22, #4];  strb w0, [x19, #4]
+    ldrb    w0, [x22, #5];  strb w0, [x19, #5]
+    /* Eth src = net_our_mac. */
+    adrp    x22, net_our_mac
+    add     x22, x22, :lo12:net_our_mac
+    ldrb    w0, [x22, #0];  strb w0, [x19, #6]
+    ldrb    w0, [x22, #1];  strb w0, [x19, #7]
+    ldrb    w0, [x22, #2];  strb w0, [x19, #8]
+    ldrb    w0, [x22, #3];  strb w0, [x19, #9]
+    ldrb    w0, [x22, #4];  strb w0, [x19, #10]
+    ldrb    w0, [x22, #5];  strb w0, [x19, #11]
+    /* Eth type stays 0x0800 (already set by sender, but be paranoid). */
+    mov     w0, #0x08
+    strb    w0, [x19, #12]
+    strb    wzr, [x19, #13]
+
+    /* --- Rewrite IP header. --- */
+    /* ver=4, IHL=5 → 0x45. Other byte (TOS) = 0. */
+    mov     w0, #0x45
+    strb    w0, [x19, #(14 + 0)]
+    strb    wzr, [x19, #(14 + 1)]
+    /* Total length = 20 + 8 + payload_len. Big-endian on wire. */
+    add     w0, w21, #(20 + 8)
+    lsr     w1, w0, #8
+    strb    w1, [x19, #(14 + 2)]
+    strb    w0, [x19, #(14 + 3)]
+    /* ID, Flags/Frag = 0. */
+    strb    wzr, [x19, #(14 + 4)]
+    strb    wzr, [x19, #(14 + 5)]
+    strb    wzr, [x19, #(14 + 6)]
+    strb    wzr, [x19, #(14 + 7)]
+    /* TTL = 255 per RFC 6762 §11. */
+    mov     w0, #255
+    strb    w0, [x19, #(14 + 8)]
+    /* Protocol = UDP (17). */
+    mov     w0, #17
+    strb    w0, [x19, #(14 + 9)]
+    /* IP checksum = 0 (computed below). */
+    strb    wzr, [x19, #(14 + 10)]
+    strb    wzr, [x19, #(14 + 11)]
+    /* IP src = net_our_ip (4 bytes wire-order). */
+    adrp    x22, net_our_ip
+    add     x22, x22, :lo12:net_our_ip
+    ldrb    w0, [x22, #0]; strb w0, [x19, #(14 + 12)]
+    ldrb    w0, [x22, #1]; strb w0, [x19, #(14 + 13)]
+    ldrb    w0, [x22, #2]; strb w0, [x19, #(14 + 14)]
+    ldrb    w0, [x22, #3]; strb w0, [x19, #(14 + 15)]
+    /* IP dst = 224.0.0.251 = 0xE0 0x00 0x00 0xFB on wire. */
+    mov     w0, #0xE0
+    strb    w0, [x19, #(14 + 16)]
+    strb    wzr, [x19, #(14 + 17)]
+    strb    wzr, [x19, #(14 + 18)]
+    mov     w0, #0xFB
+    strb    w0, [x19, #(14 + 19)]
+    /* Compute IP checksum over the 20-byte header. ip_checksum
+     * takes (x0=ptr, x1=len) and returns the 16-bit complement
+     * already in network byte order in w0 (verified by examining
+     * how lib/icmp.S and lib/ip.S use it). Write it into bytes
+     * 10/11 of the IP header. */
+    add     x0, x19, #14
+    mov     w1, #20
+    bl      ip_checksum
+    /* w0 = checksum. Write as big-endian into IP[10..11]. The
+     * convention in the existing codebase (e.g. lib/icmp.S after
+     * its own ip_checksum call) is to strh w0 directly — the
+     * function returns the value in already-flipped form for
+     * direct wire write. */
+    lsr     w1, w0, #8
+    strb    w0, [x19, #(14 + 10)]
+    strb    w1, [x19, #(14 + 11)]
+
+    /* --- Rewrite UDP header. --- */
+    /* sport = dport = 5353 (0x14E9). Big-endian wire bytes 0x14 0xE9. */
+    mov     w0, #0x14
+    strb    w0, [x19, #(14 + 20)]
+    mov     w0, #0xE9
+    strb    w0, [x19, #(14 + 21)]
+    mov     w0, #0x14
+    strb    w0, [x19, #(14 + 22)]
+    mov     w0, #0xE9
+    strb    w0, [x19, #(14 + 23)]
+    /* UDP length = 8 + payload_len, big-endian. */
+    add     w0, w21, #8
+    lsr     w1, w0, #8
+    strb    w1, [x19, #(14 + 24)]
+    strb    w0, [x19, #(14 + 25)]
+    /* UDP checksum = 0 (mDNS over IPv4 may zero it; receivers
+     * generally accept this. Matches the simpler design path; if
+     * ever required, recompute via udp_checksum and write here). */
+    strb    wzr, [x19, #(14 + 26)]
+    strb    wzr, [x19, #(14 + 27)]
+
+    /* --- Copy response payload from scratch to frame[42..]. --- */
+    adrp    x0, _mdns_payload_scratch
+    add     x0, x0, :lo12:_mdns_payload_scratch
+    add     x1, x19, #MDNS_FRAME_PAYLOAD_OFF
+    mov     x2, x21
+    bl      _mdns_memcpy
+
+    /* Total response frame length = headers + payload. */
+    add     w0, w21, #MDNS_FRAME_PAYLOAD_OFF
+    b       .Lmd_done
+
+.Lmd_drop:
+    mov     w0, #0
+.Lmd_done:
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+
+.section .bss
+.balign 8
+_mdns_payload_scratch:
+    .space 256                      /* mDNS responses are tiny */
