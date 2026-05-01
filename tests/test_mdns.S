@@ -45,12 +45,24 @@
 .global test_mdns_state_first_send_is_probe
 .global test_mdns_state_fourth_send_is_announce
 .global test_mdns_state_live_noop
+.global test_mdns_dispatch_drops_in_probe
+.global test_mdns_dispatch_responds_in_announce
+.global test_mdns_dispatch_panics_on_conflict
 
 .section .text
 
 /* Set net_hostname to "qemu" / len 4 / net_our_ip to 10.0.2.15.
- * Caller must have already saved these via _mdns_test_save. */
+ * Caller must have already saved these via _mdns_test_save. Also
+ * defaults the mDNS state machine to LIVE so dispatch tests that
+ * pre-date the 9/N state-gating still see "respond normally"
+ * behavior; tests that exercise probe-phase gating must overwrite
+ * mdns_send_ctx.state after this call. */
 _mdns_test_set_state:
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    mov     w1, #6                      /* MDNS_STATE_LIVE */
+    str     w1, [x0, #48]               /* MDNSC_STATE offset */
+
     adrp    x0, net_hostname
     add     x0, x0, :lo12:net_hostname
     /* Zero 64 bytes via two stp xzr,xzr per 16. */
@@ -1476,6 +1488,181 @@ test_mdns_state_live_noop:
     ret
 
 
+/* Stub panic handler for tests: increments _mdns_panic_count and
+ * returns. Wired in via mdns_panic_fn; the production default
+ * (mdns_panic_fn = NULL → fall through to bl panic_n in mdns.S)
+ * is what production uses, but tests overwrite mdns_panic_fn so
+ * the conflict path can be exercised without halting. */
+_mdns_panic_capture:
+    adrp    x0, _mdns_panic_count
+    add     x0, x0, :lo12:_mdns_panic_count
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+    ret
+
+_mdns_panic_capture_install:
+    adrp    x0, _mdns_panic_count
+    add     x0, x0, :lo12:_mdns_panic_count
+    str     wzr, [x0]
+    adrp    x0, mdns_panic_fn
+    add     x0, x0, :lo12:mdns_panic_fn
+    ldr     x1, =_mdns_panic_capture
+    str     x1, [x0]
+    ret
+
+_mdns_panic_capture_uninstall:
+    adrp    x0, mdns_panic_fn
+    add     x0, x0, :lo12:mdns_panic_fn
+    str     xzr, [x0]
+    ret
+
+
+/* ========================================================================
+ * test_mdns_dispatch_drops_in_probe — during PROBE_*, dispatch
+ * silently drops a query that LIVE state would have answered.
+ * Pre-9/N this would have returned 86 (the response frame length).
+ * ======================================================================== */
+test_mdns_dispatch_drops_in_probe:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    /* Override state to PROBE_2. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    mov     w1, #2
+    str     w1, [x0, #48]
+
+    /* Seed the standard mDNS query frame and dispatch it. */
+    ldr     x0, =_mdns_dispatch_in_frame
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_len
+    bl      _mdns_test_memcpy
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_len
+    bl      mdns_dispatch
+    cbnz    w0, .Ltddp_fail            /* must drop */
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_drops_in_probe
+    bl      test_pass
+    b       .Ltddp_done
+.Ltddp_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_drops_in_probe
+    bl      test_fail
+.Ltddp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_dispatch_responds_in_announce — during ANNOUNCE_*,
+ * dispatch responds normally. RFC 6762 §8.3: the responder is
+ * authoritative from first announce onward.
+ * ======================================================================== */
+test_mdns_dispatch_responds_in_announce:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    /* Override state to ANNOUNCE_1. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    mov     w1, #4
+    str     w1, [x0, #48]
+
+    ldr     x0, =_mdns_dispatch_in_frame
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_len
+    bl      _mdns_test_memcpy
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_len
+    bl      mdns_dispatch
+    cmp     w0, #86                    /* must produce a response frame */
+    b.ne    .Ltdra_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_responds_in_announce
+    bl      test_pass
+    b       .Ltdra_done
+.Ltdra_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_responds_in_announce
+    bl      test_fail
+.Ltdra_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_dispatch_panics_on_conflict — during PROBE_*, a packet
+ * that mdns_check_conflict flags must invoke mdns_panic_fn (in
+ * production: panic_n; in test: the capture stub). Verified via
+ * the stub's call counter.
+ * ======================================================================== */
+test_mdns_dispatch_panics_on_conflict:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+    bl      _mdns_panic_capture_install
+
+    /* State = PROBE_2. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    mov     w1, #2
+    str     w1, [x0, #48]
+
+    /* Build a frame whose UDP payload is a conflict response. The
+     * Eth/IP/UDP headers are seeded from the known-valid mDNS
+     * dispatch frame so ip_handle/udp_handle don't bail; we only
+     * need the mDNS payload to be a conflict packet. _mdns_dispatch_in_frame
+     * already has valid Eth/IP/UDP wrap and our standard "qemu.local"
+     * query. We need to overwrite the payload (offset 42..) with the
+     * conflict-response bytes. */
+    ldr     x0, =_mdns_dispatch_in_frame
+    ldr     x1, =_mdns_frame_buf
+    mov     x2, #_mdns_dispatch_in_len
+    bl      _mdns_test_memcpy
+
+    /* Patch payload: stamp _mdns_conflict_resp into frame[42..]. */
+    ldr     x0, =_mdns_conflict_resp
+    ldr     x1, =_mdns_frame_buf
+    add     x1, x1, #42
+    mov     x2, #_mdns_conflict_resp_len
+    bl      _mdns_test_memcpy
+
+    ldr     x0, =_mdns_frame_buf
+    mov     w1, #_mdns_dispatch_in_len
+    bl      mdns_dispatch
+    /* We don't care about the return value — what matters is that
+     * the panic stub was invoked. */
+
+    adrp    x0, _mdns_panic_count
+    add     x0, x0, :lo12:_mdns_panic_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ltdpc_fail
+
+    bl      _mdns_panic_capture_uninstall
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_panics_on_conflict
+    bl      test_pass
+    b       .Ltdpc_done
+.Ltdpc_fail:
+    bl      _mdns_panic_capture_uninstall
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_dispatch_panics_on_conflict
+    bl      test_fail
+.Ltdpc_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -1539,6 +1726,12 @@ _mdns_name_state_fourth_send_is_announce:
     .asciz "mdns_state_fourth_send_is_announce"
 _mdns_name_state_live_noop:
     .asciz "mdns_state_live_noop"
+_mdns_name_dispatch_drops_in_probe:
+    .asciz "mdns_dispatch_drops_in_probe"
+_mdns_name_dispatch_responds_in_announce:
+    .asciz "mdns_dispatch_responds_in_announce"
+_mdns_name_dispatch_panics_on_conflict:
+    .asciz "mdns_dispatch_panics_on_conflict"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
@@ -1839,3 +2032,7 @@ _mdns_last_frame:
 .balign 8
 _mdns_test_tpool:
     .space 520                  /* 8 + 8*32 = 264 minimum; 520 = TPOOL_DEFAULT_SIZE */
+
+.balign 8
+_mdns_panic_count:
+    .space 4

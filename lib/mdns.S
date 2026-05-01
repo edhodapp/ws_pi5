@@ -590,6 +590,37 @@ mdns_dispatch:
     cmp     w20, #MDNS_FRAME_PAYLOAD_OFF
     b.lt    .Lmd_drop
 
+    /* State-gate (D008, RFC 6762 §8). The state machine determines
+     * what we do with this frame:
+     *   IDLE                    → drop (responder not started)
+     *   PROBE_1..PROBE_3        → conflict-check; panic on conflict,
+     *                              else drop (haven't claimed name)
+     *   ANNOUNCE_1..LIVE        → respond to queries normally
+     */
+    bl      mdns_get_state
+    cmp     w0, #MDNS_STATE_PROBE_3
+    b.gt    .Lmd_normal
+    cmp     w0, #MDNS_STATE_PROBE_1
+    b.lt    .Lmd_drop                   /* IDLE */
+
+    /* PROBE_*: scan for conflict. */
+    add     x0, x19, #MDNS_FRAME_PAYLOAD_OFF
+    sub     w1, w20, #MDNS_FRAME_PAYLOAD_OFF
+    bl      mdns_check_conflict
+    cbz     w0, .Lmd_drop               /* probing, no conflict — drop silently */
+
+    /* Conflict during probe → invoke panic handler. mdns_panic_fn is
+     * a function pointer initialized to panic_n in .data, so the
+     * production path is `blr panic_n` (never returns). Tests
+     * overwrite mdns_panic_fn with a capture stub that records the
+     * call and returns; the trailing branch falls through to drop. */
+    adrp    x0, mdns_panic_fn
+    add     x0, x0, :lo12:mdns_panic_fn
+    ldr     x0, [x0]
+    blr     x0
+    b       .Lmd_drop                   /* unreachable in production */
+
+.Lmd_normal:
     /* Build the response payload in scratch. */
     add     x0, x19, #MDNS_FRAME_PAYLOAD_OFF
     sub     w1, w20, #MDNS_FRAME_PAYLOAD_OFF
@@ -1300,3 +1331,13 @@ mdns_timer_cb:
 .global mdns_send_ctx
 mdns_send_ctx:
     .space MDNSC_SIZE
+
+/* Function pointer invoked from mdns_dispatch when a conflict is
+ * detected during the probe window. Initialized in .data to
+ * panic_n so production boot needs no explicit wiring; tests
+ * overwrite it with a capture stub. Signature: void fn(void). */
+.section .data
+.balign 8
+.global mdns_panic_fn
+mdns_panic_fn:
+    .quad panic_n

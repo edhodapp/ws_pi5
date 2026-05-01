@@ -146,6 +146,9 @@ _start:
     bl      test_mdns_state_first_send_is_probe
     bl      test_mdns_state_fourth_send_is_announce
     bl      test_mdns_state_live_noop
+    bl      test_mdns_dispatch_drops_in_probe
+    bl      test_mdns_dispatch_responds_in_announce
+    bl      test_mdns_dispatch_panics_on_conflict
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr
