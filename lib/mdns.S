@@ -903,3 +903,173 @@ mdns_build_probe_payload:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
     ret
+
+
+/* ===========================================================================
+ * mdns_build_announce_payload — build an RFC 6762 §8.3 unsolicited
+ * response advertising our hostname.local as an A record.
+ *
+ *   x0 = output buffer (>= 38 bytes for hostname_len=4; up to
+ *        12 + 12 + 1 + 64 + 7 + 14 = 110 bytes worst-case at
+ *        hostname_len=64)
+ * Returns:
+ *   w0 = packet length, or 0 if hostname is unset.
+ *
+ * Wire format:
+ *   Header (12 bytes): id=0, flags=0x8400 (QR=1, AA=1), QDCOUNT=0,
+ *                      ANCOUNT=1, NSCOUNT=0, ARCOUNT=0.
+ *   Answer:
+ *     NAME  = [hostname_len]hostname[5]"local"[0]   (full inline; no
+ *             compression pointer because there is no question section
+ *             to point at)
+ *     TYPE  = 0x0001 (A)
+ *     CLASS = 0x8001 (IN | cache-flush, RFC 6762 §10.2)
+ *     TTL   = 120 (0x00000078)
+ *     RDLEN = 4
+ *     RDATA = net_our_ip (wire bytes)
+ *   Total = 34 + hostname_len.
+ *
+ * Reads net_hostname / net_hostname_len / net_our_ip. Reuses
+ * register conventions from mdns_build_probe_payload:
+ *   x19 = output cursor
+ *   w20 = hostname length
+ *   x21 = net_hostname pointer
+ * =========================================================================== */
+.global mdns_build_announce_payload
+.global mdns_build_announce_frame
+
+mdns_build_announce_payload:
+    stp     x29, x30, [sp, #-48]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    mov     x19, x0
+
+    adrp    x21, net_hostname_len
+    add     x21, x21, :lo12:net_hostname_len
+    ldr     w20, [x21]
+    cbz     w20, .Lpa_drop
+
+    adrp    x21, net_hostname
+    add     x21, x21, :lo12:net_hostname
+
+    /* Header: id=0, flags=0x8400, qd=0, an=1, ns=0, ar=0. */
+    strb    wzr, [x19, #0]
+    strb    wzr, [x19, #1]
+    mov     w0, #0x84
+    strb    w0, [x19, #2]
+    strb    wzr, [x19, #3]
+    strb    wzr, [x19, #4]
+    strb    wzr, [x19, #5]
+    strb    wzr, [x19, #6]
+    mov     w0, #1
+    strb    w0, [x19, #7]
+    strh    wzr, [x19, #8]
+    strh    wzr, [x19, #10]
+    add     x19, x19, #12
+
+    /* NAME label 1: [hostname_len] + hostname bytes. */
+    strb    w20, [x19], #1
+    mov     x9, x21
+    mov     w10, w20
+.Lpa_h_copy:
+    cbz     w10, .Lpa_h_done
+    ldrb    w11, [x9], #1
+    strb    w11, [x19], #1
+    sub     w10, w10, #1
+    b       .Lpa_h_copy
+.Lpa_h_done:
+
+    /* NAME label 2: [5]"local" + terminator. */
+    mov     w0, #5
+    strb    w0, [x19], #1
+    mov     w0, #'l'
+    strb    w0, [x19], #1
+    mov     w0, #'o'
+    strb    w0, [x19], #1
+    mov     w0, #'c'
+    strb    w0, [x19], #1
+    mov     w0, #'a'
+    strb    w0, [x19], #1
+    mov     w0, #'l'
+    strb    w0, [x19], #1
+    strb    wzr, [x19], #1
+
+    /* TYPE = 0x0001 (A). */
+    strb    wzr, [x19], #1
+    mov     w0, #1
+    strb    w0, [x19], #1
+    /* CLASS = 0x8001 (IN | cache-flush). */
+    mov     w0, #0x80
+    strb    w0, [x19], #1
+    mov     w0, #1
+    strb    w0, [x19], #1
+    /* TTL = 0x00000078 (120 sec). */
+    strb    wzr, [x19], #1
+    strb    wzr, [x19], #1
+    strb    wzr, [x19], #1
+    mov     w0, #0x78
+    strb    w0, [x19], #1
+    /* RDLENGTH = 4. */
+    strb    wzr, [x19], #1
+    mov     w0, #4
+    strb    w0, [x19], #1
+    /* RDATA = net_our_ip (wire bytes; little-endian u32 store works
+     * because the field is already in wire order). */
+    adrp    x9, net_our_ip
+    add     x9, x9, :lo12:net_our_ip
+    ldr     w0, [x9]
+    str     w0, [x19], #4
+
+    add     w0, w20, #34                /* total length */
+    b       .Lpa_done
+
+.Lpa_drop:
+    mov     w0, #0
+.Lpa_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+
+/* ===========================================================================
+ * mdns_build_announce_frame — assemble a complete RFC 6762 §8.3
+ * unsolicited-response frame ready for the L2 send path.
+ *
+ *   x0 = frame buffer (must be ≥ 42 + 34 + hostname_len bytes; e.g.,
+ *        ≥ 80 for hostname_len=4, ≥ 140 worst-case at len=64)
+ * Returns:
+ *   w0 = total frame length, or 0 if hostname is unset.
+ *
+ * Builds the announce payload directly into frame[42..] then wraps
+ * Eth+IP+UDP multicast headers via _mdns_wrap_multicast_frame.
+ * =========================================================================== */
+mdns_build_announce_frame:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0
+
+    /* Build payload directly into frame[42..]. */
+    add     x0, x19, #MDNS_FRAME_PAYLOAD_OFF
+    bl      mdns_build_announce_payload
+    cbz     w0, .Laf_drop
+    mov     w20, w0
+
+    /* Wrap multicast headers. */
+    mov     x0, x19
+    mov     w1, w20
+    bl      _mdns_wrap_multicast_frame
+
+    add     w0, w20, #MDNS_FRAME_PAYLOAD_OFF
+    b       .Laf_done
+
+.Laf_drop:
+    mov     w0, #0
+.Laf_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret

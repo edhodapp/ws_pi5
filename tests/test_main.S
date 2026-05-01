@@ -137,6 +137,9 @@ _start:
     bl      test_mdns_conflict_short
     bl      test_mdns_conflict_compressed_name
     bl      test_mdns_conflict_with_question
+    bl      test_mdns_build_announce
+    bl      test_mdns_build_announce_frame
+    bl      test_mdns_build_announce_empty
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr

@@ -36,6 +36,9 @@
 .global test_mdns_conflict_short
 .global test_mdns_conflict_compressed_name
 .global test_mdns_conflict_with_question
+.global test_mdns_build_announce
+.global test_mdns_build_announce_frame
+.global test_mdns_build_announce_empty
 
 .section .text
 
@@ -922,6 +925,248 @@ test_mdns_conflict_with_question:
     ret
 
 
+/* ========================================================================
+ * test_mdns_build_announce — verify mdns_build_announce_payload
+ * produces an RFC 6762 §8.3 unsolicited-response payload for our
+ * hostname.
+ *
+ * Expected packet for net_hostname="qemu" / our_ip=10.0.2.15:
+ *   Header (12): id=0, flags=0x8400 (QR=1 AA=1), QDCOUNT=0, ANCOUNT=1
+ *   Answer:
+ *     NAME = [4]"qemu"[5]"local"[0]    (12 bytes, full inline)
+ *     TYPE = 0x0001 (A)                (2)
+ *     CLASS = 0x8001 (IN | cache-flush) (2)
+ *     TTL = 0x00000078 (120 sec)       (4)
+ *     RDLENGTH = 4                      (2)
+ *     RDATA = 10.0.2.15                 (4)
+ *   Total = 12 + 12 + 14 = 38 bytes.
+ * ======================================================================== */
+test_mdns_build_announce:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_resp_buf
+    bl      mdns_build_announce_payload
+    cbz     w0, .Ltba_fail
+    cmp     w0, #38
+    b.ne    .Ltba_fail
+
+    ldr     x0, =_mdns_resp_buf
+
+    /* Header: id (any), flags hi=0x84, lo=0x00. */
+    ldrb    w1, [x0, #2]
+    cmp     w1, #0x84
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #3]
+    cbnz    w1, .Ltba_fail
+
+    /* QDCOUNT = 0 (bytes 4-5). */
+    ldrb    w1, [x0, #4]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #5]
+    cbnz    w1, .Ltba_fail
+
+    /* ANCOUNT = 1 (bytes 6-7). */
+    ldrb    w1, [x0, #6]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #7]
+    cmp     w1, #1
+    b.ne    .Ltba_fail
+
+    /* NAME at offset 12: [4]'q','e','m','u'[5]'l','o','c','a','l'[0]. */
+    ldrb    w1, [x0, #12]
+    cmp     w1, #4
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #13]
+    cmp     w1, #'q'
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #16]
+    cmp     w1, #'u'
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #17]
+    cmp     w1, #5
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #22]
+    cmp     w1, #'l'
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #23]
+    cbnz    w1, .Ltba_fail        /* terminator */
+
+    /* TYPE = 0x0001 at offset 24-25. */
+    ldrb    w1, [x0, #24]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #25]
+    cmp     w1, #1
+    b.ne    .Ltba_fail
+
+    /* CLASS = 0x8001 at offset 26-27. */
+    ldrb    w1, [x0, #26]
+    cmp     w1, #0x80
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #27]
+    cmp     w1, #1
+    b.ne    .Ltba_fail
+
+    /* TTL = 0x00000078 at offset 28-31. */
+    ldrb    w1, [x0, #28]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #31]
+    cmp     w1, #0x78
+    b.ne    .Ltba_fail
+
+    /* RDLENGTH = 4 at offset 32-33. */
+    ldrb    w1, [x0, #32]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #33]
+    cmp     w1, #4
+    b.ne    .Ltba_fail
+
+    /* RDATA = 10, 0, 2, 15 at offset 34-37. */
+    ldrb    w1, [x0, #34]
+    cmp     w1, #10
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #35]
+    cbnz    w1, .Ltba_fail
+    ldrb    w1, [x0, #36]
+    cmp     w1, #2
+    b.ne    .Ltba_fail
+    ldrb    w1, [x0, #37]
+    cmp     w1, #15
+    b.ne    .Ltba_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce
+    bl      test_pass
+    b       .Ltba_done
+.Ltba_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce
+    bl      test_fail
+.Ltba_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_build_announce_frame — verify mdns_build_announce_frame
+ * wraps the announce payload in the standard multicast Eth+IP+UDP
+ * headers. Total length = 14+20+8+38 = 80 bytes.
+ * ======================================================================== */
+test_mdns_build_announce_frame:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_frame_buf
+    bl      mdns_build_announce_frame
+    cbz     w0, .Ltbaf_fail
+    cmp     w0, #80
+    b.ne    .Ltbaf_fail
+
+    ldr     x0, =_mdns_frame_buf
+
+    /* Eth dst[0] = 0x01, dst[5] = 0xfb (mdns_mac). */
+    ldrb    w1, [x0, #0]
+    cmp     w1, #0x01
+    b.ne    .Ltbaf_fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, #0xfb
+    b.ne    .Ltbaf_fail
+
+    /* IP TotalLength (BE) = 20+8+38 = 66 = 0x0042. */
+    ldrb    w1, [x0, #(14 + 2)]
+    cbnz    w1, .Ltbaf_fail
+    ldrb    w1, [x0, #(14 + 3)]
+    cmp     w1, #0x42
+    b.ne    .Ltbaf_fail
+
+    /* IP TTL = 255. */
+    ldrb    w1, [x0, #(14 + 8)]
+    cmp     w1, #255
+    b.ne    .Ltbaf_fail
+
+    /* IP dst = 224.0.0.251. */
+    ldrb    w1, [x0, #(14 + 16)]
+    cmp     w1, #224
+    b.ne    .Ltbaf_fail
+    ldrb    w1, [x0, #(14 + 19)]
+    cmp     w1, #251
+    b.ne    .Ltbaf_fail
+
+    /* UDP sport = 5353 (BE 0x14 0xE9) at offset 34-35. */
+    ldrb    w1, [x0, #34]
+    cmp     w1, #0x14
+    b.ne    .Ltbaf_fail
+    ldrb    w1, [x0, #35]
+    cmp     w1, #0xE9
+    b.ne    .Ltbaf_fail
+
+    /* UDP length (BE) = 8+38 = 46 = 0x002E at offset 38-39. */
+    ldrb    w1, [x0, #(14 + 20 + 4)]
+    cbnz    w1, .Ltbaf_fail
+    ldrb    w1, [x0, #(14 + 20 + 5)]
+    cmp     w1, #0x2E
+    b.ne    .Ltbaf_fail
+
+    /* DNS payload at offset 42, header byte 2 = 0x84 (QR|AA). */
+    ldrb    w1, [x0, #(42 + 2)]
+    cmp     w1, #0x84
+    b.ne    .Ltbaf_fail
+
+    /* QDCOUNT = 0, ANCOUNT = 1. */
+    ldrb    w1, [x0, #(42 + 5)]
+    cbnz    w1, .Ltbaf_fail
+    ldrb    w1, [x0, #(42 + 7)]
+    cmp     w1, #1
+    b.ne    .Ltbaf_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce_frame
+    bl      test_pass
+    b       .Ltbaf_done
+.Ltbaf_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce_frame
+    bl      test_fail
+.Ltbaf_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_build_announce_empty — empty hostname → no frame.
+ * Pins the drop branch in mdns_build_announce_frame.
+ * ======================================================================== */
+test_mdns_build_announce_empty:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    adrp    x0, net_hostname_len
+    add     x0, x0, :lo12:net_hostname_len
+    str     wzr, [x0]
+
+    ldr     x0, =_mdns_frame_buf
+    bl      mdns_build_announce_frame
+    cbnz    w0, .Ltbae_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce_empty
+    bl      test_pass
+    b       .Ltbae_done
+.Ltbae_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_announce_empty
+    bl      test_fail
+.Ltbae_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -967,6 +1212,12 @@ _mdns_name_conflict_compressed_name:
     .asciz "mdns_conflict_compressed_name"
 _mdns_name_conflict_with_question:
     .asciz "mdns_conflict_with_question"
+_mdns_name_build_announce:
+    .asciz "mdns_build_announce"
+_mdns_name_build_announce_frame:
+    .asciz "mdns_build_announce_frame"
+_mdns_name_build_announce_empty:
+    .asciz "mdns_build_announce_empty"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
