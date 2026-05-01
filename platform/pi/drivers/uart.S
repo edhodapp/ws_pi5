@@ -84,6 +84,35 @@ uart_puts:
     ldp     x19, x30, [sp], #16
     ret
 
+/*
+ * uart_puthex_byte - Print w0's low byte as two ASCII hex chars
+ * x0: byte to print (low 8 bits)
+ * Clobbers: x0..x3, x19, x30
+ */
+.global uart_puthex_byte
+uart_puthex_byte:
+    stp     x19, x30, [sp, #-16]!
+    mov     w19, w0                /* save byte */
+    /* high nibble */
+    lsr     w0, w19, #4
+    and     w0, w0, #0xF
+    cmp     w0, #10
+    b.lt    1f
+    add     w0, w0, #('a' - 10)
+    b       2f
+1:  add     w0, w0, #'0'
+2:  bl      uart_putc
+    /* low nibble */
+    and     w0, w19, #0xF
+    cmp     w0, #10
+    b.lt    3f
+    add     w0, w0, #('a' - 10)
+    b       4f
+3:  add     w0, w0, #'0'
+4:  bl      uart_putc
+    ldp     x19, x30, [sp], #16
+    ret
+
 /* Default UART base address (UART0) — overridable via uart_set_base */
 .section .data
 .balign 8

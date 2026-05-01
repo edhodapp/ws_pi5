@@ -275,9 +275,14 @@ _parse_line:
     ldrb    w11, [x23]
     cmp     w11, #'\n'
     b.eq    .Lpl_have_end
+    /* EOF markers: only NUL (0x00, RAM init) or 0xFF (flash erase
+     * pattern). Other high-bit bytes (e.g. UTF-8 multibyte sequences
+     * in comments — em-dashes, smart quotes — see the
+     * `f_utf8_in_comment` regression vector) are NOT EOF — they pass
+     * through to be ignored by the inline-comment cut. */
     cbz     w11, .Lpl_have_end
-    cmp     w11, #0x7E
-    b.hi    .Lpl_have_end
+    cmp     w11, #0xFF
+    b.eq    .Lpl_have_end
     add     x23, x23, #1
     b       .Lpl_scan
 .Lpl_have_end:

@@ -4,6 +4,7 @@ p_with_ntp	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.
 p_with_mac	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nmac=de:ad:be:ef:ca:fe
 p_with_all_optional	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nntp_server=10.0.0.10\nmac=de:ad:be:ef:ca:fe
 p_with_comments	PASS	NONE	# WSPI5CFG\n# This is a comment\nip=10.0.0.2\n# Another comment\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_utf8_in_comment	PASS	NONE	# WSPI5CFG\n# em-dash — and arrow → in a comment\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 p_with_blanks	PASS	NONE	# WSPI5CFG\n\nip=10.0.0.2\n\nnetmask=255.255.255.0\n\ngateway=10.0.0.1\nhostname=wspi5
 p_inline_comment	PASS	NONE	# WSPI5CFG\nip=10.0.0.2 # the static IP\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 p_trailing_whitespace	PASS	NONE	# WSPI5CFG  \nip = 10.0.0.2  \nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5

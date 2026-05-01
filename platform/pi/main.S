@@ -43,6 +43,29 @@ main:
     ldr     x0, =msg_hello_pi4
     bl      uart_puts
 
+    /* Diagnostic: dump first 16 bytes at INITRAMFS_ADDR so we can
+     * see whether the firmware actually loaded network.conf.
+     * If we see "# WSPI5CFG" the firmware is honoring the config.txt
+     * `initramfs` directive; if zeros or garbage, the directive
+     * isn't taking. Removeable once SD-direct boot is verified. */
+    ldr     x0, =msg_initramfs_probe
+    bl      uart_puts
+    ldr     x19, =INITRAMFS_ADDR
+    mov     w20, #16
+.Lprobe_loop:
+    cbz     w20, .Lprobe_done
+    ldrb    w0, [x19], #1
+    bl      uart_puthex_byte
+    mov     w0, #' '
+    bl      uart_putc
+    sub     w20, w20, #1
+    b       .Lprobe_loop
+.Lprobe_done:
+    mov     w0, #'\r'
+    bl      uart_putc
+    mov     w0, #'\n'
+    bl      uart_putc
+
     /* Parse user-editable network.conf from initramfs (D004).
      * The firmware loads the file to INITRAMFS_ADDR per config.txt's
      * `initramfs network.conf $INITRAMFS_ADDR` directive (mk_sd.sh
@@ -214,8 +237,20 @@ main:
 
 .ifdef PLATFORM_PI4
 .Lcfg_fail:
+    /* w0 from config_parse holds the error code (1..8 per D012).
+     * Print "rc=NN\r\n" then halt with panic_k. Saves the user from
+     * guessing whether it was magic / line / IP / hostname. */
+    mov     w19, w0                /* save rc */
     ldr     x0, =msg_cfg_fail
     bl      uart_puts
+    ldr     x0, =msg_cfg_rc
+    bl      uart_puts
+    mov     w0, w19
+    bl      uart_puthex_byte
+    mov     w0, #'\r'
+    bl      uart_putc
+    mov     w0, #'\n'
+    bl      uart_putc
     bl      panic_k                /* never returns */
 .endif
 
@@ -372,6 +407,8 @@ msg_hello_pi4:  .asciz "Hello from bare-metal Pi 4!\r\n"
 msg_genet_ok:   .asciz "GENET Gigabit Ethernet initialized\r\n"
 msg_cfg_ok:     .asciz "network.conf parsed\r\n"
 msg_cfg_fail:   .asciz "network.conf parse failed — check SD\r\n"
+msg_cfg_rc:     .asciz "config_parse rc=0x"
+msg_initramfs_probe: .asciz "INITRAMFS[0..16]: "
 .endif
 msg_net_fail:   .asciz "Network bring-up failed\r\n"
 msg_entering_loop: .asciz "Entering net_loop\r\n"
