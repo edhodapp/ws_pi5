@@ -342,6 +342,210 @@ _mdns_memcpy:
 9:  ret
 
 
+/* ---------------------------------------------------------------------------
+ * _mdns_skip_name — advance past a DNS name in a packet.
+ *
+ *   x0 = packet pointer
+ *   w1 = packet length
+ *   w2 = current byte offset
+ *
+ * Returns:
+ *   w0 = offset past the name (past terminator OR past 2-byte pointer),
+ *        or -1 on overflow / malformed length byte.
+ *
+ * A name is either a sequence of length-prefixed labels ending in 0x00,
+ * or terminates in a 2-byte compression pointer (top two bits 11). Either
+ * way, after this call the cursor sits on the byte following the name.
+ * Uses x9..x10 as scratch; preserves x19..x28.
+ * --------------------------------------------------------------------------- */
+_mdns_skip_name:
+    mov     w9, w2
+.Lsn_loop:
+    cmp     w9, w1
+    b.hs    .Lsn_err
+    ldrb    w10, [x0, x9]
+    cbz     w10, .Lsn_term
+    tst     w10, #0xC0
+    b.ne    .Lsn_ptr
+    cmp     w10, #MAX_LABEL_LEN
+    b.hi    .Lsn_err
+    add     w9, w9, #1
+    add     w9, w9, w10
+    b       .Lsn_loop
+.Lsn_term:
+    add     w0, w9, #1
+    cmp     w0, w1
+    b.hi    .Lsn_err
+    ret
+.Lsn_ptr:
+    add     w0, w9, #2
+    cmp     w0, w1
+    b.hi    .Lsn_err
+    ret
+.Lsn_err:
+    mov     w0, #-1
+    ret
+
+
+/* ===========================================================================
+ * mdns_check_conflict — RFC 6762 §8.1/§8.2 conflict detection.
+ *
+ *   x0 = DNS payload pointer (just the message, no Eth/IP/UDP)
+ *   w1 = payload length
+ *
+ * Returns:
+ *   w0 = 1 if the packet is an authoritative response (QR=1) advertising
+ *        our hostname.local in any answer, else 0.
+ *
+ * Walks the answer section. For each answer whose NAME is direct labels
+ * (not a compression pointer) matching "<net_hostname>.local"
+ * case-insensitively, returns 1. The probe phase QTYPE=ANY means ANY
+ * record type for the name is a conflict, so this function does not
+ * filter on the answer's TYPE.
+ *
+ * Limitations (deliberate, per D008 v1 scope):
+ *   - Compressed top-level names (NAME starts with a 0xC0 byte) are
+ *     skipped without comparison. Real-world unsolicited mDNS announces
+ *     inline names because there's no question section to point to;
+ *     responses to queries can use compression but those aren't probe
+ *     conflicts in any case (we don't probe-by-query, we probe-by-probe).
+ *   - Compression pointers in the middle of an otherwise direct name
+ *     are also skipped without comparison.
+ *
+ * Register convention:
+ *   x19 payload pointer (callee-saved)
+ *   w20 payload length (callee-saved)
+ *   w21 cursor offset (callee-saved)
+ *   w22 remaining ANCOUNT (callee-saved)
+ *   x23 name-start offset for the active answer (callee-saved)
+ *   x24 name-terminator offset for the active answer (callee-saved)
+ * =========================================================================== */
+.global mdns_check_conflict
+
+mdns_check_conflict:
+    stp     x29, x30, [sp, #-64]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+
+    mov     x19, x0
+    mov     w20, w1
+
+    cmp     w20, #DNS_HDR_LEN
+    b.lt    .Lcc_no
+
+    /* QR bit must be set (this is a response). */
+    ldrb    w0, [x19, #2]
+    tst     w0, #0x80
+    b.eq    .Lcc_no
+
+    /* ANCOUNT (BE bytes 6..7) — bail if zero. */
+    ldrb    w0, [x19, #6]
+    ldrb    w1, [x19, #7]
+    add     w0, w1, w0, lsl #8
+    cbz     w0, .Lcc_no
+    mov     w22, w0                     /* w22 = ancount, used after Q skip */
+
+    /* QDCOUNT (BE bytes 4..5). */
+    ldrb    w0, [x19, #4]
+    ldrb    w1, [x19, #5]
+    add     w0, w1, w0, lsl #8
+
+    mov     w21, #DNS_HDR_LEN
+    /* Skip QDCOUNT questions: name + 4 bytes (qtype+qclass). */
+.Lcc_q_loop:
+    cbz     w0, .Lcc_q_done
+    sub     w0, w0, #1
+    /* Save remaining qdcount in a callee-saved spot — x24 is unused
+     * until we start scanning answers. */
+    mov     x24, x0
+    mov     x0, x19
+    mov     w1, w20
+    mov     w2, w21
+    bl      _mdns_skip_name
+    cmn     w0, #1
+    b.eq    .Lcc_no
+    add     w21, w0, #4
+    cmp     w21, w20
+    b.hi    .Lcc_no
+    mov     x0, x24
+    b       .Lcc_q_loop
+.Lcc_q_done:
+
+.Lcc_an_loop:
+    cbz     w22, .Lcc_no
+    cmp     w21, w20
+    b.hs    .Lcc_no
+
+    /* If first byte of NAME has the compression bits, skip without
+     * comparing (v1 limitation). */
+    ldrb    w0, [x19, x21]
+    tst     w0, #0xC0
+    b.ne    .Lcc_skip_an
+
+    /* Walk forward to find the terminator → x24, while bailing on any
+     * mid-name compression pointer (also skipped without compare). */
+    mov     x23, x21
+    mov     x24, x21
+.Lcc_term_loop:
+    cmp     w24, w20
+    b.hs    .Lcc_no
+    ldrb    w0, [x19, x24]
+    cbz     w0, .Lcc_term_found
+    tst     w0, #0xC0
+    b.ne    .Lcc_skip_an
+    cmp     w0, #MAX_LABEL_LEN
+    b.hi    .Lcc_no
+    add     x24, x24, #1
+    add     x24, x24, x0
+    b       .Lcc_term_loop
+.Lcc_term_found:
+
+    /* Compare NAME against our hostname.local. Helper preserves
+     * x19..x28 and uses x23/x24 as set above. */
+    bl      _qname_eq_hostname_local
+    cbnz    w0, .Lcc_yes
+
+.Lcc_skip_an:
+    /* Advance past NAME, then 10 bytes (TYPE 2 + CLASS 2 + TTL 4 +
+     * RDLENGTH 2) plus the variable RDATA. */
+    mov     x0, x19
+    mov     w1, w20
+    mov     w2, w21
+    bl      _mdns_skip_name
+    cmn     w0, #1
+    b.eq    .Lcc_no
+    /* w0 = offset past NAME. Need at least 10 more bytes for the fixed
+     * RR fields. */
+    add     w1, w0, #10
+    cmp     w1, w20
+    b.hi    .Lcc_no
+    /* RDLENGTH is at offset (w0 + 8) .. (w0 + 9), big-endian. */
+    add     w2, w0, #8
+    ldrb    w3, [x19, x2]
+    add     w2, w0, #9
+    ldrb    w4, [x19, x2]
+    add     w3, w4, w3, lsl #8
+    add     w21, w1, w3                 /* cursor past TYPE/CLASS/TTL/RDLEN/RDATA */
+    cmp     w21, w20
+    b.hi    .Lcc_no
+    sub     w22, w22, #1
+    b       .Lcc_an_loop
+
+.Lcc_yes:
+    mov     w0, #1
+    b       .Lcc_done
+.Lcc_no:
+    mov     w0, #0
+.Lcc_done:
+    ldp     x23, x24, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+
 /* ===========================================================================
  * mdns_dispatch — UDP-port-5353 frame handler.
  *

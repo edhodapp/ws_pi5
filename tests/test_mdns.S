@@ -29,6 +29,13 @@
 .global test_mdns_build_probe
 .global test_mdns_build_probe_frame
 .global test_mdns_build_probe_frame_empty
+.global test_mdns_conflict_match
+.global test_mdns_conflict_other_name
+.global test_mdns_conflict_query_qr0
+.global test_mdns_conflict_no_answer
+.global test_mdns_conflict_short
+.global test_mdns_conflict_compressed_name
+.global test_mdns_conflict_with_question
 
 .section .text
 
@@ -707,6 +714,214 @@ test_mdns_build_probe_frame_empty:
     ret
 
 
+/* ========================================================================
+ * test_mdns_conflict_match — RFC 6762 §8.1 conflict detection.
+ * A response (QR=1) advertising our hostname.local with an A record
+ * must register as a conflict.
+ * ======================================================================== */
+test_mdns_conflict_match:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_resp
+    mov     w1, #_mdns_conflict_resp_len
+    bl      mdns_check_conflict
+    cmp     w0, #1
+    b.ne    .Ltcm_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_match
+    bl      test_pass
+    b       .Ltcm_done
+.Ltcm_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_match
+    bl      test_fail
+.Ltcm_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_other_name — response advertising a different
+ * hostname is not our concern; mdns_check_conflict returns 0.
+ * ======================================================================== */
+test_mdns_conflict_other_name:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_other_resp
+    mov     w1, #_mdns_conflict_other_resp_len
+    bl      mdns_check_conflict
+    cbnz    w0, .Ltco_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_other_name
+    bl      test_pass
+    b       .Ltco_done
+.Ltco_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_other_name
+    bl      test_fail
+.Ltco_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_query_qr0 — a probe query (QR=0) for our name
+ * is NOT yet a conflict at this layer (RFC 6762 §8.2 tiebreaking is
+ * separate and out of scope for v1). mdns_check_conflict only
+ * triggers on authoritative responses.
+ * ======================================================================== */
+test_mdns_conflict_query_qr0:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_q_qemu_a       /* same query format we ALREADY answer */
+    mov     w1, #_mdns_q_qemu_a_len
+    bl      mdns_check_conflict
+    cbnz    w0, .Ltcq_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_query_qr0
+    bl      test_pass
+    b       .Ltcq_done
+.Ltcq_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_query_qr0
+    bl      test_fail
+.Ltcq_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_no_answer — response (QR=1) with ANCOUNT=0
+ * (header-only, no records) returns 0.
+ * ======================================================================== */
+test_mdns_conflict_no_answer:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_empty
+    mov     w1, #_mdns_conflict_empty_len
+    bl      mdns_check_conflict
+    cbnz    w0, .Ltcn_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_no_answer
+    bl      test_pass
+    b       .Ltcn_done
+.Ltcn_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_no_answer
+    bl      test_fail
+.Ltcn_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_short — packets shorter than DNS header (12)
+ * return 0.
+ * ======================================================================== */
+test_mdns_conflict_short:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_resp
+    mov     w1, #5                    /* truncated, below DNS header */
+    bl      mdns_check_conflict
+    cbnz    w0, .Ltcs_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_short
+    bl      test_pass
+    b       .Ltcs_done
+.Ltcs_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_short
+    bl      test_fail
+.Ltcs_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_compressed_name — locks in the documented v1
+ * limitation: an answer whose NAME is a compression pointer is NOT
+ * compared against our hostname. mdns_check_conflict returns 0 even
+ * when the compression target points at our name in the question
+ * section. (RFC 1035 §4.1.4 compression resolution is out of scope
+ * for v1 per the function header in lib/mdns.S; this test will need
+ * to flip to expect 1 if/when v2 adds pointer-following.)
+ * ======================================================================== */
+test_mdns_conflict_compressed_name:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_ptr_resp
+    mov     w1, #_mdns_conflict_ptr_resp_len
+    bl      mdns_check_conflict
+    cbnz    w0, .Ltcc_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_compressed_name
+    bl      test_pass
+    b       .Ltcc_done
+.Ltcc_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_compressed_name
+    bl      test_fail
+.Ltcc_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_conflict_with_question — proves the QDCOUNT skip loop
+ * correctly walks past a question to reach the answer. Packet has
+ * QDCOUNT=1 (a "qemu.local" question) and ANCOUNT=1 (also for
+ * "qemu.local"); QR=1. Expect return 1.
+ * ======================================================================== */
+test_mdns_conflict_with_question:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_conflict_with_q
+    mov     w1, #_mdns_conflict_with_q_len
+    bl      mdns_check_conflict
+    cmp     w0, #1
+    b.ne    .Ltcwq_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_with_question
+    bl      test_pass
+    b       .Ltcwq_done
+.Ltcwq_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_conflict_with_question
+    bl      test_fail
+.Ltcwq_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -738,6 +953,20 @@ _mdns_name_build_probe_frame:
     .asciz "mdns_build_probe_frame"
 _mdns_name_build_probe_frame_empty:
     .asciz "mdns_build_probe_frame_empty"
+_mdns_name_conflict_match:
+    .asciz "mdns_conflict_match"
+_mdns_name_conflict_other_name:
+    .asciz "mdns_conflict_other_name"
+_mdns_name_conflict_query_qr0:
+    .asciz "mdns_conflict_query_qr0"
+_mdns_name_conflict_no_answer:
+    .asciz "mdns_conflict_no_answer"
+_mdns_name_conflict_short:
+    .asciz "mdns_conflict_short"
+_mdns_name_conflict_compressed_name:
+    .asciz "mdns_conflict_compressed_name"
+_mdns_name_conflict_with_question:
+    .asciz "mdns_conflict_with_question"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
@@ -882,6 +1111,132 @@ _mdns_dispatch_in_other:
     .byte 0x00, 0x01
     .byte 0x00, 0x01
 .equ _mdns_dispatch_in_other_len, (. - _mdns_dispatch_in_other)
+
+
+/* Synthetic mDNS announce: a foreign host is claiming "qemu.local".
+ *   Header: id=0, flags=0x8400 (QR=1, AA=1), QDCOUNT=0, ANCOUNT=1.
+ *   Answer: NAME=[4]"qemu"[5]"local"[0], TYPE=A, CLASS=IN|cache-flush,
+ *           TTL=120, RDLENGTH=4, RDATA=192.168.1.42.
+ * Total length = 12 (hdr) + 12 (name) + 14 (rest of RR) = 38. */
+.balign 4
+_mdns_conflict_resp:
+    .byte 0x00, 0x00       /* id */
+    .byte 0x84, 0x00       /* flags: QR=1 AA=1 */
+    .byte 0x00, 0x00       /* QDCOUNT=0 */
+    .byte 0x00, 0x01       /* ANCOUNT=1 */
+    .byte 0x00, 0x00       /* NSCOUNT=0 */
+    .byte 0x00, 0x00       /* ARCOUNT=0 */
+    /* Answer */
+    .byte 4
+    .ascii "qemu"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01       /* TYPE = A */
+    .byte 0x80, 0x01       /* CLASS = IN | cache-flush */
+    .byte 0x00, 0x00, 0x00, 0x78   /* TTL = 120 */
+    .byte 0x00, 0x04       /* RDLENGTH */
+    .byte 0xc0, 0xa8, 0x01, 0x2a   /* RDATA = 192.168.1.42 */
+.equ _mdns_conflict_resp_len, (. - _mdns_conflict_resp)
+
+/* Same shape, different hostname ("other.local"). Should not flag. */
+.balign 4
+_mdns_conflict_other_resp:
+    .byte 0x00, 0x00
+    .byte 0x84, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x01
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 5
+    .ascii "other"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x80, 0x01
+    .byte 0x00, 0x00, 0x00, 0x78
+    .byte 0x00, 0x04
+    .byte 0xc0, 0xa8, 0x01, 0x2a
+.equ _mdns_conflict_other_resp_len, (. - _mdns_conflict_other_resp)
+
+/* Header-only response: QR=1, AA=1, ANCOUNT=0. */
+.balign 4
+_mdns_conflict_empty:
+    .byte 0x00, 0x00
+    .byte 0x84, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+.equ _mdns_conflict_empty_len, (. - _mdns_conflict_empty)
+
+/* Response with the answer NAME encoded as a compression pointer
+ * back to a question section that holds "qemu.local". v1 does NOT
+ * follow pointers; mdns_check_conflict must return 0 here even
+ * though semantically this DOES advertise our name.
+ *   Header: QR=1, AA=1, QDCOUNT=1, ANCOUNT=1
+ *   Question: QNAME=[4]"qemu"[5]"local"[0], QTYPE=A, QCLASS=IN
+ *   Answer:   NAME=0xC0 0x0C (pointer → question's QNAME at off 12),
+ *             TYPE=A, CLASS=IN|cache-flush, TTL=120, RDLEN=4,
+ *             RDATA=192.168.1.42
+ * Total = 12 + 16 (question) + 2 + 10 + 4 = 44. */
+.balign 4
+_mdns_conflict_ptr_resp:
+    .byte 0x00, 0x00
+    .byte 0x84, 0x00
+    .byte 0x00, 0x01      /* QDCOUNT=1 */
+    .byte 0x00, 0x01      /* ANCOUNT=1 */
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    /* Question */
+    .byte 4
+    .ascii "qemu"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x00, 0x01
+    /* Answer */
+    .byte 0xc0, 0x0c      /* NAME = pointer to offset 12 */
+    .byte 0x00, 0x01
+    .byte 0x80, 0x01
+    .byte 0x00, 0x00, 0x00, 0x78
+    .byte 0x00, 0x04
+    .byte 0xc0, 0xa8, 0x01, 0x2a
+.equ _mdns_conflict_ptr_resp_len, (. - _mdns_conflict_ptr_resp)
+
+/* Response with both a question and an answer for "qemu.local",
+ * answer NAME inlined as direct labels (not a pointer). Exercises
+ * the QDCOUNT skip path then matches our hostname. Expect return 1. */
+.balign 4
+_mdns_conflict_with_q:
+    .byte 0x00, 0x00
+    .byte 0x84, 0x00
+    .byte 0x00, 0x01      /* QDCOUNT=1 */
+    .byte 0x00, 0x01      /* ANCOUNT=1 */
+    .byte 0x00, 0x00
+    .byte 0x00, 0x00
+    /* Question for qemu.local */
+    .byte 4
+    .ascii "qemu"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x00, 0x01
+    /* Answer for qemu.local (inlined, not compressed) */
+    .byte 4
+    .ascii "qemu"
+    .byte 5
+    .ascii "local"
+    .byte 0
+    .byte 0x00, 0x01
+    .byte 0x80, 0x01
+    .byte 0x00, 0x00, 0x00, 0x78
+    .byte 0x00, 0x04
+    .byte 0xc0, 0xa8, 0x01, 0x2a
+.equ _mdns_conflict_with_q_len, (. - _mdns_conflict_with_q)
 
 
 .section .bss
