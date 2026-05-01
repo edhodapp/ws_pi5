@@ -64,17 +64,10 @@
 .equ DNS_CLASS_IN,          1
 .equ MAX_LABEL_LEN,         63
 
-/* ".local" suffix as length-prefixed labels: [5] "local" [0]. */
 .section .rodata
-.balign 4
-_local_label:
-    .byte 5
-    .ascii "local"
-    .byte 0
-.equ _LOCAL_LABEL_LEN, 7
-
 /* In-response constant: lowercase "local" for case-insensitive
  * compare against the query's [5]"<l>...". */
+.balign 4
 _local_str:
     .ascii "local"
 
@@ -375,7 +368,6 @@ _mdns_memcpy:
  * =========================================================================== */
 
 .equ MDNS_FRAME_PAYLOAD_OFF,    (14 + 20 + 8)   /* 42: ETH+IP+UDP */
-.equ MDNS_PORT_NBO,             0xE914          /* 5353 in BE: 0x14 0xE9 */
 
 .global mdns_dispatch
 .global mdns_build_probe_payload
