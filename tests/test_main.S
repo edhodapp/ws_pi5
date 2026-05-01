@@ -128,6 +128,8 @@ _start:
     bl      test_mdns_dispatch_no_reply
     bl      test_mdns_net_recv_e2e
     bl      test_mdns_build_probe
+    bl      test_mdns_build_probe_frame
+    bl      test_mdns_build_probe_frame_empty
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr

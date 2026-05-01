@@ -27,6 +27,8 @@
 .global test_mdns_dispatch_no_reply
 .global test_mdns_net_recv_e2e
 .global test_mdns_build_probe
+.global test_mdns_build_probe_frame
+.global test_mdns_build_probe_frame_empty
 
 .section .text
 
@@ -509,6 +511,202 @@ test_mdns_build_probe:
     ret
 
 
+/* ========================================================================
+ * test_mdns_build_probe_frame — verify mdns_build_probe_frame wraps the
+ * payload from mdns_build_probe_payload in correct Eth+IP+UDP multicast
+ * headers. The header bytes mirror the wire format produced by
+ * mdns_dispatch's response path, so this also pins the shared
+ * _mdns_wrap_multicast_frame helper that 5/N extracts.
+ *
+ * Expected frame for net_hostname="qemu" / our_ip=10.0.2.15 / our_mac
+ * QEMU default 02:00:00:00:00:01:
+ *   Eth dst = 01:00:5e:00:00:fb (mdns_mac)
+ *   Eth src = 02:00:00:00:00:01
+ *   Eth type = 0x0800
+ *   IP ver/IHL = 0x45, TTL = 255, proto = 17
+ *   IP src = 10.0.2.15, dst = 224.0.0.251
+ *   UDP sport = dport = 5353
+ *   Payload at offset 42 has DNS query header (flags = 0x0000)
+ *   QTYPE at offset 42+24 = 0x00FF (ANY)
+ * Total length = 14 + 20 + 8 + 28 = 70.
+ * ======================================================================== */
+test_mdns_build_probe_frame:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    ldr     x0, =_mdns_frame_buf
+    bl      mdns_build_probe_frame
+    cbz     w0, .Ltbpf_fail
+    cmp     w0, #70
+    b.ne    .Ltbpf_fail
+
+    ldr     x0, =_mdns_frame_buf
+
+    /* Eth dst = 01:00:5e:00:00:fb. */
+    ldrb    w1, [x0, #0]
+    cmp     w1, #0x01
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #2]
+    cmp     w1, #0x5e
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, #0xfb
+    b.ne    .Ltbpf_fail
+
+    /* Eth src = net_our_mac (02:00:00:00:00:01 per QEMU default). */
+    ldrb    w1, [x0, #6]
+    cmp     w1, #0x02
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #11]
+    cmp     w1, #0x01
+    b.ne    .Ltbpf_fail
+
+    /* Eth type = 0x0800. */
+    ldrb    w1, [x0, #12]
+    cmp     w1, #0x08
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #13]
+    cbnz    w1, .Ltbpf_fail
+
+    /* IP ver/IHL = 0x45. */
+    ldrb    w1, [x0, #14]
+    cmp     w1, #0x45
+    b.ne    .Ltbpf_fail
+
+    /* IP TotalLength (BE) = 20+8+28 = 56 = 0x0038. */
+    ldrb    w1, [x0, #(14 + 2)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(14 + 3)]
+    cmp     w1, #0x38
+    b.ne    .Ltbpf_fail
+
+    /* IP TTL = 255 per RFC 6762 §11. */
+    ldrb    w1, [x0, #(14 + 8)]
+    cmp     w1, #255
+    b.ne    .Ltbpf_fail
+
+    /* IP proto = 17 (UDP). */
+    ldrb    w1, [x0, #(14 + 9)]
+    cmp     w1, #17
+    b.ne    .Ltbpf_fail
+
+    /* IP src = 10.0.2.15. */
+    ldrb    w1, [x0, #(14 + 12)]
+    cmp     w1, #10
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #(14 + 15)]
+    cmp     w1, #15
+    b.ne    .Ltbpf_fail
+
+    /* IP dst = 224.0.0.251. */
+    ldrb    w1, [x0, #(14 + 16)]
+    cmp     w1, #224
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #(14 + 19)]
+    cmp     w1, #251
+    b.ne    .Ltbpf_fail
+
+    /* UDP sport (offset 14+20=34) = 5353 (0x14E9). */
+    ldrb    w1, [x0, #34]
+    cmp     w1, #0x14
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #35]
+    cmp     w1, #0xE9
+    b.ne    .Ltbpf_fail
+    /* UDP dport = 5353. */
+    ldrb    w1, [x0, #36]
+    cmp     w1, #0x14
+    b.ne    .Ltbpf_fail
+    ldrb    w1, [x0, #37]
+    cmp     w1, #0xE9
+    b.ne    .Ltbpf_fail
+
+    /* UDP length (BE) = 8 + 28 = 36 = 0x0024. */
+    ldrb    w1, [x0, #(14 + 20 + 4)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(14 + 20 + 5)]
+    cmp     w1, #0x24
+    b.ne    .Ltbpf_fail
+
+    /* DNS payload starts at offset 42. Header flags = 0x0000 (query). */
+    ldrb    w1, [x0, #(42 + 2)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(42 + 3)]
+    cbnz    w1, .Ltbpf_fail
+
+    /* QDCOUNT = 1. */
+    ldrb    w1, [x0, #(42 + 5)]
+    cmp     w1, #1
+    b.ne    .Ltbpf_fail
+    /* ANCOUNT = 0. */
+    ldrb    w1, [x0, #(42 + 6)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(42 + 7)]
+    cbnz    w1, .Ltbpf_fail
+
+    /* QTYPE = ANY (0x00FF) at offset 42+24. */
+    ldrb    w1, [x0, #(42 + 24)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(42 + 25)]
+    cmp     w1, #0xff
+    b.ne    .Ltbpf_fail
+
+    /* QCLASS = IN (0x0001) at offset 42+26. */
+    ldrb    w1, [x0, #(42 + 26)]
+    cbnz    w1, .Ltbpf_fail
+    ldrb    w1, [x0, #(42 + 27)]
+    cmp     w1, #1
+    b.ne    .Ltbpf_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe_frame
+    bl      test_pass
+    b       .Ltbpf_done
+.Ltbpf_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe_frame
+    bl      test_fail
+.Ltbpf_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_build_probe_frame_empty — empty-hostname drop path:
+ * mdns_build_probe_payload returns 0 when net_hostname_len is 0, and
+ * mdns_build_probe_frame must propagate that as 0 (no frame emitted).
+ * Pins the .Lpf_drop branch in lib/mdns.S.
+ * ======================================================================== */
+test_mdns_build_probe_frame_empty:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+
+    /* Force hostname_len = 0 to trigger the drop path. */
+    adrp    x0, net_hostname_len
+    add     x0, x0, :lo12:net_hostname_len
+    str     wzr, [x0]
+
+    ldr     x0, =_mdns_frame_buf
+    bl      mdns_build_probe_frame
+    cbnz    w0, .Ltbpe_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe_frame_empty
+    bl      test_pass
+    b       .Ltbpe_done
+.Ltbpe_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_build_probe_frame_empty
+    bl      test_fail
+.Ltbpe_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -536,6 +734,10 @@ _mdns_name_net_recv_e2e:
     .asciz "mdns_net_recv_e2e"
 _mdns_name_build_probe:
     .asciz "mdns_build_probe"
+_mdns_name_build_probe_frame:
+    .asciz "mdns_build_probe_frame"
+_mdns_name_build_probe_frame_empty:
+    .asciz "mdns_build_probe_frame_empty"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.

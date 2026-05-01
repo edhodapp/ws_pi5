@@ -379,6 +379,7 @@ _mdns_memcpy:
 
 .global mdns_dispatch
 .global mdns_build_probe_payload
+.global mdns_build_probe_frame
 
 mdns_dispatch:
     stp     x29, x30, [sp, #-48]!
@@ -402,107 +403,13 @@ mdns_dispatch:
     cbz     w0, .Lmd_drop
     mov     w21, w0                 /* response payload length */
 
-    /* --- Rewrite Eth header. --- */
-    /* Eth dst = mdns_mac (6 bytes). */
-    adrp    x22, mdns_mac
-    add     x22, x22, :lo12:mdns_mac
-    ldrb    w0, [x22, #0];  strb w0, [x19, #0]
-    ldrb    w0, [x22, #1];  strb w0, [x19, #1]
-    ldrb    w0, [x22, #2];  strb w0, [x19, #2]
-    ldrb    w0, [x22, #3];  strb w0, [x19, #3]
-    ldrb    w0, [x22, #4];  strb w0, [x19, #4]
-    ldrb    w0, [x22, #5];  strb w0, [x19, #5]
-    /* Eth src = net_our_mac. */
-    adrp    x22, net_our_mac
-    add     x22, x22, :lo12:net_our_mac
-    ldrb    w0, [x22, #0];  strb w0, [x19, #6]
-    ldrb    w0, [x22, #1];  strb w0, [x19, #7]
-    ldrb    w0, [x22, #2];  strb w0, [x19, #8]
-    ldrb    w0, [x22, #3];  strb w0, [x19, #9]
-    ldrb    w0, [x22, #4];  strb w0, [x19, #10]
-    ldrb    w0, [x22, #5];  strb w0, [x19, #11]
-    /* Eth type stays 0x0800 (already set by sender, but be paranoid). */
-    mov     w0, #0x08
-    strb    w0, [x19, #12]
-    strb    wzr, [x19, #13]
+    /* Wrap Eth+IP+UDP multicast headers around the (yet-to-be-copied)
+     * payload at offset 42. The helper preserves x19..x22. */
+    mov     x0, x19
+    mov     w1, w21
+    bl      _mdns_wrap_multicast_frame
 
-    /* --- Rewrite IP header. --- */
-    /* ver=4, IHL=5 → 0x45. Other byte (TOS) = 0. */
-    mov     w0, #0x45
-    strb    w0, [x19, #(14 + 0)]
-    strb    wzr, [x19, #(14 + 1)]
-    /* Total length = 20 + 8 + payload_len. Big-endian on wire. */
-    add     w0, w21, #(20 + 8)
-    lsr     w1, w0, #8
-    strb    w1, [x19, #(14 + 2)]
-    strb    w0, [x19, #(14 + 3)]
-    /* ID, Flags/Frag = 0. */
-    strb    wzr, [x19, #(14 + 4)]
-    strb    wzr, [x19, #(14 + 5)]
-    strb    wzr, [x19, #(14 + 6)]
-    strb    wzr, [x19, #(14 + 7)]
-    /* TTL = 255 per RFC 6762 §11. */
-    mov     w0, #255
-    strb    w0, [x19, #(14 + 8)]
-    /* Protocol = UDP (17). */
-    mov     w0, #17
-    strb    w0, [x19, #(14 + 9)]
-    /* IP checksum = 0 (computed below). */
-    strb    wzr, [x19, #(14 + 10)]
-    strb    wzr, [x19, #(14 + 11)]
-    /* IP src = net_our_ip (4 bytes wire-order). */
-    adrp    x22, net_our_ip
-    add     x22, x22, :lo12:net_our_ip
-    ldrb    w0, [x22, #0]; strb w0, [x19, #(14 + 12)]
-    ldrb    w0, [x22, #1]; strb w0, [x19, #(14 + 13)]
-    ldrb    w0, [x22, #2]; strb w0, [x19, #(14 + 14)]
-    ldrb    w0, [x22, #3]; strb w0, [x19, #(14 + 15)]
-    /* IP dst = 224.0.0.251 = 0xE0 0x00 0x00 0xFB on wire. */
-    mov     w0, #0xE0
-    strb    w0, [x19, #(14 + 16)]
-    strb    wzr, [x19, #(14 + 17)]
-    strb    wzr, [x19, #(14 + 18)]
-    mov     w0, #0xFB
-    strb    w0, [x19, #(14 + 19)]
-    /* Compute IP checksum over the 20-byte header. ip_checksum
-     * takes (x0=ptr, x1=len) and returns the 16-bit complement
-     * already in network byte order in w0 (verified by examining
-     * how lib/icmp.S and lib/ip.S use it). Write it into bytes
-     * 10/11 of the IP header. */
-    add     x0, x19, #14
-    mov     w1, #20
-    bl      ip_checksum
-    /* w0 = checksum. Write as big-endian into IP[10..11]. The
-     * convention in the existing codebase (e.g. lib/icmp.S after
-     * its own ip_checksum call) is to strh w0 directly — the
-     * function returns the value in already-flipped form for
-     * direct wire write. */
-    lsr     w1, w0, #8
-    strb    w0, [x19, #(14 + 10)]
-    strb    w1, [x19, #(14 + 11)]
-
-    /* --- Rewrite UDP header. --- */
-    /* sport = dport = 5353 (0x14E9). Big-endian wire bytes 0x14 0xE9. */
-    mov     w0, #0x14
-    strb    w0, [x19, #(14 + 20)]
-    mov     w0, #0xE9
-    strb    w0, [x19, #(14 + 21)]
-    mov     w0, #0x14
-    strb    w0, [x19, #(14 + 22)]
-    mov     w0, #0xE9
-    strb    w0, [x19, #(14 + 23)]
-    /* UDP length = 8 + payload_len, big-endian. */
-    add     w0, w21, #8
-    lsr     w1, w0, #8
-    strb    w1, [x19, #(14 + 24)]
-    strb    w0, [x19, #(14 + 25)]
-    /* UDP checksum = 0 (mDNS over IPv4 may zero it; receivers
-     * generally accept this. Matches the simpler design path; if
-     * ever required, recompute via udp_checksum and write here). */
-    strb    wzr, [x19, #(14 + 26)]
-    strb    wzr, [x19, #(14 + 27)]
-
-    /* --- Copy response payload from scratch to frame[42..]. --- */
+    /* Copy response payload from scratch into frame[42..]. */
     adrp    x0, _mdns_payload_scratch
     add     x0, x0, :lo12:_mdns_payload_scratch
     add     x1, x19, #MDNS_FRAME_PAYLOAD_OFF
@@ -519,6 +426,164 @@ mdns_dispatch:
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #48
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * _mdns_wrap_multicast_frame — write the Eth+IP+UDP headers (offsets
+ * 0..MDNS_FRAME_PAYLOAD_OFF) for an outbound mDNS multicast frame.
+ *
+ *   x0 = frame buffer
+ *   w1 = payload length (DNS message length, will live at offset 42)
+ *
+ * Header values per RFC 6762 §3 / §11:
+ *   Eth dst = mdns_mac (01:00:5e:00:00:fb)
+ *   Eth src = net_our_mac
+ *   Eth type = 0x0800 (IPv4)
+ *   IP ver/IHL = 0x45, TOS = 0
+ *   IP totlen = 20 + 8 + payload_len (big-endian)
+ *   IP id/flags/frag = 0
+ *   IP TTL = 255
+ *   IP proto = 17 (UDP)
+ *   IP checksum = ip_checksum over the 20-byte header
+ *   IP src = net_our_ip
+ *   IP dst = 224.0.0.251
+ *   UDP sport = dport = 5353
+ *   UDP length = 8 + payload_len
+ *   UDP checksum = 0
+ *
+ * Caller is responsible for the payload at frame[42..42+payload_len].
+ * Preserves x19..x22; clobbers x0/x1/x9/x30 (calls ip_checksum).
+ * --------------------------------------------------------------------------- */
+_mdns_wrap_multicast_frame:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x23, [sp, #16]
+    str     x24, [sp, #24]
+
+    mov     x23, x0                 /* frame buffer */
+    mov     w24, w1                 /* payload length */
+
+    /* --- Eth header. --- */
+    adrp    x9, mdns_mac
+    add     x9, x9, :lo12:mdns_mac
+    ldrb    w0, [x9, #0];  strb w0, [x23, #0]
+    ldrb    w0, [x9, #1];  strb w0, [x23, #1]
+    ldrb    w0, [x9, #2];  strb w0, [x23, #2]
+    ldrb    w0, [x9, #3];  strb w0, [x23, #3]
+    ldrb    w0, [x9, #4];  strb w0, [x23, #4]
+    ldrb    w0, [x9, #5];  strb w0, [x23, #5]
+    adrp    x9, net_our_mac
+    add     x9, x9, :lo12:net_our_mac
+    ldrb    w0, [x9, #0];  strb w0, [x23, #6]
+    ldrb    w0, [x9, #1];  strb w0, [x23, #7]
+    ldrb    w0, [x9, #2];  strb w0, [x23, #8]
+    ldrb    w0, [x9, #3];  strb w0, [x23, #9]
+    ldrb    w0, [x9, #4];  strb w0, [x23, #10]
+    ldrb    w0, [x9, #5];  strb w0, [x23, #11]
+    mov     w0, #0x08
+    strb    w0, [x23, #12]
+    strb    wzr, [x23, #13]
+
+    /* --- IP header. --- */
+    mov     w0, #0x45
+    strb    w0, [x23, #(14 + 0)]
+    strb    wzr, [x23, #(14 + 1)]
+    add     w0, w24, #(20 + 8)
+    lsr     w1, w0, #8
+    strb    w1, [x23, #(14 + 2)]
+    strb    w0, [x23, #(14 + 3)]
+    strb    wzr, [x23, #(14 + 4)]
+    strb    wzr, [x23, #(14 + 5)]
+    strb    wzr, [x23, #(14 + 6)]
+    strb    wzr, [x23, #(14 + 7)]
+    mov     w0, #255
+    strb    w0, [x23, #(14 + 8)]
+    mov     w0, #17
+    strb    w0, [x23, #(14 + 9)]
+    strb    wzr, [x23, #(14 + 10)]
+    strb    wzr, [x23, #(14 + 11)]
+    adrp    x9, net_our_ip
+    add     x9, x9, :lo12:net_our_ip
+    ldrb    w0, [x9, #0]; strb w0, [x23, #(14 + 12)]
+    ldrb    w0, [x9, #1]; strb w0, [x23, #(14 + 13)]
+    ldrb    w0, [x9, #2]; strb w0, [x23, #(14 + 14)]
+    ldrb    w0, [x9, #3]; strb w0, [x23, #(14 + 15)]
+    mov     w0, #0xE0
+    strb    w0, [x23, #(14 + 16)]
+    strb    wzr, [x23, #(14 + 17)]
+    strb    wzr, [x23, #(14 + 18)]
+    mov     w0, #0xFB
+    strb    w0, [x23, #(14 + 19)]
+
+    add     x0, x23, #14
+    mov     w1, #20
+    bl      ip_checksum
+    lsr     w1, w0, #8
+    strb    w0, [x23, #(14 + 10)]
+    strb    w1, [x23, #(14 + 11)]
+
+    /* --- UDP header. --- */
+    mov     w0, #0x14
+    strb    w0, [x23, #(14 + 20)]
+    mov     w0, #0xE9
+    strb    w0, [x23, #(14 + 21)]
+    mov     w0, #0x14
+    strb    w0, [x23, #(14 + 22)]
+    mov     w0, #0xE9
+    strb    w0, [x23, #(14 + 23)]
+    add     w0, w24, #8
+    lsr     w1, w0, #8
+    strb    w1, [x23, #(14 + 24)]
+    strb    w0, [x23, #(14 + 25)]
+    strb    wzr, [x23, #(14 + 26)]
+    strb    wzr, [x23, #(14 + 27)]
+
+    ldr     x24, [sp, #24]
+    ldr     x23, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* ===========================================================================
+ * mdns_build_probe_frame — assemble a complete RFC 6762 §8.1 probe
+ * frame ready for the L2 send path.
+ *
+ *   x0 = frame buffer (must be ≥ 70 bytes)
+ * Returns:
+ *   w0 = total frame length (Eth + IP + UDP + DNS payload), or 0
+ *        if the hostname is unset.
+ *
+ * Builds the DNS probe payload via mdns_build_probe_payload directly
+ * into frame[42..], then wraps Eth+IP+UDP multicast headers around
+ * it via _mdns_wrap_multicast_frame.
+ * =========================================================================== */
+mdns_build_probe_frame:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    mov     x19, x0                 /* frame buffer */
+
+    /* Build payload directly into frame[42..]. */
+    add     x0, x19, #MDNS_FRAME_PAYLOAD_OFF
+    bl      mdns_build_probe_payload
+    cbz     w0, .Lpf_drop
+    mov     w20, w0                 /* payload length */
+
+    /* Wrap multicast headers. */
+    mov     x0, x19
+    mov     w1, w20
+    bl      _mdns_wrap_multicast_frame
+
+    add     w0, w20, #MDNS_FRAME_PAYLOAD_OFF
+    b       .Lpf_done
+
+.Lpf_drop:
+    mov     w0, #0
+.Lpf_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 
@@ -560,7 +625,7 @@ _mdns_payload_scratch:
  *   x21 net_hostname pointer (callee-saved)
  * =========================================================================== */
 mdns_build_probe_payload:
-    stp     x29, x30, [sp, #-32]!
+    stp     x29, x30, [sp, #-48]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
     str     x21, [sp, #32]
@@ -640,5 +705,5 @@ mdns_build_probe_payload:
 .Lpb_done:
     ldr     x21, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #32
+    ldp     x29, x30, [sp], #48
     ret
