@@ -161,6 +161,18 @@ main:
     ldr     x4, =NET_SEND_SYM
     bl      ntp_start
 
+    /* Start mDNS responder (per D008). Probes for hostname.local
+     * conflicts then announces ownership. mdns_start refuses to
+     * arm if net_hostname_len == 0 (which is the default until a
+     * future config-parse wiring populates it from network.conf),
+     * so this call is safe in builds that ship without a hostname. */
+    ldr     x0, =NET_BASE_SYM
+    ldr     x1, =NET_STATE_SYM
+    ldr     x2, =mdns_tx_buf
+    ldr     x3, =timer_pool
+    ldr     x4, =NET_SEND_SYM
+    bl      mdns_start
+
     /* Initialize HTTP server */
     bl      http_init
     ldr     x0, =NET_BASE_SYM
@@ -300,6 +312,13 @@ arp_tx_buf:
 .balign 16
 ntp_tx_buf:
     .space  NTP_FRAME_LEN
+
+/* mDNS frame max: ETH(14) + IP(20) + UDP(8) + payload. Worst-case
+ * announce payload at hostname_len=63 is 34 + 63 = 97; total = 139.
+ * Round up to 256 for alignment / future TXT/SRV growth. */
+.balign 16
+mdns_tx_buf:
+    .space  256
 
 .balign 16
 tcp_tx_buf:
