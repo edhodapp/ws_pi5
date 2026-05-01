@@ -773,6 +773,12 @@ _store_hostname:
  * hex bytes (e.g. "de:ad:be:ef:ca:fe"). Case-insensitive.
  * Returns w0 = 0 with bytes in w1..w6, or w0 = E_MAC. */
 _validate_mac:
+    /* x30 must be saved across the `bl _hex_nibble` calls below —
+     * without this prologue, `bl` would overwrite x30 with an
+     * internal return address and our own `ret` would jump back
+     * inside this function (infinite loop). */
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
     sub     x2, x1, x0
     cmp     x2, #17                 /* exact length: 6*2 + 5 colons */
     b.ne    .Lvm_bad
@@ -830,9 +836,11 @@ _validate_mac:
 
 .Lvm_ok:
     mov     w0, #0
+    ldp     x29, x30, [sp], #16
     ret
 .Lvm_bad:
     mov     w0, #E_MAC
+    ldp     x29, x30, [sp], #16
     ret
 
 
