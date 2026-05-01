@@ -120,6 +120,7 @@ _start:
     bl      test_config_parse_bad_magic
     bl      test_config_parse_eof_midstream
     bl      test_config_parse_with_mac
+    bl      test_config_parse_vectors
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr

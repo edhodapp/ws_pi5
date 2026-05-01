@@ -171,7 +171,9 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
     $(BUILD)/test_genet_rx_err.o \
     $(BUILD)/test_http_output_fsa.o \
-    $(BUILD)/test_config_parser.o
+    $(BUILD)/test_config_parser.o \
+    $(BUILD)/test_config_parser_vectors.o \
+    $(BUILD)/config_parser_vectors.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
@@ -479,6 +481,21 @@ $(BUILD)/test_eth.o: tests/test_eth.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_config_parser.o: tests/test_config_parser.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_config_parser_vectors.o: tests/test_config_parser_vectors.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+# I9 — generate the asm vector table from the canonical TSV. The
+# output file lives in build/ (gitignored). Regenerated whenever
+# the TSV or the generator changes; the asm test runner walks the
+# resulting _cp_vectors[] array and asserts each row's outcome
+# against config_parse, locking the asm parser to the linter via
+# the shared spec.
+$(BUILD)/config_parser_vectors.S: tests/func/network_conf_vectors.tsv scripts/gen_config_parser_vectors.py | $(BUILD)
+	@python3 scripts/gen_config_parser_vectors.py $< $@
+
+$(BUILD)/config_parser_vectors.o: $(BUILD)/config_parser_vectors.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_arp.o: tests/test_arp.S include/net.inc | $(BUILD)
