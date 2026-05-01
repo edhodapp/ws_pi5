@@ -217,7 +217,7 @@ kernel8.img: $(BUILD)/kernel8.elf
 # ---------------------------------------------------------------------------
 pi4-test:
 	$(MAKE) clean
-	$(MAKE) PLATFORM=pi4 CONTENT_MAX=65536 MAX_ROUTES=8
+	$(MAKE) PLATFORM=pi4 SHIP=1 CONTENT_MAX=65536 MAX_ROUTES=8
 
 # ---------------------------------------------------------------------------
 # verify-fsa-table — cross-check tests/func/http_output_fsa_vectors.tsv
