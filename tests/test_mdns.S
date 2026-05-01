@@ -39,6 +39,12 @@
 .global test_mdns_build_announce
 .global test_mdns_build_announce_frame
 .global test_mdns_build_announce_empty
+.global test_mdns_state_initial
+.global test_mdns_state_advance_one
+.global test_mdns_state_full_sequence
+.global test_mdns_state_first_send_is_probe
+.global test_mdns_state_fourth_send_is_announce
+.global test_mdns_state_live_noop
 
 .section .text
 
@@ -1167,6 +1173,309 @@ test_mdns_build_announce_empty:
     ret
 
 
+/* ========================================================================
+ * Fake send_fn used by the state-machine tests. Signature matches
+ * what arp.S and (eventually) main.S pass through:
+ *   x0 = dwc2_base, x1 = ecm_state, x2 = frame_ptr, w3 = frame_len
+ * Captures (frame_ptr, frame_len) and increments a call counter
+ * into BSS globals. Returns 0.
+ * ======================================================================== */
+_mdns_send_capture:
+    adrp    x4, _mdns_send_count
+    add     x4, x4, :lo12:_mdns_send_count
+    ldr     w5, [x4]
+    add     w5, w5, #1
+    str     w5, [x4]
+
+    adrp    x4, _mdns_last_frame
+    add     x4, x4, :lo12:_mdns_last_frame
+    str     x2, [x4]
+    str     w3, [x4, #8]
+    mov     w0, #0
+    ret
+
+_mdns_send_capture_reset:
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    str     wzr, [x0]
+    adrp    x0, _mdns_last_frame
+    add     x0, x0, :lo12:_mdns_last_frame
+    str     xzr, [x0]
+    str     wzr, [x0, #8]
+    ret
+
+
+/* Common state-machine test setup: save real net_* globals, set
+ * QEMU defaults, reset send capture, init a fake timer pool, then
+ * call mdns_start. Returns nothing meaningful. */
+_mdns_state_setup:
+    stp     x29, x30, [sp, #-16]!
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+    bl      _mdns_send_capture_reset
+    /* Init a roomy timer pool so 5+ arms don't exhaust capacity. */
+    ldr     x0, =_mdns_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+    /* mdns_start(dwc2_base=0, ecm_state=0, tx_buf, timer_pool, send_fn) */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =_mdns_frame_buf
+    ldr     x3, =_mdns_test_tpool
+    ldr     x4, =_mdns_send_capture
+    bl      mdns_start
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_initial — after mdns_start, state == PROBE_1
+ * (a probe is scheduled but has not yet been sent). send_count == 0.
+ * ======================================================================== */
+test_mdns_state_initial:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+
+    bl      mdns_get_state
+    cmp     w0, #1                 /* MDNS_STATE_PROBE_1 */
+    b.ne    .Ltsi_fail
+
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Ltsi_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_initial
+    bl      test_pass
+    b       .Ltsi_done
+.Ltsi_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_initial
+    bl      test_fail
+.Ltsi_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_advance_one — one mdns_timer_cb call sends a frame,
+ * advances state PROBE_1 → PROBE_2, and increments send_count.
+ * ======================================================================== */
+test_mdns_state_advance_one:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #2                 /* MDNS_STATE_PROBE_2 */
+    b.ne    .Ltsao_fail
+
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ltsao_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_advance_one
+    bl      test_pass
+    b       .Ltsao_done
+.Ltsao_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_advance_one
+    bl      test_fail
+.Ltsao_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_full_sequence — five mdns_timer_cb calls walk
+ * through PROBE_1 → PROBE_2 → PROBE_3 → ANNOUNCE_1 → ANNOUNCE_2 →
+ * LIVE, with one frame sent at each step (total send_count == 5).
+ * ======================================================================== */
+test_mdns_state_full_sequence:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+
+    /* Drive 5 callbacks. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #6                 /* MDNS_STATE_LIVE */
+    b.ne    .Ltsfs_fail
+
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cmp     w0, #5
+    b.ne    .Ltsfs_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_full_sequence
+    bl      test_pass
+    b       .Ltsfs_done
+.Ltsfs_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_full_sequence
+    bl      test_fail
+.Ltsfs_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_first_send_is_probe — the first frame emitted
+ * should be a probe. Identifying byte: DNS payload flags hi == 0x00
+ * (QR=0). (Announces would be 0x84.)
+ * ======================================================================== */
+test_mdns_state_first_send_is_probe:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    /* Read captured frame ptr + check payload[42 + 2]. */
+    adrp    x0, _mdns_last_frame
+    add     x0, x0, :lo12:_mdns_last_frame
+    ldr     x0, [x0]
+    cbz     x0, .Ltsfp_fail
+    ldrb    w1, [x0, #(42 + 2)]
+    cbnz    w1, .Ltsfp_fail        /* probe flags byte is 0x00 */
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_first_send_is_probe
+    bl      test_pass
+    b       .Ltsfp_done
+.Ltsfp_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_first_send_is_probe
+    bl      test_fail
+.Ltsfp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_fourth_send_is_announce — after 3 probe sends and
+ * 1 more callback, the 4th frame is an announce: payload flags hi
+ * byte == 0x84 (QR=1, AA=1).
+ * ======================================================================== */
+test_mdns_state_fourth_send_is_announce:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    /* state should now be ANNOUNCE_2 (after 4 sends: probe×3 +
+     * announce×1). */
+    bl      mdns_get_state
+    cmp     w0, #5                 /* MDNS_STATE_ANNOUNCE_2 */
+    b.ne    .Ltsfa_fail
+
+    /* Last frame's payload flags hi == 0x84. */
+    adrp    x0, _mdns_last_frame
+    add     x0, x0, :lo12:_mdns_last_frame
+    ldr     x0, [x0]
+    cbz     x0, .Ltsfa_fail
+    ldrb    w1, [x0, #(42 + 2)]
+    cmp     w1, #0x84
+    b.ne    .Ltsfa_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_fourth_send_is_announce
+    bl      test_pass
+    b       .Ltsfa_done
+.Ltsfa_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_fourth_send_is_announce
+    bl      test_fail
+.Ltsfa_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_state_live_noop — once LIVE, mdns_timer_cb is a no-op:
+ * state stays LIVE and send_count does not increment.
+ * ======================================================================== */
+test_mdns_state_live_noop:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+    /* Drive to LIVE (5 callbacks). */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    /* Confirm we're LIVE before the no-op test. */
+    bl      mdns_get_state
+    cmp     w0, #6
+    b.ne    .Ltsln_fail
+
+    /* Snapshot count, hit cb again, verify nothing changed. */
+    adrp    x1, _mdns_send_count
+    add     x1, x1, :lo12:_mdns_send_count
+    ldr     w2, [x1]
+    cmp     w2, #5
+    b.ne    .Ltsln_fail
+
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #6                 /* still LIVE */
+    b.ne    .Ltsln_fail
+
+    adrp    x1, _mdns_send_count
+    add     x1, x1, :lo12:_mdns_send_count
+    ldr     w2, [x1]
+    cmp     w2, #5                 /* unchanged */
+    b.ne    .Ltsln_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_live_noop
+    bl      test_pass
+    b       .Ltsln_done
+.Ltsln_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_state_live_noop
+    bl      test_fail
+.Ltsln_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Tiny memcpy used by the dispatch tests to seed _mdns_frame_buf
  * from the read-only synthetic frames. x0=src, x1=dst, x2=len. */
 _mdns_test_memcpy:
@@ -1218,6 +1527,18 @@ _mdns_name_build_announce_frame:
     .asciz "mdns_build_announce_frame"
 _mdns_name_build_announce_empty:
     .asciz "mdns_build_announce_empty"
+_mdns_name_state_initial:
+    .asciz "mdns_state_initial"
+_mdns_name_state_advance_one:
+    .asciz "mdns_state_advance_one"
+_mdns_name_state_full_sequence:
+    .asciz "mdns_state_full_sequence"
+_mdns_name_state_first_send_is_probe:
+    .asciz "mdns_state_first_send_is_probe"
+_mdns_name_state_fourth_send_is_announce:
+    .asciz "mdns_state_fourth_send_is_announce"
+_mdns_name_state_live_noop:
+    .asciz "mdns_state_live_noop"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.
@@ -1505,3 +1826,16 @@ _mdns_save_buf:
 .balign 8
 _mdns_frame_buf:
     .space 256
+
+/* State-machine test fixtures. */
+.balign 8
+_mdns_send_count:
+    .space 4
+.balign 8
+_mdns_last_frame:
+    .space 8                    /* captured frame ptr */
+    .space 8                    /* captured len (4) + pad */
+
+.balign 8
+_mdns_test_tpool:
+    .space 520                  /* 8 + 8*32 = 264 minimum; 520 = TPOOL_DEFAULT_SIZE */

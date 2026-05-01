@@ -1073,3 +1073,230 @@ mdns_build_announce_frame:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
+
+
+/* ===========================================================================
+ * State machine — RFC 6762 §8.1 probe + §8.3 announce phases (D008).
+ *
+ * Lifecycle (each transition is driven by a timer callback firing,
+ * not a wallclock loop):
+ *
+ *   IDLE        → mdns_start sets state = PROBE_1, arms timer at +0
+ *   PROBE_1     → send probe, advance to PROBE_2,    re-arm at +250 ms
+ *   PROBE_2     → send probe, advance to PROBE_3,    re-arm at +250 ms
+ *   PROBE_3     → send probe, advance to ANNOUNCE_1, re-arm at +250 ms
+ *   ANNOUNCE_1  → send announce, advance to ANNOUNCE_2, re-arm at +1 s
+ *   ANNOUNCE_2  → send announce, advance to LIVE, no re-arm
+ *   LIVE        → no-op (defensive; the timer is no longer armed)
+ *
+ * Conflict detection lives in mdns_dispatch (8/N follow-up wires it
+ * up). For now this commit only owns the time/state side.
+ *
+ * The send_fn signature mirrors arp.S:
+ *   send_fn(x0=dwc2_base, x1=ecm_state, x2=frame_ptr, w3=frame_len)
+ *
+ * Context layout (mdns_send_ctx in BSS, 56 bytes):
+ *   +0  DWC2_BASE   u64
+ *   +8  ECM_STATE   u64
+ *   +16 TX_BUF      u64  scratch frame buffer (≥ 140 bytes)
+ *   +24 TIMER_POOL  u64
+ *   +32 TIMER_FREQ  u64  cached at start
+ *   +40 SEND_FN     u64  function pointer
+ *   +48 STATE       u32  one of MDNS_STATE_*
+ *   +52 (pad)       u32
+ * =========================================================================== */
+
+.equ MDNSC_DWC2_BASE,    0
+.equ MDNSC_ECM_STATE,    8
+.equ MDNSC_TX_BUF,       16
+.equ MDNSC_TIMER_POOL,   24
+.equ MDNSC_TIMER_FREQ,   32
+.equ MDNSC_SEND_FN,      40
+.equ MDNSC_STATE,        48
+.equ MDNSC_SIZE,         56
+
+.equ MDNS_STATE_IDLE,        0
+.equ MDNS_STATE_PROBE_1,     1
+.equ MDNS_STATE_PROBE_2,     2
+.equ MDNS_STATE_PROBE_3,     3
+.equ MDNS_STATE_ANNOUNCE_1,  4
+.equ MDNS_STATE_ANNOUNCE_2,  5
+.equ MDNS_STATE_LIVE,        6
+
+
+/* ---------------------------------------------------------------------------
+ * mdns_get_state — return the current state (read of mdns_send_ctx
+ * +MDNSC_STATE). Used by mdns_dispatch (in 8/N follow-up) to gate
+ * conflict detection on the probe window, and by tests.
+ *
+ * Returns: w0 = state (MDNS_STATE_*).
+ * --------------------------------------------------------------------------- */
+.global mdns_get_state
+mdns_get_state:
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w0, [x0, #MDNSC_STATE]
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * mdns_start — initialize the responder context and arm the first
+ * probe timer.
+ *
+ *   x0 = DWC2 base address (or 0 in tests)
+ *   x1 = ECM state pointer (or 0 in tests)
+ *   x2 = TX buffer pointer (≥ 140 bytes)
+ *   x3 = timer pool pointer
+ *   x4 = send function pointer
+ *
+ * Returns: nothing.
+ *
+ * Refuses to start (state stays IDLE, no timer armed) if hostname is
+ * unset — mdns_build_*_payload would silently return 0 anyway, but
+ * skipping the timer arm avoids burning a slot on no-op work.
+ * --------------------------------------------------------------------------- */
+.global mdns_start
+mdns_start:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    str     x0, [x5, #MDNSC_DWC2_BASE]
+    str     x1, [x5, #MDNSC_ECM_STATE]
+    str     x2, [x5, #MDNSC_TX_BUF]
+    str     x3, [x5, #MDNSC_TIMER_POOL]
+    str     x4, [x5, #MDNSC_SEND_FN]
+
+    /* Refuse to start if hostname is empty. */
+    adrp    x6, net_hostname_len
+    add     x6, x6, :lo12:net_hostname_len
+    ldr     w6, [x6]
+    cbz     w6, .Lms_skip
+
+    /* Cache timer frequency. */
+    bl      timer_freq
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    str     x0, [x5, #MDNSC_TIMER_FREQ]
+
+    /* state = PROBE_1. */
+    mov     w0, #MDNS_STATE_PROBE_1
+    str     w0, [x5, #MDNSC_STATE]
+
+    /* Arm timer at expiry = now (fires immediately under timer_check). */
+    bl      timer_now
+    mov     x1, x0
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    ldr     x0, [x5, #MDNSC_TIMER_POOL]
+    ldr     x2, =mdns_timer_cb
+    adrp    x3, mdns_send_ctx
+    add     x3, x3, :lo12:mdns_send_ctx
+    bl      timer_set
+
+.Lms_skip:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * mdns_timer_cb — fire one step of the state machine.
+ *
+ *   x0 = ctx pointer (= &mdns_send_ctx in production)
+ *
+ * Branches on current state:
+ *   PROBE_*    → build_probe_frame, send, advance, re-arm at +250 ms
+ *   ANNOUNCE_1 → build_announce_frame, send, advance to ANNOUNCE_2,
+ *                re-arm at +1 s
+ *   ANNOUNCE_2 → build_announce_frame, send, advance to LIVE, no re-arm
+ *   IDLE/LIVE  → no-op (defensive; should not be entered in practice)
+ *
+ * Register convention:
+ *   x19 ctx pointer (callee-saved)
+ *   w20 current state (callee-saved)
+ *   w21 send-frame length (callee-saved)
+ * --------------------------------------------------------------------------- */
+.global mdns_timer_cb
+mdns_timer_cb:
+    stp     x29, x30, [sp, #-48]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    str     x21, [sp, #32]
+
+    mov     x19, x0
+    ldr     w20, [x19, #MDNSC_STATE]
+
+    /* IDLE (0) or LIVE (6+) → no-op. */
+    cmp     w20, #MDNS_STATE_PROBE_1
+    b.lt    .Ltcb_done
+    cmp     w20, #MDNS_STATE_ANNOUNCE_2
+    b.gt    .Ltcb_done
+
+    /* Build the appropriate frame into ctx.TX_BUF. */
+    ldr     x0, [x19, #MDNSC_TX_BUF]
+    cmp     w20, #MDNS_STATE_PROBE_3
+    b.le    .Ltcb_build_probe
+    /* ANNOUNCE_1 or ANNOUNCE_2 */
+    bl      mdns_build_announce_frame
+    b       .Ltcb_built
+.Ltcb_build_probe:
+    bl      mdns_build_probe_frame
+.Ltcb_built:
+    cbz     w0, .Ltcb_advance       /* empty hostname: skip send, still advance */
+    mov     w21, w0
+
+    /* Invoke send_fn(dwc2_base, ecm_state, tx_buf, frame_len). */
+    ldr     x5, [x19, #MDNSC_SEND_FN]
+    cbz     x5, .Ltcb_advance
+    ldr     x0, [x19, #MDNSC_DWC2_BASE]
+    ldr     x1, [x19, #MDNSC_ECM_STATE]
+    ldr     x2, [x19, #MDNSC_TX_BUF]
+    mov     w3, w21
+    blr     x5
+
+.Ltcb_advance:
+    /* Advance state. PROBE_1..ANNOUNCE_2 → +1; ANNOUNCE_2 → LIVE. */
+    add     w20, w20, #1
+    str     w20, [x19, #MDNSC_STATE]
+
+    /* If now LIVE, no re-arm. */
+    cmp     w20, #MDNS_STATE_LIVE
+    b.eq    .Ltcb_done
+
+    /* Re-arm: PROBE_* and the transition into ANNOUNCE_1 use 250 ms;
+     * ANNOUNCE_1 → ANNOUNCE_2 uses 1 s. New state w20 is what's
+     * NEXT to send, so the delay until that send is:
+     *   w20 in {PROBE_2, PROBE_3, ANNOUNCE_1} → 250 ms
+     *   w20 == ANNOUNCE_2                     → 1000 ms
+     */
+    bl      timer_now
+    mov     x1, x0                  /* x1 = now */
+    ldr     x2, [x19, #MDNSC_TIMER_FREQ]
+    cmp     w20, #MDNS_STATE_ANNOUNCE_2
+    b.eq    .Ltcb_delay_1s
+    /* 250 ms = freq / 4. */
+    lsr     x2, x2, #2
+    b       .Ltcb_arm
+.Ltcb_delay_1s:
+    /* 1 s = freq. (x2 already holds freq.) */
+.Ltcb_arm:
+    add     x1, x1, x2              /* expiry = now + delay */
+    ldr     x0, [x19, #MDNSC_TIMER_POOL]
+    cbz     x0, .Ltcb_done
+    ldr     x2, =mdns_timer_cb
+    mov     x3, x19
+    bl      timer_set
+
+.Ltcb_done:
+    ldr     x21, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #48
+    ret
+
+
+.section .bss
+.balign 8
+.global mdns_send_ctx
+mdns_send_ctx:
+    .space MDNSC_SIZE
