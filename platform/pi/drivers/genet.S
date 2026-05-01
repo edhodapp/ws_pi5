@@ -1102,3 +1102,26 @@ genet_phy_check:
 .balign 64
 genet_tsb_buf:
     .space  TSB_SIZE + ETH_FRAME_MAX   /* 64 + 1514 = 1578 bytes */
+
+/* --- L2 mDNS multicast destination MAC (per D007) ---------------------
+ *
+ * IPv4 mDNS messages target multicast group 224.0.0.251, which maps to
+ * the L2 multicast MAC 01:00:5e:00:00:fb (RFC 1112 §6.4 and IANA
+ * IPv4-multicast-to-MAC mapping).
+ *
+ * Single hardcoded label per D007 — exactly one multicast slot is in
+ * use today (mDNS), so we don't size an array for "future entries that
+ * may never come" (see feedback_no_premature_tables).
+ *
+ * Hardware-filter wiring (programming the GENET MDF, or selecting
+ * UMAC_CMD_PROMISC, or relying on default multicast acceptance) is
+ * deferred to I15 where the mDNS responder is actually wired into
+ * the receive path. I14's deliverable is just this constant; the
+ * label is .global so lib/mdns.S can compare incoming destination
+ * MACs against it.
+ */
+.section .rodata
+.balign 2
+.global mdns_mac
+mdns_mac:
+    .byte 0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb
