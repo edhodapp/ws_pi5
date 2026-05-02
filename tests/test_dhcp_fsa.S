@@ -27,44 +27,24 @@
 
 .section .text
 
-/* Reset state + counters. Macros emitted inline avoid pulling in
- * another include just for this test file. */
+/* Reset FSA state + zero the entire handler-counter block. Uses
+ * the dhcp_count_block_start/_end symbols from lib/dhcp_fsa.S so
+ * adding a new handler counter in a future commit doesn't require
+ * touching this function. */
 _dhcp_test_reset:
     adrp    x0, dhcp_fsa_state
     add     x0, x0, :lo12:dhcp_fsa_state
     str     wzr, [x0]
-    /* Zero all 10 handler counters. They live contiguously after
-     * dhcp_fsa_state in BSS, but for clarity zero each by name. */
-    adrp    x0, dhcp_count_send_discover
-    add     x0, x0, :lo12:dhcp_count_send_discover
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_resend_discover
-    add     x0, x0, :lo12:dhcp_count_resend_discover
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_record_offer_send_request
-    add     x0, x0, :lo12:dhcp_count_record_offer_send_request
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_resend_request_selecting
-    add     x0, x0, :lo12:dhcp_count_resend_request_selecting
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_commit_lease_arm_timers
-    add     x0, x0, :lo12:dhcp_count_commit_lease_arm_timers
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_send_request_renew
-    add     x0, x0, :lo12:dhcp_count_send_request_renew
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_resend_request_renew
-    add     x0, x0, :lo12:dhcp_count_resend_request_renew
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_send_request_rebind
-    add     x0, x0, :lo12:dhcp_count_send_request_rebind
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_resend_request_rebind
-    add     x0, x0, :lo12:dhcp_count_resend_request_rebind
-    str     wzr, [x0]
-    adrp    x0, dhcp_count_panic_d
-    add     x0, x0, :lo12:dhcp_count_panic_d
-    str     wzr, [x0]
+    adrp    x0, dhcp_count_block_start
+    add     x0, x0, :lo12:dhcp_count_block_start
+    adrp    x1, dhcp_count_block_end
+    add     x1, x1, :lo12:dhcp_count_block_end
+.Ldtr_loop:
+    cmp     x0, x1
+    b.hs    .Ldtr_done
+    str     wzr, [x0], #4
+    b       .Ldtr_loop
+.Ldtr_done:
     ret
 
 

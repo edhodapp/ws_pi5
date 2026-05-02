@@ -476,7 +476,14 @@ dhcp_fsa_state:        .space 4
 .balign 8
 dhcp_send_ctx:         .space DHCPC_SIZE
 
+/* Per-handler dispatch counters. The block is bracketed by
+ * dhcp_count_block_start/_end so test setup can zero the whole
+ * range without naming each counter — adding a new handler in
+ * future commits is a no-op for the test reset path. */
+.global dhcp_count_block_start
+.global dhcp_count_block_end
 .balign 4
+dhcp_count_block_start:
 dhcp_count_send_discover:                .space 4
 dhcp_count_resend_discover:              .space 4
 dhcp_count_record_offer_send_request:    .space 4
@@ -487,3 +494,4 @@ dhcp_count_resend_request_renew:         .space 4
 dhcp_count_send_request_rebind:          .space 4
 dhcp_count_resend_request_rebind:        .space 4
 dhcp_count_panic_d:                      .space 4
+dhcp_count_block_end:
