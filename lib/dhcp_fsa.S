@@ -36,6 +36,9 @@
 .global dhcp_send_ctx
 .global dhcp_start
 .global dhcp_retrans_cb
+.global dhcp_t1_cb
+.global dhcp_t2_cb
+.global dhcp_lease_cb
 
 /* Handler symbols are .global so the verify script can resolve
  * (state, event) → expected handler via the ELF symbol table. */
@@ -485,7 +488,154 @@ h_resend_request_selecting:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
-DHCP_STUB h_commit_lease_arm_timers,      dhcp_count_commit_lease_arm_timers
+/* h_commit_lease_arm_timers — REQUESTING + RX_ACK_VALID, or
+ * RENEWING/REBINDING + RX_ACK_VALID. Stamps the assigned IP,
+ * netmask, and gateway from dhcp_parsed into the net_cfg globals
+ * the rest of the stack reads, caches the lease time in ctx, and
+ * arms three one-shot timers (T1 = lease/2, T2 = lease*7/8, full
+ * lease expiry). The cbs fire the corresponding FSA events.
+ *
+ * Subtleties:
+ *   - We only stamp net_netmask / net_gw_ip if the OFFER carried
+ *     them (dhcp_parsed.flags). Missing options leave the existing
+ *     globals alone.
+ *   - Old T1/T2/lease timers from a prior BOUND→RENEWING→BOUND
+ *     cycle are NOT cancelled. Pool capacity in main.S
+ *     (TPOOL_DEFAULT_CAP=16) is enough for several lease cycles;
+ *     proper cancel-before-rearm is a follow-up if pool exhaustion
+ *     surfaces in long-running deployments.
+ *
+ *   - Timer arming converts host-order seconds → ticks via
+ *     ctx.timer_freq. Lease values up to 0xFFFFFFFF (RFC's
+ *     "infinite") would overflow x0 when multiplied by freq;
+ *     accept that limitation in v1 — typical leases are ≤ 24 h. */
+h_commit_lease_arm_timers:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_commit_lease_arm_timers
+    add     x0, x0, :lo12:dhcp_count_commit_lease_arm_timers
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    /* Apply the assigned IP from dhcp_parsed.yiaddr into
+     * net_our_ip. yiaddr is wire-order bytes; copy verbatim. */
+    adrp    x19, dhcp_parsed
+    add     x19, x19, :lo12:dhcp_parsed
+    adrp    x20, net_our_ip
+    add     x20, x20, :lo12:net_our_ip
+    ldrb    w0, [x19, #(DHCP_PARSED_YIADDR + 0)]; strb w0, [x20, #0]
+    ldrb    w0, [x19, #(DHCP_PARSED_YIADDR + 1)]; strb w0, [x20, #1]
+    ldrb    w0, [x19, #(DHCP_PARSED_YIADDR + 2)]; strb w0, [x20, #2]
+    ldrb    w0, [x19, #(DHCP_PARSED_YIADDR + 3)]; strb w0, [x20, #3]
+
+    ldrb    w0, [x19, #DHCP_PARSED_FLAGS]
+    /* If subnet mask was seen, copy to net_netmask. */
+    tst     w0, #DHCP_FLAG_SEEN_SUBNET
+    b.eq    .Lcl_no_subnet
+    adrp    x20, net_netmask
+    add     x20, x20, :lo12:net_netmask
+    ldrb    w1, [x19, #(DHCP_PARSED_SUBNET_MASK + 0)]; strb w1, [x20, #0]
+    ldrb    w1, [x19, #(DHCP_PARSED_SUBNET_MASK + 1)]; strb w1, [x20, #1]
+    ldrb    w1, [x19, #(DHCP_PARSED_SUBNET_MASK + 2)]; strb w1, [x20, #2]
+    ldrb    w1, [x19, #(DHCP_PARSED_SUBNET_MASK + 3)]; strb w1, [x20, #3]
+.Lcl_no_subnet:
+    /* If router was seen, copy to net_gw_ip. */
+    tst     w0, #DHCP_FLAG_SEEN_ROUTER
+    b.eq    .Lcl_no_router
+    adrp    x20, net_gw_ip
+    add     x20, x20, :lo12:net_gw_ip
+    ldrb    w1, [x19, #(DHCP_PARSED_ROUTER_IP + 0)]; strb w1, [x20, #0]
+    ldrb    w1, [x19, #(DHCP_PARSED_ROUTER_IP + 1)]; strb w1, [x20, #1]
+    ldrb    w1, [x19, #(DHCP_PARSED_ROUTER_IP + 2)]; strb w1, [x20, #2]
+    ldrb    w1, [x19, #(DHCP_PARSED_ROUTER_IP + 3)]; strb w1, [x20, #3]
+.Lcl_no_router:
+
+    /* Cache lease time in ctx. */
+    ldr     w0, [x19, #DHCP_PARSED_LEASE_TIME]
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    str     w0, [x19, #DHCPC_LEASE_TIME]
+
+    /* Arm timers: T1=lease/2, T2=lease*7/8, full=lease.
+     * Skip if no timer pool (test mode without pool). */
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    cbz     x0, .Lcl_done
+
+    /* Compute now (ticks). Stash in x20. */
+    bl      timer_now
+    mov     x20, x0
+
+    /* T1 = now + (lease/2) * freq. */
+    ldr     w0, [x19, #DHCPC_LEASE_TIME]
+    lsr     w0, w0, #1                  /* lease/2 (seconds) */
+    ldr     x1, [x19, #DHCPC_TIMER_FREQ]
+    mul     x0, x0, x1
+    add     x1, x20, x0                 /* T1 expiry */
+    str     x1, [x19, #DHCPC_T1_DEADLINE]
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_t1_cb
+    mov     x3, x19
+    bl      timer_set
+
+    /* T2 = now + (lease * 7 / 8) * freq. */
+    ldr     w0, [x19, #DHCPC_LEASE_TIME]
+    mov     w1, #7
+    mul     w0, w0, w1
+    lsr     w0, w0, #3                  /* lease*7/8 */
+    ldr     x1, [x19, #DHCPC_TIMER_FREQ]
+    mul     x0, x0, x1
+    add     x1, x20, x0
+    str     x1, [x19, #DHCPC_T2_DEADLINE]
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_t2_cb
+    mov     x3, x19
+    bl      timer_set
+
+    /* Lease expiry = now + lease * freq. */
+    ldr     w0, [x19, #DHCPC_LEASE_TIME]
+    ldr     x1, [x19, #DHCPC_TIMER_FREQ]
+    mul     x0, x0, x1
+    add     x1, x20, x0
+    str     x1, [x19, #DHCPC_LEASE_DEADLINE]
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_lease_cb
+    mov     x3, x19
+    bl      timer_set
+
+.Lcl_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* Timer callbacks for the three lease-cycle events. Each just fires
+ * the corresponding FSA event; the engine's table dispatches the
+ * right action handler. x0 = ctx pointer (set by timer_set). */
+dhcp_t1_cb:
+    stp     x29, x30, [sp, #-16]!
+    mov     w0, #E_TIMER_T1
+    bl      dhcp_fsa_step
+    ldp     x29, x30, [sp], #16
+    ret
+
+dhcp_t2_cb:
+    stp     x29, x30, [sp, #-16]!
+    mov     w0, #E_TIMER_T2
+    bl      dhcp_fsa_step
+    ldp     x29, x30, [sp], #16
+    ret
+
+dhcp_lease_cb:
+    stp     x29, x30, [sp, #-16]!
+    mov     w0, #E_TIMER_LEASE
+    bl      dhcp_fsa_step
+    ldp     x29, x30, [sp], #16
+    ret
 DHCP_STUB h_send_request_renew,           dhcp_count_send_request_renew
 DHCP_STUB h_resend_request_renew,         dhcp_count_resend_request_renew
 DHCP_STUB h_send_request_rebind,          dhcp_count_send_request_rebind

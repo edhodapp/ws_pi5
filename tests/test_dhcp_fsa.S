@@ -14,6 +14,7 @@
  */
 
 .include "dhcp.inc"
+.include "timer.inc"
 
 .global test_dhcp_fsa_step_init_start
 .global test_dhcp_fsa_step_no_handler
@@ -25,6 +26,7 @@
 .global test_dhcp_retrans_cb_fires_retry
 .global test_dhcp_retrans_cb_fires_giveup
 .global test_dhcp_offer_drives_request
+.global test_dhcp_ack_commits_lease
 
 .section .text
 
@@ -704,6 +706,155 @@ test_dhcp_offer_drives_request:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_ack_commits_lease — REQUESTING + RX_ACK_VALID. The
+ * commit handler stamps yiaddr → net_our_ip and the lease into
+ * ctx.LEASE_TIME, then arms T1/T2/lease timers. State advances
+ * to BOUND.
+ *
+ * Asserts:
+ *   - state == S_BOUND
+ *   - h_commit_lease_arm_timers counter == 1
+ *   - net_our_ip = 10.0.0.100 (from dhcp_parsed.yiaddr)
+ *   - ctx.LEASE_TIME == 3600
+ *   - timer pool has at least 3 armed slots (T1/T2/lease) above
+ *     whatever was armed before (we use a fresh pool here so
+ *     count == 3).
+ * ======================================================================== */
+test_dhcp_ack_commits_lease:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Save net_our_ip so we can restore it (the test mutates it). */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldr     w1, [x0]
+    adrp    x2, _dhcp_saved_net_our_ip
+    add     x2, x2, :lo12:_dhcp_saved_net_our_ip
+    str     w1, [x2]
+
+    /* Init a fresh timer pool. */
+    ldr     x0, =_dhcp_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+
+    /* Cache timer_freq into ctx. */
+    bl      timer_freq
+    adrp    x1, dhcp_send_ctx
+    add     x1, x1, :lo12:dhcp_send_ctx
+    str     x0, [x1, #DHCPC_TIMER_FREQ]
+    ldr     x2, =_dhcp_test_tpool
+    str     x2, [x1, #DHCPC_TIMER_POOL]
+
+    /* Pre-populate dhcp_parsed with an ACK. */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_ACK
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    /* yiaddr = 10.0.0.100 wire-order */
+    mov     w1, #10
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 0)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 1)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 2)]
+    mov     w1, #100
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 3)]
+    /* lease_time = 3600 (host-order u32) */
+    movz    w1, #0x0E10
+    str     w1, [x0, #DHCP_PARSED_LEASE_TIME]
+    /* No subnet/router options (flags = 0) so commit doesn't stomp
+     * on existing net_netmask / net_gw_ip. */
+    strb    wzr, [x0, #DHCP_PARSED_FLAGS]
+
+    /* state = REQUESTING. */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_REQUESTING
+    str     w2, [x1]
+
+    /* Fire RX_ACK_VALID. */
+    mov     w0, #E_RX_ACK_VALID
+    bl      dhcp_fsa_step
+
+    /* state advanced to BOUND. */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_BOUND
+    b.ne    .Ldal_fail
+
+    /* commit counter == 1. */
+    adrp    x0, dhcp_count_commit_lease_arm_timers
+    add     x0, x0, :lo12:dhcp_count_commit_lease_arm_timers
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldal_fail
+
+    /* net_our_ip[0] == 10, net_our_ip[3] == 100. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldrb    w1, [x0, #0]
+    cmp     w1, #10
+    b.ne    .Ldal_fail
+    ldrb    w1, [x0, #3]
+    cmp     w1, #100
+    b.ne    .Ldal_fail
+
+    /* ctx.LEASE_TIME == 3600. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    ldr     w1, [x0, #DHCPC_LEASE_TIME]
+    movz    w2, #0x0E10
+    cmp     w1, w2
+    b.ne    .Ldal_fail
+
+    /* Timer pool: at least 3 slots have non-zero callback (T1/T2/lease).
+     * Walk the slots manually. Each slot is SLOT_SIZE bytes; the
+     * callback field is at SLOT_CALLBACK = 8. */
+    ldr     x0, =_dhcp_test_tpool
+    add     x0, x0, #TPOOL_SLOTS
+    mov     w1, #0                      /* armed count */
+    mov     w2, #8                      /* slots remaining */
+.Ldal_walk:
+    cbz     w2, .Ldal_done_walk
+    ldr     x3, [x0, #SLOT_CALLBACK]
+    cbz     x3, .Ldal_walk_skip
+    add     w1, w1, #1
+.Ldal_walk_skip:
+    add     x0, x0, #SLOT_SIZE
+    sub     w2, w2, #1
+    b       .Ldal_walk
+.Ldal_done_walk:
+    cmp     w1, #3
+    b.lt    .Ldal_fail
+
+    /* Restore net_our_ip. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+
+    ldr     x0, =_dhcp_name_ack_commits
+    bl      test_pass
+    b       .Ldal_done
+.Ldal_fail:
+    /* Best-effort restore on fail. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+    ldr     x0, =_dhcp_name_ack_commits
+    bl      test_fail
+.Ldal_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -715,6 +866,7 @@ _dhcp_name_start_sends:        .asciz "dhcp_start_sends_discover_broadcast"
 _dhcp_name_cb_retry:           .asciz "dhcp_retrans_cb_fires_retry"
 _dhcp_name_cb_giveup:          .asciz "dhcp_retrans_cb_fires_giveup"
 _dhcp_name_offer_drives:       .asciz "dhcp_offer_drives_request"
+_dhcp_name_ack_commits:        .asciz "dhcp_ack_commits_lease"
 
 
 .section .bss
@@ -729,3 +881,11 @@ _dhcp_send_count:
 _dhcp_last_frame:
     .space 8                            /* captured frame ptr */
     .space 8                            /* captured len + pad */
+
+.balign 8
+_dhcp_test_tpool:
+    .space 520                          /* TPOOL_DEFAULT_SIZE = 8 + 16*32 */
+
+.balign 4
+_dhcp_saved_net_our_ip:
+    .space 4
