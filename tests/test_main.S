@@ -158,6 +158,7 @@ _start:
     bl      test_dhcp_start_sends_discover_broadcast
     bl      test_dhcp_retrans_cb_fires_retry
     bl      test_dhcp_retrans_cb_fires_giveup
+    bl      test_dhcp_offer_drives_request
     bl      test_dhcp_build_discover_header
     bl      test_dhcp_build_discover_options
     bl      test_dhcp_build_request_selecting_has_50_and_54

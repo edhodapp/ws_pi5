@@ -24,6 +24,7 @@
 .global test_dhcp_start_sends_discover_broadcast
 .global test_dhcp_retrans_cb_fires_retry
 .global test_dhcp_retrans_cb_fires_giveup
+.global test_dhcp_offer_drives_request
 
 .section .text
 
@@ -571,6 +572,138 @@ test_dhcp_retrans_cb_fires_giveup:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_offer_drives_request — wire dhcp_parsed with an OFFER
+ * payload, set state=SELECTING, fire E_RX_OFFER_VALID. The FSA
+ * dispatches h_record_offer_send_request, which caches server_id
+ * + yiaddr in ctx, sends a REQUEST, and transitions the FSA to
+ * REQUESTING. Asserts:
+ *   - state == S_REQUESTING
+ *   - ctx.server_id / ctx.requested_ip captured from dhcp_parsed
+ *   - send_count == 1
+ *   - captured frame's BOOTP options include opt 53=REQUEST,
+ *     opt 50=requested_ip, opt 54=server_id (validated by the
+ *     existing builder tests; here we just sanity-check opt 53).
+ * ======================================================================== */
+test_dhcp_offer_drives_request:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Pre-populate ctx (no timer pool — skip arming). */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    str     xzr, [x0, #DHCPC_DWC2_BASE]
+    str     xzr, [x0, #DHCPC_ECM_STATE]
+    ldr     x1, =_dhcp_test_tx_buf
+    str     x1, [x0, #DHCPC_TX_BUF]
+    str     xzr, [x0, #DHCPC_TIMER_POOL]
+    ldr     x1, =_dhcp_send_capture
+    str     x1, [x0, #DHCPC_SEND_FN]
+    movz    w1, #0x1234
+    str     w1, [x0, #DHCPC_XID]
+    mov     w1, #DHCP_MAX_RETRIES
+    str     w1, [x0, #DHCPC_RETRIES]
+    /* net_our_mac default 02:00:00:00:00:01 is fine — required by
+     * dhcp_build_request_selecting via _dhcp_zero_header. */
+
+    /* Pre-populate dhcp_parsed with an OFFER's relevant fields.
+     * yiaddr = 10.0.0.100 (wire bytes 0x0a000064 stored LE),
+     * server_id = 10.0.0.1 (0x0a000001 LE). */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_OFFER
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    /* yiaddr bytes wire-order: 10, 0, 0, 100 */
+    mov     w1, #10
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 0)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 1)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 2)]
+    mov     w1, #100
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 3)]
+    /* server_id bytes wire-order: 10, 0, 0, 1 */
+    mov     w1, #10
+    strb    w1, [x0, #(DHCP_PARSED_SERVER_ID + 0)]
+    strb    wzr, [x0, #(DHCP_PARSED_SERVER_ID + 1)]
+    strb    wzr, [x0, #(DHCP_PARSED_SERVER_ID + 2)]
+    mov     w1, #1
+    strb    w1, [x0, #(DHCP_PARSED_SERVER_ID + 3)]
+
+    /* state = SELECTING. */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_SELECTING
+    str     w2, [x1]
+
+    /* Fire RX_OFFER_VALID. */
+    mov     w0, #E_RX_OFFER_VALID
+    bl      dhcp_fsa_step
+
+    /* state advanced to REQUESTING. */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_REQUESTING
+    b.ne    .Ldor_fail
+
+    /* h_record_offer_send_request counter == 1. */
+    adrp    x0, dhcp_count_record_offer_send_request
+    add     x0, x0, :lo12:dhcp_count_record_offer_send_request
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldor_fail
+
+    /* ctx.server_id == 10 in low byte. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    ldrb    w1, [x0, #(DHCPC_SERVER_ID + 0)]
+    cmp     w1, #10
+    b.ne    .Ldor_fail
+    ldrb    w1, [x0, #(DHCPC_SERVER_ID + 3)]
+    cmp     w1, #1
+    b.ne    .Ldor_fail
+    /* ctx.requested_ip == 10.0.0.100. */
+    ldrb    w1, [x0, #(DHCPC_REQUESTED_IP + 0)]
+    cmp     w1, #10
+    b.ne    .Ldor_fail
+    ldrb    w1, [x0, #(DHCPC_REQUESTED_IP + 3)]
+    cmp     w1, #100
+    b.ne    .Ldor_fail
+
+    /* send_count == 1. */
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldor_fail
+
+    /* Captured frame's BOOTP message-type option == REQUEST.
+     * Option 53 lives at frame[42 + BOOTP_OPTIONS + 0..2] =
+     * frame[42 + 240 + 2] = frame[284]. */
+    adrp    x0, _dhcp_last_frame
+    add     x0, x0, :lo12:_dhcp_last_frame
+    ldr     x0, [x0]
+    cbz     x0, .Ldor_fail
+    /* Option 53 code at offset 282, len at 283, value at 284. */
+    ldrb    w1, [x0, #(42 + 240 + 0)]
+    cmp     w1, #DHCP_OPT_MSG_TYPE
+    b.ne    .Ldor_fail
+    ldrb    w1, [x0, #(42 + 240 + 2)]
+    cmp     w1, #DHCP_MSG_REQUEST
+    b.ne    .Ldor_fail
+
+    ldr     x0, =_dhcp_name_offer_drives
+    bl      test_pass
+    b       .Ldor_done
+.Ldor_fail:
+    ldr     x0, =_dhcp_name_offer_drives
+    bl      test_fail
+.Ldor_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -581,6 +714,7 @@ _dhcp_name_start:              .asciz "dhcp_start_populates_ctx_and_fires"
 _dhcp_name_start_sends:        .asciz "dhcp_start_sends_discover_broadcast"
 _dhcp_name_cb_retry:           .asciz "dhcp_retrans_cb_fires_retry"
 _dhcp_name_cb_giveup:          .asciz "dhcp_retrans_cb_fires_giveup"
+_dhcp_name_offer_drives:       .asciz "dhcp_offer_drives_request"
 
 
 .section .bss

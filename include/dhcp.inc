@@ -174,7 +174,12 @@
 .equ DHCPC_T1_DEADLINE,      64
 .equ DHCPC_T2_DEADLINE,      72
 .equ DHCPC_LEASE_DEADLINE,   80
-.equ DHCPC_SIZE,             88
+/* Cached from the accepted OFFER for use across SELECTING-state
+ * REQUEST retransmits (dhcp_parsed gets overwritten by any new
+ * inbound packet, so we can't trust it past h_record_offer_send_request). */
+.equ DHCPC_SERVER_ID,        88
+.equ DHCPC_REQUESTED_IP,     92
+.equ DHCPC_SIZE,             96
 
 /* RFC 2131 §4.1: 4 s, 8 s, 16 s exponential backoff, 3 retries
  * before panic_d per D017. */

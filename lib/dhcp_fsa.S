@@ -359,8 +359,132 @@ dhcp_retrans_cb:
 .Lcb_done:
     ldp     x29, x30, [sp], #16
     ret
-DHCP_STUB h_record_offer_send_request,    dhcp_count_record_offer_send_request
-DHCP_STUB h_resend_request_selecting,     dhcp_count_resend_request_selecting
+/* _dhcp_request_selecting_send_arm — shared body for
+ * h_record_offer_send_request and h_resend_request_selecting.
+ * Builds a SELECTING-state REQUEST (option 50 = ctx.REQUESTED_IP,
+ * option 54 = ctx.SERVER_ID per RFC 2131 §4.4.1), wraps in
+ * Eth+IP+UDP broadcast, sends, arms the retrans timer at +4 s.
+ *
+ * Caller MUST set x19 = &dhcp_send_ctx with SERVER_ID, REQUESTED_IP,
+ * and XID populated, AND must have already verified send_fn != 0. */
+_dhcp_request_selecting_send_arm:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x20, [sp, #16]
+
+    /* dhcp_build_request_selecting(buf, xid, server_id, requested_ip) */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    add     x0, x0, #42
+    ldr     w1, [x19, #DHCPC_XID]
+    ldr     w2, [x19, #DHCPC_SERVER_ID]
+    ldr     w3, [x19, #DHCPC_REQUESTED_IP]
+    bl      dhcp_build_request_selecting
+    mov     w20, w0
+
+    /* Wrap broadcast Eth+IP+UDP. */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    mov     w1, w20
+    bl      dhcp_wrap_broadcast
+
+    /* send_fn(...) */
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    ldr     x0, [x19, #DHCPC_DWC2_BASE]
+    ldr     x1, [x19, #DHCPC_ECM_STATE]
+    ldr     x2, [x19, #DHCPC_TX_BUF]
+    add     w3, w20, #42
+    blr     x5
+
+    /* Arm retrans timer at +4 s (skip if no pool). */
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    cbz     x0, .Lrssa_done
+    bl      timer_now
+    mov     x1, x0
+    ldr     x2, [x19, #DHCPC_TIMER_FREQ]
+    mov     x3, #4
+    mul     x2, x2, x3
+    add     x1, x1, x2
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_retrans_cb
+    mov     x3, x19
+    bl      timer_set
+
+.Lrssa_done:
+    ldr     x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_record_offer_send_request — SELECTING + RX_OFFER_VALID.
+ * Captures the OFFER's server_id + yiaddr from dhcp_parsed into
+ * ctx (so subsequent SELECTING-state REQUEST retransmits don't
+ * depend on dhcp_parsed surviving), resets the retry budget for
+ * the REQUESTING phase, and sends the SELECTING-shape REQUEST. */
+h_record_offer_send_request:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_record_offer_send_request
+    add     x0, x0, :lo12:dhcp_count_record_offer_send_request
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhrosr_done
+
+    /* Cache server_id + yiaddr from the OFFER. */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    ldr     w1, [x0, #DHCP_PARSED_SERVER_ID]
+    str     w1, [x19, #DHCPC_SERVER_ID]
+    ldr     w1, [x0, #DHCP_PARSED_YIADDR]
+    str     w1, [x19, #DHCPC_REQUESTED_IP]
+
+    /* Fresh retry budget for the REQUESTING phase. */
+    mov     w0, #DHCP_MAX_RETRIES
+    str     w0, [x19, #DHCPC_RETRIES]
+
+    bl      _dhcp_request_selecting_send_arm
+
+.Lhrosr_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_resend_request_selecting — REQUESTING + TIMER_RETRANS_RETRY.
+ * Re-sends the SELECTING-shape REQUEST with the cached
+ * server_id / requested_ip / xid. Retry budget already decremented
+ * by the cb. */
+h_resend_request_selecting:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_resend_request_selecting
+    add     x0, x0, :lo12:dhcp_count_resend_request_selecting
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhrrs_done
+
+    bl      _dhcp_request_selecting_send_arm
+
+.Lhrrs_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
 DHCP_STUB h_commit_lease_arm_timers,      dhcp_count_commit_lease_arm_timers
 DHCP_STUB h_send_request_renew,           dhcp_count_send_request_renew
 DHCP_STUB h_resend_request_renew,         dhcp_count_resend_request_renew
