@@ -494,3 +494,110 @@ deltas > 50 % from rolling-7-day median) rather than reverting
 to per-run gates.
 
 **Date:** 2026-04-30
+
+
+## D017 — DHCP client v1: opt-in, mutually exclusive with static
+
+**Decision:** Add a DHCPv4 client (RFC 2131 + RFC 2132 subset). A
+new `dhcp=` field in `network.conf` selects the configuration
+source:
+
+  - `dhcp=no` (default) — current behaviour. The `ip=`,
+    `netmask=`, and `gateway=` fields are required and used
+    verbatim, exactly as D003/D006 specify.
+  - `dhcp=yes` — DHCP is attempted. The `ip=`, `netmask=`, and
+    `gateway=` fields are **ignored** if present (the linter
+    accepts them but warns; the asm parser passes them through
+    without applying them). On DHCP failure the kernel halts with
+    `panic_d` (new pattern, see D013 amendment below). No
+    fallback to the static fields — see "Why mutually exclusive"
+    below.
+
+The DHCP client is structurally a finite-state automaton driven
+by a TSV transition table (`tests/func/dhcp_fsa_vectors.tsv`),
+mirroring the http_output_fsa pattern from the appliance work.
+A `make verify-dhcp-fsa-table` target cross-checks the asm-
+compiled `dhcp_fsa_trans_table` symbol against the TSV at build
+time. Protocol-level tests are PICT-driven from
+`tests/func/dhcp_pict_model.txt`.
+
+**Subset, deliberate omissions:**
+
+  - Client only. No server, no relay, no DHCP-INFORM.
+  - States: INIT, SELECTING, REQUESTING, BOUND, RENEWING,
+    REBINDING. Skip INIT-REBOOT and REBOOTING — no lease
+    persistence (no RTC, no flash; fresh DHCP each boot).
+  - Mandatory options requested: subnet mask (1), router (3),
+    lease time (51). Server identifier (54) is required in
+    OFFER/ACK or the packet is rejected.
+  - DNS (option 6) and domain name (15) are ignored. We use
+    mDNS (D008) for name resolution and always-via-gateway
+    routing (D010); name servers from DHCP would not be used.
+  - No ARP probe of assigned address before claiming
+    (RFC 2131 §2.2 SHOULD, not MUST). Trust the server. Add
+    later if collision incidents are observed.
+  - No DECLINE or RELEASE. If the assigned address turns out
+    to be in use we'll see it surface as ARP weirdness; v2 can
+    add the response.
+  - No client identifier option (61). Servers identify by MAC.
+
+**Retransmit / failure budget:**
+
+  - SELECTING: send DISCOVER, wait for OFFER. Three retries with
+    exponential backoff (4 s, 8 s, 16 s) per RFC 2131 §4.1. After
+    the third retry expires with no OFFER → `panic_d`.
+  - REQUESTING: send REQUEST, wait for ACK. Same backoff. Same
+    panic on exhaustion.
+  - BOUND: arm timer at T1 = lease/2.
+  - RENEWING: REQUEST unicast to server. On T2 reached without
+    ACK → REBINDING.
+  - REBINDING: REQUEST broadcast. On lease expiry without ACK →
+    INIT (re-discover).
+  - NAK in any state → INIT.
+
+**Why mutually exclusive (and not "DHCP primary, static
+fallback"):** A static fallback is reachable only when DHCP
+fails. Picking a fallback IP that won't collide requires the user
+to know (a) their LAN's subnet, (b) the router's DHCP pool range,
+and (c) which other devices have static assignments. Most home
+users don't have all three. Worse, the bug is silent: DHCP works
+99 % of the time, the static is never tried, then the day DHCP
+hiccups (router reboot, lease churn) the wrong fallback IP causes
+mysterious collision. Mutually exclusive failure is loud
+(`panic_d` on the LED) and the user knows immediately to check
+the DHCP server. Heritage static behaviour is preserved by
+`dhcp=no` being the default.
+
+**D013 amendment:** Add `panic_d` ("DHCP acquisition failed") to
+the panic catalogue. Morse pattern: `─··` (three pulses, dah-dit-
+dit). Update `docs/PANIC_PATTERNS.md` and `lib/panic.S` in the
+same commit that lands the FSA, so the LED behaviour matches the
+catalogue at all points in I16's history.
+
+**D003/D006 amendment:** `dhcp=` is a new optional field. When
+absent or `dhcp=no`, the behaviour described in D003/D006 is
+unchanged. When `dhcp=yes`, the `ip=`/`netmask=`/`gateway=`
+required-field rule is relaxed (the linter still accepts them,
+prints a warning, and the asm parser stores but does not apply
+them).
+
+**Rationale for FSA-table-driven design:** Same as the HTTP
+output FSA. The state machine has 6 states × 8 events = 48 cells;
+hand-coded `cmp/b.eq` ladders for that drift quickly. A TSV
+spec + asm table loader + verify-target keeps the spec, the
+implementation, and the tests aligned by construction. PICT on
+top covers protocol-level edge cases (option-mask-missing,
+truncated OFFER, etc.) without us hand-enumerating them.
+
+**Trigger for revisit:**
+
+  - If a deployment hits a DHCP server that reliably refuses
+    address acquisition for our request shape and we'd rather
+    fall back than panic, revisit "no fallback" — but the right
+    fix at that point is probably ARP-probed static fallback
+    (RFC 5227), not the foot-gun version.
+  - If we ever ship a build that needs to operate without DHCP
+    (e.g. an isolated factory test rig), the `dhcp=no` mode
+    already covers it; no change needed.
+
+**Date:** 2026-05-01
