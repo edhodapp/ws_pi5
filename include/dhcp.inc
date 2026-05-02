@@ -141,3 +141,41 @@
 .equ DHCP_FLAG_SEEN_SERVER,   2
 .equ DHCP_FLAG_SEEN_SUBNET,   4
 .equ DHCP_FLAG_SEEN_ROUTER,   8
+
+
+/* ============================================================================
+ * dhcp_send_ctx — context the FSA action handlers read to drive the
+ * client. Populated by dhcp_start; read-mostly thereafter except for
+ * xid / retries / lease deadlines which the handlers update.
+ *
+ *  +0   DWC2_BASE        u64  driver base (genet on Pi 4)
+ *  +8   ECM_STATE        u64  driver state (genet_state)
+ * +16   TX_BUF           u64  scratch frame buffer (≥ 350 B)
+ * +24   TIMER_POOL       u64  pool for retrans / T1 / T2 / lease timers
+ * +32   TIMER_FREQ       u64  CNTFRQ_EL0 cached at start
+ * +40   SEND_FN          u64  send_fn(base, state, frame, len)
+ * +48   XID              u32  current transaction id
+ * +52   RETRIES          u32  retries remaining in SELECTING / REQUESTING
+ * +56   LEASE_TIME       u32  lease seconds from last ACK (host order)
+ * +64   T1_DEADLINE      u64  CNTPCT_EL0 absolute tick (lease/2)
+ * +72   T2_DEADLINE      u64  CNTPCT_EL0 absolute tick (lease * 7/8)
+ * +80   LEASE_DEADLINE   u64  CNTPCT_EL0 absolute tick (full lease)
+ *  size 88
+ * ============================================================================ */
+.equ DHCPC_DWC2_BASE,        0
+.equ DHCPC_ECM_STATE,        8
+.equ DHCPC_TX_BUF,           16
+.equ DHCPC_TIMER_POOL,       24
+.equ DHCPC_TIMER_FREQ,       32
+.equ DHCPC_SEND_FN,          40
+.equ DHCPC_XID,              48
+.equ DHCPC_RETRIES,          52
+.equ DHCPC_LEASE_TIME,       56
+.equ DHCPC_T1_DEADLINE,      64
+.equ DHCPC_T2_DEADLINE,      72
+.equ DHCPC_LEASE_DEADLINE,   80
+.equ DHCPC_SIZE,             88
+
+/* RFC 2131 §4.1: 4 s, 8 s, 16 s exponential backoff, 3 retries
+ * before panic_d per D017. */
+.equ DHCP_MAX_RETRIES,       3

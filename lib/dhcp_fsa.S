@@ -33,6 +33,8 @@
 .global dhcp_fsa_step
 .global dhcp_fsa_state
 .global dhcp_fsa_trans_table
+.global dhcp_send_ctx
+.global dhcp_start
 
 /* Handler symbols are .global so the verify script can resolve
  * (state, event) → expected handler via the ELF symbol table. */
@@ -119,6 +121,65 @@ dhcp_fsa_step:
 .Lstep_done:
     ldr     x19, [sp, #16]
     ldp     x29, x30, [sp], #32
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * dhcp_start — initialize dhcp_send_ctx and kick off the FSA.
+ *
+ *   x0 = DWC2 base address (0 in tests)
+ *   x1 = ECM state pointer (0 in tests)
+ *   x2 = TX buffer pointer (≥ 350 B; caller-owned)
+ *   x3 = timer pool pointer
+ *   x4 = send function pointer with arp_start's signature:
+ *        send_fn(dwc2_base, ecm_state, frame, frame_len) → status
+ *
+ * Returns: nothing.
+ *
+ * Side effects:
+ *   - dhcp_send_ctx fields populated.
+ *   - dhcp_send_ctx.timer_freq cached from CNTFRQ_EL0 via timer_freq().
+ *   - dhcp_send_ctx.retries = DHCP_MAX_RETRIES.
+ *   - dhcp_fsa_state forced to S_INIT (defends against pre-existing
+ *     state from a prior incarnation).
+ *   - Fires E_START into the FSA, which drives the table to
+ *     S_SELECTING via h_send_discover. (In I16-5 the handler is
+ *     still a stub; in I16-6 the real handler will build a
+ *     DISCOVER, send it via send_fn, and arm the retransmit timer.)
+ * --------------------------------------------------------------------------- */
+dhcp_start:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    adrp    x5, dhcp_send_ctx
+    add     x5, x5, :lo12:dhcp_send_ctx
+    str     x0, [x5, #DHCPC_DWC2_BASE]
+    str     x1, [x5, #DHCPC_ECM_STATE]
+    str     x2, [x5, #DHCPC_TX_BUF]
+    str     x3, [x5, #DHCPC_TIMER_POOL]
+    str     x4, [x5, #DHCPC_SEND_FN]
+    /* Initial retry budget. */
+    mov     w0, #DHCP_MAX_RETRIES
+    str     w0, [x5, #DHCPC_RETRIES]
+
+    /* Cache timer_freq. (Pure read of CNTFRQ_EL0; no clobber of x5
+     * but reload it after to be safe.) */
+    bl      timer_freq
+    adrp    x5, dhcp_send_ctx
+    add     x5, x5, :lo12:dhcp_send_ctx
+    str     x0, [x5, #DHCPC_TIMER_FREQ]
+
+    /* Reset the FSA state. */
+    adrp    x5, dhcp_fsa_state
+    add     x5, x5, :lo12:dhcp_fsa_state
+    str     wzr, [x5]
+
+    /* Fire E_START. Engine dispatches h_send_discover and advances
+     * to S_SELECTING per the table. */
+    mov     w0, #E_START
+    bl      dhcp_fsa_step
+
+    ldp     x29, x30, [sp], #16
     ret
 
 
@@ -261,6 +322,10 @@ CELL S_INIT,         h_send_discover           /* E_RX_NAK_VALID */
 .section .bss
 .balign 8
 dhcp_fsa_state:        .space 4
+
+.balign 8
+dhcp_send_ctx:         .space DHCPC_SIZE
+
 .balign 4
 dhcp_count_send_discover:                .space 4
 dhcp_count_resend_discover:              .space 4

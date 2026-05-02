@@ -20,6 +20,7 @@
 .global test_dhcp_fsa_step_oob_event
 .global test_dhcp_fsa_step_oob_state
 .global test_dhcp_fsa_step_panic_d_runs
+.global test_dhcp_start_populates_ctx_and_fires
 
 .section .text
 
@@ -257,9 +258,88 @@ test_dhcp_fsa_step_panic_d_runs:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_start_populates_ctx_and_fires — dhcp_start writes its
+ * args into dhcp_send_ctx, fires E_START, and the FSA advances
+ * from S_INIT to S_SELECTING via the h_send_discover dispatch.
+ * ======================================================================== */
+test_dhcp_start_populates_ctx_and_fires:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+
+    /* Args: dwc2_base / ecm_state / tx_buf / timer_pool / send_fn.
+     * Use easily-recognizable sentinels (low addresses) — dhcp_start
+     * just stores them; no dereference. */
+    movz    x0, #0x1111
+    movz    x1, #0x2222
+    movz    x2, #0x3333
+    movz    x3, #0x4444
+    movz    x4, #0x5555
+    bl      dhcp_start
+
+    /* State should have advanced to S_SELECTING via h_send_discover. */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_SELECTING
+    b.ne    .Ldsta_fail
+
+    /* h_send_discover dispatch counter == 1. */
+    adrp    x0, dhcp_count_send_discover
+    add     x0, x0, :lo12:dhcp_count_send_discover
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldsta_fail
+
+    /* ctx fields populated. cmp with immediates > 4095 doesn't fit
+     * the 12-bit cmp encoding, so build the expected value in a
+     * scratch reg first. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    ldr     x1, [x0, #DHCPC_DWC2_BASE]
+    movz    x2, #0x1111
+    cmp     x1, x2
+    b.ne    .Ldsta_fail
+    ldr     x1, [x0, #DHCPC_ECM_STATE]
+    movz    x2, #0x2222
+    cmp     x1, x2
+    b.ne    .Ldsta_fail
+    ldr     x1, [x0, #DHCPC_TX_BUF]
+    movz    x2, #0x3333
+    cmp     x1, x2
+    b.ne    .Ldsta_fail
+    ldr     x1, [x0, #DHCPC_TIMER_POOL]
+    movz    x2, #0x4444
+    cmp     x1, x2
+    b.ne    .Ldsta_fail
+    ldr     x1, [x0, #DHCPC_SEND_FN]
+    movz    x2, #0x5555
+    cmp     x1, x2
+    b.ne    .Ldsta_fail
+    ldr     w1, [x0, #DHCPC_RETRIES]
+    cmp     w1, #DHCP_MAX_RETRIES
+    b.ne    .Ldsta_fail
+    /* timer_freq is read from CNTFRQ_EL0; on QEMU this is non-zero
+     * (typical 62.5 MHz). Just assert non-zero. */
+    ldr     x1, [x0, #DHCPC_TIMER_FREQ]
+    cbz     x1, .Ldsta_fail
+
+    ldr     x0, =_dhcp_name_start
+    bl      test_pass
+    b       .Ldsta_done
+.Ldsta_fail:
+    ldr     x0, =_dhcp_name_start
+    bl      test_fail
+.Ldsta_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
 _dhcp_name_step_oob_event:     .asciz "dhcp_fsa_step_oob_event"
 _dhcp_name_step_oob_state:     .asciz "dhcp_fsa_step_oob_state"
 _dhcp_name_step_panic_d_runs:  .asciz "dhcp_fsa_step_panic_d_runs"
+_dhcp_name_start:              .asciz "dhcp_start_populates_ctx_and_fires"
