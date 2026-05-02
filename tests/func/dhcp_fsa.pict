@@ -1,0 +1,60 @@
+# PICT model for the DHCP client FSA transition table.
+#
+# Source of truth: tests/func/dhcp_fsa_vectors.tsv (54 cells = 6 states ×
+# 9 events). The asm step function in lib/dhcp_fsa.S is locked to that
+# TSV via `make verify-dhcp-fsa-table`.
+#
+# This PICT model exists to extend coverage BEYOND the (state, event)
+# cells of the FSA table — into the protocol-level edge cases the asm
+# receive path has to handle BEFORE firing E_RX_OFFER_VALID /
+# E_RX_ACK_VALID / E_RX_NAK_VALID. The receive validator must reject
+# malformed packets quietly (no event fired); a packet survives only if
+# every column below holds its "valid" / canonical value.
+#
+# Per RFC 2131 Figure 5 + §4.4, reviewed against the table by Gemini
+# (review pass 2026-05-01).
+
+State:           S_INIT, S_SELECTING, S_REQUESTING, S_BOUND, S_RENEWING, S_REBINDING
+Event:           E_START, E_TIMER_RETRANS_RETRY, E_TIMER_RETRANS_GIVEUP, E_TIMER_T1, E_TIMER_T2, E_TIMER_LEASE, E_RX_OFFER_VALID, E_RX_ACK_VALID, E_RX_NAK_VALID
+
+# Receive-path predicates — only relevant for the three RX events. These
+# decide whether the validator fires the *_VALID event or drops silently.
+xid_match:       yes, no, na
+op_field:        BOOTREPLY, BOOTREQUEST, malformed
+htype:           ethernet, malformed
+magic_cookie:    valid, missing, corrupt
+msg_type_opt:    OFFER, ACK, NAK, missing, malformed
+server_id_opt:   present, missing
+yiaddr:          nonzero, zero
+truncation:      complete, truncated_mid_options, truncated_mid_header
+
+# --- Constraints ---
+
+# Non-RX events: the receive-path predicates are not applicable.
+IF [Event] IN {"E_START", "E_TIMER_RETRANS_RETRY", "E_TIMER_RETRANS_GIVEUP",
+               "E_TIMER_T1", "E_TIMER_T2", "E_TIMER_LEASE"}
+THEN [xid_match] = "na" AND [op_field] = "BOOTREPLY"
+   AND [htype] = "ethernet" AND [magic_cookie] = "valid"
+   AND [msg_type_opt] = "missing" AND [server_id_opt] = "missing"
+   AND [yiaddr] = "zero" AND [truncation] = "complete";
+
+# E_RX_*_VALID requires the full canonical packet shape. Each event maps
+# to its specific msg_type_opt value; other receive-path columns must be
+# at their "valid" canonical setting.
+IF [Event] = "E_RX_OFFER_VALID" THEN [msg_type_opt] = "OFFER"
+   AND [op_field] = "BOOTREPLY" AND [htype] = "ethernet"
+   AND [magic_cookie] = "valid" AND [xid_match] = "yes"
+   AND [server_id_opt] = "present" AND [yiaddr] = "nonzero"
+   AND [truncation] = "complete";
+
+IF [Event] = "E_RX_ACK_VALID" THEN [msg_type_opt] = "ACK"
+   AND [op_field] = "BOOTREPLY" AND [htype] = "ethernet"
+   AND [magic_cookie] = "valid" AND [xid_match] = "yes"
+   AND [server_id_opt] = "present" AND [yiaddr] = "nonzero"
+   AND [truncation] = "complete";
+
+IF [Event] = "E_RX_NAK_VALID" THEN [msg_type_opt] = "NAK"
+   AND [op_field] = "BOOTREPLY" AND [htype] = "ethernet"
+   AND [magic_cookie] = "valid" AND [xid_match] = "yes"
+   AND [truncation] = "complete";
+   # NAK doesn't require server_id_opt or yiaddr — RFC 2131 §3.1 step 5.
