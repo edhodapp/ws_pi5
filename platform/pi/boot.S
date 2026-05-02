@@ -80,7 +80,79 @@ _start:
     str     w10, [x9]
 .endif
 
-    /* Zero BSS */
+    /* --- Force MMU + caches OFF, invalidate, *before* BSS zero ---
+     *
+     * Why: a previous boot stage (firmware, chainloader) may have left
+     * SCTLR_EL1.{M,C,I} set with dirty/valid lines in the D-cache that
+     * happen to alias the kernel's BSS or MMU-table physical addresses.
+     * If we leave those lines in place, our subsequent uncached writes
+     * (BSS zero, page table fill — done with MMU off, so writes go
+     * straight to RAM as Device-nGnRnE) leave the cache holding stale
+     * shadow values. When SCTLR_EL1.M flips later, the page table
+     * walker and the kernel can both observe the stale cache values
+     * instead of the RAM values we just wrote. The kernel hangs after
+     * the early breadcrumbs but before any visible kernel output —
+     * exactly the failure mode of fb37a83 (chainloader stage-and-jump
+     * to 0x80000).
+     *
+     * `dc isw` (invalidate, not clean+invalidate): we want to discard
+     * the chainloader's leftover lines, NOT write them back over our
+     * fresh RAM contents. Way-bit position is associativity-dependent:
+     *   Cortex-A72 (Pi 4):  L1D 2-way, way bit at [31].
+     *   Cortex-A53 (Pi 3):  L1D 4-way, way bits at [31:30].
+     * The historical code used (1 << 30) for both, which on A72 silently
+     * invalidated way 0 twice and missed way 1 entirely — leaving half
+     * of L1D un-invalidated, and exactly the failure mode above. */
+    mrs     x0, SCTLR_EL1
+    bic     x0, x0, #(1 << 0)             /* M: MMU */
+    bic     x0, x0, #(1 << 2)             /* C: D-cache */
+    bic     x0, x0, #(1 << 12)            /* I: I-cache */
+    msr     SCTLR_EL1, x0
+    isb
+
+    /* I-cache + branch predictor — invalidate to PoU. */
+    ic      iallu
+    dsb     ish
+    isb
+
+.ifdef PLATFORM_PI4
+    /* Cortex-A72 L1D: 32 KB, 2-way, 64 B line → 256 sets.
+     * SetWay register: way at [31], set at [13:6]. */
+    mov     w5, #0                        /* way counter (0..1) */
+.Linv_way:
+    lsl     x4, x5, #31                   /* way bits */
+    mov     w1, #256                      /* sets, counted down */
+.Linv_set:
+    sub     w1, w1, #1
+    lsl     x0, x1, #6                    /* set in [13:6] */
+    orr     x0, x0, x4                    /* | way */
+    dc      isw, x0
+    cbnz    w1, .Linv_set
+    add     w5, w5, #1
+    cmp     w5, #2
+    b.lt    .Linv_way
+.else
+    /* Cortex-A53 L1D: 32 KB, 4-way, 64 B line → 128 sets.
+     * SetWay register: way at [31:30], set at [12:6]. */
+    mov     w5, #0                        /* way counter (0..3) */
+.Linv_way:
+    lsl     x4, x5, #30                   /* way bits */
+    mov     w1, #128
+.Linv_set:
+    sub     w1, w1, #1
+    lsl     x0, x1, #6
+    orr     x0, x0, x4
+    dc      isw, x0
+    cbnz    w1, .Linv_set
+    add     w5, w5, #1
+    cmp     w5, #4
+    b.lt    .Linv_way
+.endif
+
+    dsb     sy
+    isb
+
+    /* Zero BSS — now safe: writes hit RAM uncached, no shadow lines. */
     ldr     x0, =__bss_start
     ldr     x1, =__bss_end
 .Lbss_loop:
@@ -191,23 +263,10 @@ _start:
     ldr     x0, =__mmu_l1_table
     msr     TTBR0_EL1, x0
 
-    /* Invalidate TLB and D-cache before enabling MMU.
-     * Critical when chainloaded — the chainloader's D-cache may
-     * contain stale lines (from prefetching during HEX transfer)
-     * that would shadow the BSS zero we just wrote to RAM. */
+    /* TLB invalidate before enabling the new translation regime.
+     * D-cache invalidation already happened at the top of .Lel1_ready,
+     * before BSS zero / table fill — see the comment block there. */
     tlbi    vmalle1
-
-    /* Invalidate entire D-cache by set/way (L1: 32KB, 2-way, 64B) */
-    mov     x0, #0                     /* set/way value */
-    mov     x1, #256                   /* 256 sets (32KB / 2 ways / 64B) */
-.Linv_l1:
-    dc      isw, x0                    /* invalidate set, way 0 */
-    orr     x2, x0, #(1 << 30)        /* way 1 (bit 30 for L1 on A72) */
-    dc      isw, x2
-    add     x0, x0, #(1 << 6)         /* next set (bit 6 = set field) */
-    subs    x1, x1, #1
-    b.ne    .Linv_l1
-
     dsb     sy
     isb
 
