@@ -176,6 +176,13 @@ def test_blank_lines_skipped(tmp_path):
     assert result.returncode == 0
 
 
+def test_empty_file_reports_empty(tmp_path):
+    """A 0-byte file is a setup error the user should see clearly."""
+    result = _run_linter("", tmp_path)
+    assert result.returncode == 1
+    assert "empty file" in result.stderr
+
+
 def test_panic_d_with_non_none_next_rejected(tmp_path):
     """h_panic_d never returns; pairing it with a NextState is a spec bug."""
     rows = _full_grid()

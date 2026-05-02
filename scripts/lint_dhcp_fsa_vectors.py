@@ -39,6 +39,14 @@ EVENTS = frozenset({
 HEADER = ("State", "Event", "NextState", "Handler")
 PANIC_HANDLER = "h_panic_d"
 
+# Cached at module load — the expected (state, event) coverage set
+# is constant for the spec, so callers don't need to recompute it
+# per-file. Iteration order in error messages is stabilised by the
+# `sorted()` call inside `_check_completeness`.
+_EXPECTED_CELLS: frozenset[tuple[str, str]] = frozenset(
+    (s, e) for s in STATES for e in EVENTS
+)
+
 
 class LintFinding(BaseModel):
     line: int
@@ -145,10 +153,9 @@ def _parse_row(
 
 
 def _check_completeness(seen: set[tuple[str, str]]) -> list[LintFinding]:
-    expected = {(s, e) for s in STATES for e in EVENTS}
     return [
         LintFinding(line=0, message=f"missing cell ({s}, {e})")
-        for s, e in sorted(expected - seen)
+        for s, e in sorted(_EXPECTED_CELLS - seen)
     ]
 
 
