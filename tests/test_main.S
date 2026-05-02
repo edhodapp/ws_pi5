@@ -154,6 +154,10 @@ _start:
     bl      test_dhcp_fsa_step_oob_event
     bl      test_dhcp_fsa_step_oob_state
     bl      test_dhcp_fsa_step_panic_d_runs
+    bl      test_dhcp_build_discover_header
+    bl      test_dhcp_build_discover_options
+    bl      test_dhcp_build_request_selecting_has_50_and_54
+    bl      test_dhcp_build_request_renewing_uses_ciaddr
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr

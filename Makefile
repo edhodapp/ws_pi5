@@ -127,7 +127,8 @@ SHARED_OBJS = \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o \
     $(BUILD)/http_output_fsa.o $(BUILD)/panic.o \
-    $(BUILD)/config_parser.o $(BUILD)/mdns.o $(BUILD)/dhcp_fsa.o
+    $(BUILD)/config_parser.o $(BUILD)/mdns.o \
+    $(BUILD)/dhcp_fsa.o $(BUILD)/dhcp.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -175,7 +176,8 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_config_parser_vectors.o \
     $(BUILD)/config_parser_vectors.o \
     $(BUILD)/test_mdns.o \
-    $(BUILD)/test_dhcp_fsa.o
+    $(BUILD)/test_dhcp_fsa.o \
+    $(BUILD)/test_dhcp.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
@@ -462,6 +464,9 @@ $(BUILD)/mdns.o: lib/mdns.S include/net.inc | $(BUILD)
 $(BUILD)/dhcp_fsa.o: lib/dhcp_fsa.S include/dhcp.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/dhcp.o: lib/dhcp.S include/dhcp.inc include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # ===========================================================================
 # Pi platform drivers (platform/pi/)
 # ===========================================================================
@@ -523,6 +528,9 @@ $(BUILD)/test_mdns.o: tests/test_mdns.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_dhcp_fsa.o: tests/test_dhcp_fsa.S include/dhcp.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_dhcp.o: tests/test_dhcp.S include/dhcp.inc include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # I9 — generate the asm vector table from the canonical TSV. The
