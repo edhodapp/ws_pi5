@@ -56,30 +56,67 @@ set -euo pipefail
 
 MODE="dir"
 TESTRIG=0
+CHAINLOAD=0
 # Parse leading flags. --testrig is dev-only: overwrites the default
 # placeholder network.conf with the hw_test rig values
 # (10.0.0.2 / 10.0.0.1 / wspi5) so dev iteration doesn't have to
 # hand-edit the file every time. Release users never pass it.
+# --chainload is dev-only: builds + ships chainload/chainload.img as
+# kernel8.img and adds kernel_address=0x4000000 to config.txt, so the
+# Pi boots into the UART chainloader and waits for hw_send.py to push
+# a kernel built at LINK_ADDR=0x200000. Implies --testrig and --image
+# (chainloader SDs are only meaningful as flashable images for the rig).
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
-        --image)   MODE="image"; shift ;;
-        --build)   MODE="build"; shift ;;
-        --testrig) TESTRIG=1; shift ;;
-        *)         echo "mk_sd: unknown flag $1" >&2; exit 2 ;;
+        --image)     MODE="image"; shift ;;
+        --build)     MODE="build"; shift ;;
+        --testrig)   TESTRIG=1; shift ;;
+        --chainload) CHAINLOAD=1; TESTRIG=1; MODE="image"; shift ;;
+        *)           echo "mk_sd: unknown flag $1" >&2; exit 2 ;;
     esac
 done
+
+# --chainload synthesizes its own "kernel" arg (the chainloader binary)
+# so the user only passes the output image path.
+if (( CHAINLOAD == 1 )); then
+    if [[ $# -ne 1 ]]; then
+        cat >&2 <<USAGE
+usage:
+  $(basename "$0") --chainload <output_image.img>
+
+  Builds chainload/chainload.img if missing, then ships it as the
+  kernel8.img on the SD bundle along with kernel_address=0x4000000
+  in config.txt and the testrig network.conf. The Pi will boot into
+  the chainloader and wait for hw_send.py to push a kernel built
+  with the default 'make PLATFORM=pi4' (LINK_ADDR=0x200000).
+USAGE
+        exit 2
+    fi
+    SCRIPT_DIR_TMP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_DIR_TMP="$(cd "$SCRIPT_DIR_TMP/.." && pwd)"
+    CHAIN_IMG="$PROJECT_DIR_TMP/chainload/chainload.img"
+    if [[ ! -f "$CHAIN_IMG" ]]; then
+        echo "mk_sd: building $CHAIN_IMG"
+        make -C "$PROJECT_DIR_TMP/chainload" >&2
+    fi
+    set -- "$CHAIN_IMG" "$1"
+fi
 
 if [[ $# -ne 2 ]]; then
     cat >&2 <<USAGE
 usage:
-  $(basename "$0")          [--testrig] <packaged_kernel.img> <output_dir>
-  $(basename "$0") --image  [--testrig] <packaged_kernel.img> <output_image.img>
-  $(basename "$0") --build  <public_dir> <output_image.img>
+  $(basename "$0")             [--testrig] <packaged_kernel.img> <output_dir>
+  $(basename "$0") --image     [--testrig] <packaged_kernel.img> <output_image.img>
+  $(basename "$0") --build     <public_dir> <output_image.img>
+  $(basename "$0") --chainload <output_image.img>
 
 flags:
-  --testrig   dev-only: overlay 10.0.0.2 / 10.0.0.1 / wspi5 onto the
-              default network.conf so the SD boots straight to the
-              standard hw_test wiring without manual edits.
+  --testrig    dev-only: overlay 10.0.0.2 / 10.0.0.1 / wspi5 onto the
+               default network.conf so the SD boots straight to the
+               standard hw_test wiring without manual edits.
+  --chainload  dev-only: ship chainload.img as kernel8.img with
+               kernel_address=0x4000000 so the Pi boots into the
+               UART chainloader. Implies --testrig and --image.
 USAGE
     exit 2
 fi
@@ -253,6 +290,15 @@ enable_uart=1
 dtoverlay=disable-bt
 initramfs network.conf $INITRAMFS_ADDR
 EOF
+
+# --chainload: append kernel_address=0x4000000 so firmware lands
+# chainload.img at the address its linker script targets (chainload.ld
+# sets `. = 0x4000000`). Without this the firmware lands kernel8.img
+# at the default 0x80000 and the chainloader's literal-pool addresses
+# resolve wrong — leading to silent wedge or cache-coherency garbage.
+if (( CHAINLOAD == 1 )); then
+    echo "kernel_address=0x4000000" >> "$BUNDLE_DIR/config.txt"
+fi
 
 # Default network.conf — placeholder values that pass the linter
 # (D003 syntax) but won't bring up the network on most home LANs
