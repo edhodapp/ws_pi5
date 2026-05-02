@@ -76,8 +76,12 @@
  * depth against a stale event slipping through.
  * --------------------------------------------------------------------------- */
 dhcp_fsa_step:
-    stp     x29, x30, [sp, #-16]!
+    /* x19 holds the table entry pointer across the handler call.
+     * Caller-saved x0..x18 are not safe to keep state in across
+     * `blr x5`, so we use a callee-saved register and stack it. */
+    stp     x29, x30, [sp, #-32]!
     mov     x29, sp
+    str     x19, [sp, #16]
 
     cmp     w0, #DHCP_NEVENTS
     b.hs    .Lstep_done                /* event out of range — drop */
@@ -93,32 +97,28 @@ dhcp_fsa_step:
     mov     w3, #DHCP_NEVENTS
     madd    w3, w0, w3, w1             /* w3 = idx */
 
-    /* offset = idx * DHCP_TRANS_SIZE */
+    /* x19 = entry pointer = table_base + idx * DHCP_TRANS_SIZE */
     lsl     w3, w3, #4                 /* TRANS_SIZE = 16 */
+    adrp    x19, dhcp_fsa_trans_table
+    add     x19, x19, :lo12:dhcp_fsa_trans_table
+    add     x19, x19, w3, uxtw
 
-    adrp    x4, dhcp_fsa_trans_table
-    add     x4, x4, :lo12:dhcp_fsa_trans_table
-    add     x4, x4, w3, uxtw           /* x4 = entry pointer */
-
-    ldr     x5, [x4, #DHCP_TRANS_HANDLER]
-    cbz     x5, .Lstep_maybe_state     /* no handler — but state may still update */
-    blr     x5                         /* run handler (may not return for panic_d) */
+    ldr     x5, [x19, #DHCP_TRANS_HANDLER]
+    cbz     x5, .Lstep_maybe_state     /* no handler — state may still update */
+    blr     x5                         /* run handler (may clobber x0..x18) */
 
 .Lstep_maybe_state:
-    /* Reload entry ptr — x4 was callee-saved across blr, but we did
-     * NOT save it; conservative reload after potential handler call. */
-    adrp    x4, dhcp_fsa_trans_table
-    add     x4, x4, :lo12:dhcp_fsa_trans_table
-    add     x4, x4, w3, uxtw
-    ldr     w0, [x4, #DHCP_TRANS_NEXT]
-    cmn     w0, #1                     /* w0 == 0xFFFFFFFF (DHCP_NEXT_NONE)? */
+    /* x19 (callee-saved) survived the blr; reuse it to read NEXT. */
+    ldr     w0, [x19, #DHCP_TRANS_NEXT]
+    cmn     w0, #1                     /* w0 == DHCP_NEXT_NONE (0xFFFFFFFF)? */
     b.eq    .Lstep_done
     adrp    x2, dhcp_fsa_state
     add     x2, x2, :lo12:dhcp_fsa_state
     str     w0, [x2]
 
 .Lstep_done:
-    ldp     x29, x30, [sp], #16
+    ldr     x19, [sp, #16]
+    ldp     x29, x30, [sp], #32
     ret
 
 
@@ -126,9 +126,18 @@ dhcp_fsa_step:
  * Handler stubs — bump counter, return. Real implementations land
  * in I16-3..I16-5; the stubs let the FSA engine + verify script
  * land cleanly in I16-2 with full test coverage of the table walk.
+ *
+ * Each stub deliberately poisons x3 with 0xDEAD before returning.
+ * This is a regression guard: the engine MUST keep its state in
+ * callee-saved registers across the blr to a handler. If a future
+ * change reverts to holding the table-entry offset in caller-saved
+ * w3 (the original design, fixed before merge), the existing tests
+ * will start failing because the handler post-state would compute
+ * an offset based on 0xDEAD and either fault or transition wrong.
  * --------------------------------------------------------------------------- */
 .macro DHCP_STUB name, counter
 \name:
+    movz    x3, #0xDEAD
     adrp    x0, \counter
     add     x0, x0, :lo12:\counter
     ldr     w1, [x0]
