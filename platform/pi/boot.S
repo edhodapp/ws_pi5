@@ -90,6 +90,22 @@ _start:
     b       .Lbss_loop
 .Lbss_done:
 
+.ifdef PLATFORM_PI4
+    /* Debug: '3' = BSS zero complete. Reaching this proves the
+     * literal-pool load of __bss_start / __bss_end returned addresses
+     * the CPU could actually walk and write to. On the chainloader →
+     * 0x80000 path this is the first observable signal that the bytes
+     * placed at 0x80000 by the chainloader match what the linker
+     * planned (since BSS bounds depend on link-time layout). */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'3'
+6:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    6b
+    str     w10, [x9]
+.endif
+
     /* --- MMU setup: identity map, Normal RAM + Device peripherals --- */
 
     /* MAIR: attr0 = Normal WB (0xFF), attr1 = Device-nGnRnE (0x00) */
@@ -200,6 +216,20 @@ _start:
     msr     VBAR_EL1, x0
     isb
 
+.ifdef PLATFORM_PI4
+    /* Debug: '4' = MMU tables filled, vector table installed, ready
+     * to enable MMU. Reaching this means the L1/L2 table fills walked
+     * the literal-pool addresses for __mmu_l1_table / __mmu_l2_table
+     * without crashing — i.e., those literals point at writable RAM. */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'4'
+4:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    4b
+    str     w10, [x9]
+.endif
+
     /* Enable MMU + data cache + instruction cache */
     mrs     x0, SCTLR_EL1
     orr     x0, x0, #(1 << 0)     /* M: MMU enable */
@@ -207,6 +237,20 @@ _start:
     orr     x0, x0, #(1 << 12)    /* I: instruction cache */
     msr     SCTLR_EL1, x0
     isb
+
+.ifdef PLATFORM_PI4
+    /* Debug: '5' = MMU enabled, jumping to main(). If '4' prints but
+     * '5' does not, the MMU enable itself faulted (typically a wrong
+     * translation table walk because the L1/L2 entries were corrupt
+     * or the table physical addresses didn't survive the boot). */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'5'
+5:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    5b
+    str     w10, [x9]
+.endif
 
     bl      main
     cbz     w0, .Lnet_loop
