@@ -35,6 +35,7 @@
 .global dhcp_fsa_trans_table
 .global dhcp_send_ctx
 .global dhcp_start
+.global dhcp_retrans_cb
 
 /* Handler symbols are .global so the verify script can resolve
  * (state, event) → expected handler via the ELF symbol table. */
@@ -205,20 +206,67 @@ dhcp_start:
     ret
 .endm
 
-/* h_send_discover — real implementation (replaces the stub). Build
- * a DHCPDISCOVER, wrap it in an Eth+IP+UDP broadcast, hand the
- * frame to send_fn. Skips silently if dhcp_send_ctx hasn't been
- * initialized (send_fn = 0) — that lets the legacy
- * test_dhcp_fsa_step_init_start case keep working without setting
- * up a fake send context.
+/* _dhcp_discover_send_arm — shared body for h_send_discover and
+ * h_resend_discover. Builds a DHCPDISCOVER (using the xid currently
+ * in ctx.XID), wraps it in an Eth+IP+UDP broadcast, hands the frame
+ * to ctx.send_fn, then arms the retrans timer at +4 s.
  *
- * Retrans timer arming lands in I16-7. For now this fires-and-
- * forgets — if no OFFER comes back, the FSA stays in S_SELECTING
- * indefinitely.
- *
- * Bumps dhcp_count_send_discover for test observability.
- * Pollutes x3 with 0xDEAD on the way out — same regression guard
- * the stubs carry. */
+ * Caller MUST set x19 = &dhcp_send_ctx and have already verified
+ * ctx.send_fn != 0. Clobbers x0..x18 and x30; preserves x19..x28.
+ * --------------------------------------------------------------------------- */
+_dhcp_discover_send_arm:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x20, [sp, #16]
+
+    /* Build payload at frame[42..]. */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    add     x0, x0, #42
+    ldr     w1, [x19, #DHCPC_XID]
+    bl      dhcp_build_discover
+    mov     w20, w0
+
+    /* Wrap broadcast Eth+IP+UDP. */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    mov     w1, w20
+    bl      dhcp_wrap_broadcast
+
+    /* send_fn(dwc2_base, ecm_state, frame, frame_len). */
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    ldr     x0, [x19, #DHCPC_DWC2_BASE]
+    ldr     x1, [x19, #DHCPC_ECM_STATE]
+    ldr     x2, [x19, #DHCPC_TX_BUF]
+    add     w3, w20, #42
+    blr     x5
+
+    /* Arm retrans timer at now + 4 s. Skip if no timer pool (test
+     * mode without a pool). RFC 2131 §4.1 RECOMMENDS exponential
+     * backoff (4 / 8 / 16 s); v1 uses fixed 4 s — adequate against
+     * the panic_d budget of 3 retries. Backoff is a follow-up. */
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    cbz     x0, .Ldsa_done
+    bl      timer_now
+    mov     x1, x0                          /* now */
+    ldr     x2, [x19, #DHCPC_TIMER_FREQ]
+    mov     x3, #4
+    mul     x2, x2, x3                      /* 4 * freq */
+    add     x1, x1, x2                      /* expiry = now + 4 s */
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_retrans_cb
+    mov     x3, x19
+    bl      timer_set
+
+.Ldsa_done:
+    ldr     x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_send_discover — initial DISCOVER (or fresh restart from S_INIT
+ * via the NAK→S_INIT→E_START loop). Picks a new xid, resets the
+ * retry budget, then delegates send + timer arming to
+ * _dhcp_discover_send_arm. Bumps dhcp_count_send_discover; pollutes
+ * x3 with 0xDEAD as a regression guard. */
 h_send_discover:
     stp     x29, x30, [sp, #-32]!
     mov     x29, sp
@@ -226,53 +274,91 @@ h_send_discover:
 
     movz    x3, #0xDEAD                     /* regression poison */
 
-    /* Bump dispatch counter (always, including test-mode path). */
     adrp    x0, dhcp_count_send_discover
     add     x0, x0, :lo12:dhcp_count_send_discover
     ldr     w1, [x0]
     add     w1, w1, #1
     str     w1, [x0]
 
-    /* Bail if the context isn't initialised (no send_fn). */
     adrp    x19, dhcp_send_ctx
     add     x19, x19, :lo12:dhcp_send_ctx
     ldr     x5, [x19, #DHCPC_SEND_FN]
     cbz     x5, .Lhsd_done
 
-    /* xid = lower 32 bits of CNTPCT_EL0 (cheap, varies per call). */
     mrs     x0, CNTPCT_EL0
     str     w0, [x19, #DHCPC_XID]
-
-    /* Reset retry budget for this fresh DISCOVER pass. */
     mov     w0, #DHCP_MAX_RETRIES
     str     w0, [x19, #DHCPC_RETRIES]
 
-    /* Build payload at frame[42..] (after Eth+IP+UDP slot). */
-    ldr     x0, [x19, #DHCPC_TX_BUF]
-    add     x0, x0, #42
-    ldr     w1, [x19, #DHCPC_XID]
-    bl      dhcp_build_discover
-    mov     w20, w0                         /* payload length */
-
-    /* Wrap with broadcast Eth+IP+UDP headers. */
-    ldr     x0, [x19, #DHCPC_TX_BUF]
-    mov     w1, w20
-    bl      dhcp_wrap_broadcast
-
-    /* Send: send_fn(dwc2_base, ecm_state, frame, frame_len). */
-    ldr     x5, [x19, #DHCPC_SEND_FN]
-    ldr     x0, [x19, #DHCPC_DWC2_BASE]
-    ldr     x1, [x19, #DHCPC_ECM_STATE]
-    ldr     x2, [x19, #DHCPC_TX_BUF]
-    add     w3, w20, #42                    /* total frame length */
-    blr     x5
+    bl      _dhcp_discover_send_arm
 
 .Lhsd_done:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
 
-DHCP_STUB h_resend_discover,              dhcp_count_resend_discover
+
+/* h_resend_discover — retransmit DISCOVER with the SAME xid (so the
+ * server's eventual OFFER is recognized as belonging to our active
+ * transaction). Retry budget already decremented by dhcp_retrans_cb
+ * before this handler ran. */
+h_resend_discover:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_resend_discover
+    add     x0, x0, :lo12:dhcp_count_resend_discover
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhrd_done
+
+    bl      _dhcp_discover_send_arm
+
+.Lhrd_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* dhcp_retrans_cb — timer callback fired by timer_check when the
+ * retrans timer expires. Decides which event to push into the FSA
+ * based on remaining retry budget:
+ *
+ *   ctx.retries  > 0  →  decrement, fire E_TIMER_RETRANS_RETRY
+ *                          (table dispatches h_resend_discover or
+ *                           h_resend_request_selecting depending
+ *                           on current state)
+ *   ctx.retries == 0  →  fire E_TIMER_RETRANS_GIVEUP
+ *                          (dispatches h_panic_d in SELECTING /
+ *                           REQUESTING)
+ *
+ *   x0 = ctx pointer (timer_set wrote this when arming).
+ */
+dhcp_retrans_cb:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    ldr     w1, [x0, #DHCPC_RETRIES]
+    cbz     w1, .Lcb_giveup
+    sub     w1, w1, #1
+    str     w1, [x0, #DHCPC_RETRIES]
+    mov     w0, #E_TIMER_RETRANS_RETRY
+    bl      dhcp_fsa_step
+    b       .Lcb_done
+.Lcb_giveup:
+    mov     w0, #E_TIMER_RETRANS_GIVEUP
+    bl      dhcp_fsa_step
+.Lcb_done:
+    ldp     x29, x30, [sp], #16
+    ret
 DHCP_STUB h_record_offer_send_request,    dhcp_count_record_offer_send_request
 DHCP_STUB h_resend_request_selecting,     dhcp_count_resend_request_selecting
 DHCP_STUB h_commit_lease_arm_timers,      dhcp_count_commit_lease_arm_timers

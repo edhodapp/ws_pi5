@@ -22,6 +22,8 @@
 .global test_dhcp_fsa_step_panic_d_runs
 .global test_dhcp_start_populates_ctx_and_fires
 .global test_dhcp_start_sends_discover_broadcast
+.global test_dhcp_retrans_cb_fires_retry
+.global test_dhcp_retrans_cb_fires_giveup
 
 .section .text
 
@@ -477,6 +479,118 @@ test_dhcp_start_sends_discover_broadcast:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_retrans_cb_fires_retry — with retries > 0, the callback
+ * decrements retries and fires E_TIMER_RETRANS_RETRY, which (in
+ * S_SELECTING) dispatches h_resend_discover.
+ * ======================================================================== */
+test_dhcp_retrans_cb_fires_retry:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Pre-populate dhcp_send_ctx so h_resend_discover can run.
+     * State = S_SELECTING; retries = 2; tx_buf + send_fn real. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    str     xzr, [x0, #DHCPC_DWC2_BASE]
+    str     xzr, [x0, #DHCPC_ECM_STATE]
+    ldr     x1, =_dhcp_test_tx_buf
+    str     x1, [x0, #DHCPC_TX_BUF]
+    str     xzr, [x0, #DHCPC_TIMER_POOL]   /* no pool — skip arming */
+    ldr     x1, =_dhcp_send_capture
+    str     x1, [x0, #DHCPC_SEND_FN]
+    /* xid for build_discover */
+    movz    w1, #0x1234
+    str     w1, [x0, #DHCPC_XID]
+    mov     w1, #2
+    str     w1, [x0, #DHCPC_RETRIES]
+
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_SELECTING
+    str     w2, [x1]
+
+    /* Fire callback with ctx pointer. */
+    bl      dhcp_retrans_cb
+
+    /* Retries decremented to 1. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    ldr     w0, [x0, #DHCPC_RETRIES]
+    cmp     w0, #1
+    b.ne    .Ldcb_fail
+
+    /* h_resend_discover counter == 1 (proves RETRY event fired). */
+    adrp    x0, dhcp_count_resend_discover
+    add     x0, x0, :lo12:dhcp_count_resend_discover
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldcb_fail
+
+    /* h_panic_d counter == 0 (GIVEUP did NOT fire). */
+    adrp    x0, dhcp_count_panic_d
+    add     x0, x0, :lo12:dhcp_count_panic_d
+    ldr     w0, [x0]
+    cbnz    w0, .Ldcb_fail
+
+    ldr     x0, =_dhcp_name_cb_retry
+    bl      test_pass
+    b       .Ldcb_done
+.Ldcb_fail:
+    ldr     x0, =_dhcp_name_cb_retry
+    bl      test_fail
+.Ldcb_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_dhcp_retrans_cb_fires_giveup — with retries == 0, the
+ * callback fires E_TIMER_RETRANS_GIVEUP, which (in S_SELECTING)
+ * dispatches h_panic_d (stub bumps counter, returns).
+ * ======================================================================== */
+test_dhcp_retrans_cb_fires_giveup:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+
+    /* state = SELECTING; retries = 0. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    str     wzr, [x0, #DHCPC_RETRIES]
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_SELECTING
+    str     w2, [x1]
+
+    bl      dhcp_retrans_cb
+
+    /* h_panic_d counter == 1. */
+    adrp    x0, dhcp_count_panic_d
+    add     x0, x0, :lo12:dhcp_count_panic_d
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldgu_fail
+
+    /* h_resend_discover counter == 0. */
+    adrp    x0, dhcp_count_resend_discover
+    add     x0, x0, :lo12:dhcp_count_resend_discover
+    ldr     w0, [x0]
+    cbnz    w0, .Ldgu_fail
+
+    ldr     x0, =_dhcp_name_cb_giveup
+    bl      test_pass
+    b       .Ldgu_done
+.Ldgu_fail:
+    ldr     x0, =_dhcp_name_cb_giveup
+    bl      test_fail
+.Ldgu_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -485,6 +599,8 @@ _dhcp_name_step_oob_state:     .asciz "dhcp_fsa_step_oob_state"
 _dhcp_name_step_panic_d_runs:  .asciz "dhcp_fsa_step_panic_d_runs"
 _dhcp_name_start:              .asciz "dhcp_start_populates_ctx_and_fires"
 _dhcp_name_start_sends:        .asciz "dhcp_start_sends_discover_broadcast"
+_dhcp_name_cb_retry:           .asciz "dhcp_retrans_cb_fires_retry"
+_dhcp_name_cb_giveup:          .asciz "dhcp_retrans_cb_fires_giveup"
 
 
 .section .bss
