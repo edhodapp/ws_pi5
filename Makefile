@@ -127,7 +127,7 @@ SHARED_OBJS = \
     $(BUILD)/net.o $(BUILD)/timer_hw.o $(BUILD)/timer_pool.o \
     $(BUILD)/ntp.o $(BUILD)/md5.o $(BUILD)/perf.o \
     $(BUILD)/http_output_fsa.o $(BUILD)/panic.o \
-    $(BUILD)/config_parser.o $(BUILD)/mdns.o
+    $(BUILD)/config_parser.o $(BUILD)/mdns.o $(BUILD)/dhcp_fsa.o
 
 # ---------------------------------------------------------------------------
 # Pi platform objects
@@ -174,7 +174,8 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_config_parser.o \
     $(BUILD)/test_config_parser_vectors.o \
     $(BUILD)/config_parser_vectors.o \
-    $(BUILD)/test_mdns.o
+    $(BUILD)/test_mdns.o \
+    $(BUILD)/test_dhcp_fsa.o
 
 TEST_OBJS = $(SHARED_TEST_OBJS) $(PLAT_TEST_OBJS) \
     $(TEST_UART) $(BUILD)/main.o $(SHARED_OBJS) $(PLAT_OBJS)
@@ -196,7 +197,7 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table print-INITRAMFS_ADDR pi4-test
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table verify-dhcp-fsa-table print-INITRAMFS_ADDR pi4-test
 
 all: kernel8.img
 
@@ -228,6 +229,14 @@ pi4-test:
 # ---------------------------------------------------------------------------
 verify-fsa-table: $(BUILD)/kernel8.elf
 	@python3 scripts/verify_fsa_table.py $< tests/func/http_output_fsa_vectors.tsv
+
+# ---------------------------------------------------------------------------
+# verify-dhcp-fsa-table — same idea for the DHCP FSA. Cross-checks
+# tests/func/dhcp_fsa_vectors.tsv against lib/dhcp_fsa.S's compiled
+# transition table.
+# ---------------------------------------------------------------------------
+verify-dhcp-fsa-table: $(BUILD)/kernel8.elf
+	@python3 scripts/verify_dhcp_fsa_table.py $< tests/func/dhcp_fsa_vectors.tsv
 
 # ---------------------------------------------------------------------------
 # print-INITRAMFS_ADDR — emit the INITRAMFS_ADDR value defined above
@@ -450,6 +459,9 @@ $(BUILD)/config_parser.o: lib/config_parser.S include/net.inc | $(BUILD)
 $(BUILD)/mdns.o: lib/mdns.S include/net.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/dhcp_fsa.o: lib/dhcp_fsa.S include/dhcp.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # ===========================================================================
 # Pi platform drivers (platform/pi/)
 # ===========================================================================
@@ -508,6 +520,9 @@ $(BUILD)/test_config_parser_vectors.o: tests/test_config_parser_vectors.S includ
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_mdns.o: tests/test_mdns.S include/net.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_dhcp_fsa.o: tests/test_dhcp_fsa.S include/dhcp.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # I9 — generate the asm vector table from the canonical TSV. The

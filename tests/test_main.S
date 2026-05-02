@@ -149,6 +149,11 @@ _start:
     bl      test_mdns_dispatch_drops_in_probe
     bl      test_mdns_dispatch_responds_in_announce
     bl      test_mdns_dispatch_panics_on_conflict
+    bl      test_dhcp_fsa_step_init_start
+    bl      test_dhcp_fsa_step_no_handler
+    bl      test_dhcp_fsa_step_oob_event
+    bl      test_dhcp_fsa_step_oob_state
+    bl      test_dhcp_fsa_step_panic_d_runs
     bl      test_eth_type_arp
     bl      test_eth_type_short
     bl      test_eth_build_hdr
