@@ -179,7 +179,14 @@
  * inbound packet, so we can't trust it past h_record_offer_send_request). */
 .equ DHCPC_SERVER_ID,        88
 .equ DHCPC_REQUESTED_IP,     92
-.equ DHCPC_SIZE,             96
+/* Slot indices returned by timer_set; -1 sentinel = "not armed".
+ * Tracked so a fresh ACK can cancel stale T1/T2/lease before
+ * re-arming, preventing an old timer from firing past the new
+ * commit (would otherwise force a premature REBIND or INIT). */
+.equ DHCPC_T1_SLOT,          96
+.equ DHCPC_T2_SLOT,          100
+.equ DHCPC_LEASE_SLOT,       104
+.equ DHCPC_SIZE,             112
 
 /* RFC 2131 §4.1: 4 s, 8 s, 16 s exponential backoff, 3 retries
  * before panic_d per D017. */

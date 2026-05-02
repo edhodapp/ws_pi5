@@ -165,6 +165,13 @@ dhcp_start:
     mov     w0, #DHCP_MAX_RETRIES
     str     w0, [x5, #DHCPC_RETRIES]
 
+    /* Mark T1/T2/LEASE slots as unarmed (-1). h_commit_lease_arm_timers
+     * cancels any pre-existing slot before re-arming on each ACK. */
+    mov     w0, #-1
+    str     w0, [x5, #DHCPC_T1_SLOT]
+    str     w0, [x5, #DHCPC_T2_SLOT]
+    str     w0, [x5, #DHCPC_LEASE_SLOT]
+
     /* Cache timer_freq. (Pure read of CNTFRQ_EL0; clobbers x0..x18.) */
     bl      timer_freq
     adrp    x5, dhcp_send_ctx
@@ -500,10 +507,9 @@ h_resend_request_selecting:
  *     them (dhcp_parsed.flags). Missing options leave the existing
  *     globals alone.
  *   - Old T1/T2/lease timers from a prior BOUND→RENEWING→BOUND
- *     cycle are NOT cancelled. Pool capacity in main.S
- *     (TPOOL_DEFAULT_CAP=16) is enough for several lease cycles;
- *     proper cancel-before-rearm is a follow-up if pool exhaustion
- *     surfaces in long-running deployments.
+ *     cycle ARE cancelled before re-arming, using the slot indices
+ *     stored in ctx (DHCPC_T1_SLOT / _T2_SLOT / _LEASE_SLOT). Skips
+ *     cancellation if the slot is the -1 sentinel (never armed).
  *
  *   - Timer arming converts host-order seconds → ticks via
  *     ctx.timer_freq. lease*freq fits in 64 bits comfortably even
@@ -568,29 +574,41 @@ h_commit_lease_arm_timers:
     ldr     x0, [x19, #DHCPC_TIMER_POOL]
     cbz     x0, .Lcl_done
 
+    /* Cancel any pre-existing T1/T2/lease slots from a prior cycle.
+     * timer_cancel ignores out-of-range indices (incl. -1 sentinel
+     * stored at boot), so the unarmed case is harmless. */
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     w1, [x19, #DHCPC_T1_SLOT]
+    bl      timer_cancel
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     w1, [x19, #DHCPC_T2_SLOT]
+    bl      timer_cancel
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     w1, [x19, #DHCPC_LEASE_SLOT]
+    bl      timer_cancel
+
     /* Compute now (ticks). Stash in x20. */
     bl      timer_now
     mov     x20, x0
 
     /* T1 = now + (lease/2) * freq. */
     ldr     w0, [x19, #DHCPC_LEASE_TIME]
-    lsr     w0, w0, #1                  /* lease/2 (seconds) */
+    lsr     w0, w0, #1
     ldr     x1, [x19, #DHCPC_TIMER_FREQ]
     mul     x0, x0, x1
-    add     x1, x20, x0                 /* T1 expiry */
+    add     x1, x20, x0
     str     x1, [x19, #DHCPC_T1_DEADLINE]
     ldr     x0, [x19, #DHCPC_TIMER_POOL]
     ldr     x2, =dhcp_t1_cb
     mov     x3, x19
     bl      timer_set
+    str     w0, [x19, #DHCPC_T1_SLOT]   /* capture returned slot */
 
-    /* T2 = now + (lease * 7 / 8) * freq. The lease*7 multiply uses
-     * 64-bit arithmetic to handle the RFC's 0xFFFFFFFF "infinite"
-     * sentinel without truncation (32-bit mul of 7 × 2^32 wraps). */
+    /* T2 = now + (lease * 7 / 8) * freq. */
     ldr     w0, [x19, #DHCPC_LEASE_TIME]
     mov     x1, #7
-    umull   x0, w0, w1                  /* x0 = lease * 7, 64-bit */
-    lsr     x0, x0, #3                  /* lease*7/8 */
+    umull   x0, w0, w1
+    lsr     x0, x0, #3
     ldr     x1, [x19, #DHCPC_TIMER_FREQ]
     mul     x0, x0, x1
     add     x1, x20, x0
@@ -599,6 +617,7 @@ h_commit_lease_arm_timers:
     ldr     x2, =dhcp_t2_cb
     mov     x3, x19
     bl      timer_set
+    str     w0, [x19, #DHCPC_T2_SLOT]
 
     /* Lease expiry = now + lease * freq. */
     ldr     w0, [x19, #DHCPC_LEASE_TIME]
@@ -610,6 +629,7 @@ h_commit_lease_arm_timers:
     ldr     x2, =dhcp_lease_cb
     mov     x3, x19
     bl      timer_set
+    str     w0, [x19, #DHCPC_LEASE_SLOT]
 
 .Lcl_done:
     ldp     x19, x20, [sp, #16]
