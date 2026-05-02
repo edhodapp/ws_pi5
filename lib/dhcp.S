@@ -40,6 +40,7 @@
 .global dhcp_build_request_renewing
 .global dhcp_parse_inbound
 .global dhcp_parsed
+.global dhcp_wrap_broadcast
 
 .section .text
 
@@ -603,3 +604,137 @@ dhcp_parse_inbound:
 .balign 8
 dhcp_parsed:
     .space DHCP_PARSED_SIZE
+
+
+.section .text
+/* ===========================================================================
+ * dhcp_wrap_broadcast — write Eth+IP+UDP broadcast headers for an
+ * outbound DHCPDISCOVER or DHCPREQUEST (SELECTING / REBINDING).
+ *
+ *   x0 = frame buffer (contains BOOTP payload at offset 42)
+ *   w1 = payload length (DHCP body length, e.g. 249 for DISCOVER)
+ *
+ * Wire details:
+ *   Eth dst = ff:ff:ff:ff:ff:ff  (broadcast)
+ *   Eth src = net_our_mac
+ *   Eth type = 0x0800
+ *   IP ver/IHL = 0x45, TOS = 0
+ *   IP totlen = 28 + payload_len (BE)
+ *   IP id/flags/frag = 0
+ *   IP TTL = 64
+ *   IP proto = 17 (UDP)
+ *   IP src = 0.0.0.0
+ *   IP dst = 255.255.255.255
+ *   UDP sport = 68 (client)
+ *   UDP dport = 67 (server)
+ *   UDP length = 8 + payload_len (BE)
+ *   UDP checksum = 0 (RFC 768 permits zero for IPv4)
+ *
+ * Caller is responsible for the BOOTP payload at frame[42..].
+ * Preserves x19..x28; clobbers x0..x16, x30 (calls ip_checksum).
+ * --------------------------------------------------------------------------- */
+dhcp_wrap_broadcast:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x23, [sp, #16]
+    str     x24, [sp, #24]
+
+    mov     x23, x0                     /* frame */
+    mov     w24, w1                     /* payload_len */
+
+    /* Eth dst = broadcast (ff × 6). */
+    mov     w0, #0xFF
+    strb    w0, [x23, #0]
+    strb    w0, [x23, #1]
+    strb    w0, [x23, #2]
+    strb    w0, [x23, #3]
+    strb    w0, [x23, #4]
+    strb    w0, [x23, #5]
+
+    /* Eth src = net_our_mac. */
+    adrp    x9, net_our_mac
+    add     x9, x9, :lo12:net_our_mac
+    ldrb    w0, [x9, #0]; strb w0, [x23, #6]
+    ldrb    w0, [x9, #1]; strb w0, [x23, #7]
+    ldrb    w0, [x9, #2]; strb w0, [x23, #8]
+    ldrb    w0, [x9, #3]; strb w0, [x23, #9]
+    ldrb    w0, [x9, #4]; strb w0, [x23, #10]
+    ldrb    w0, [x9, #5]; strb w0, [x23, #11]
+
+    /* Eth type = 0x0800 (IPv4). */
+    mov     w0, #0x08
+    strb    w0, [x23, #12]
+    strb    wzr, [x23, #13]
+
+    /* IP header at offset 14. ver/IHL = 0x45, TOS = 0. */
+    mov     w0, #0x45
+    strb    w0, [x23, #(14 + 0)]
+    strb    wzr, [x23, #(14 + 1)]
+
+    /* totlen = 20 + 8 + payload_len (BE). */
+    add     w0, w24, #(20 + 8)
+    lsr     w1, w0, #8
+    strb    w1, [x23, #(14 + 2)]
+    strb    w0, [x23, #(14 + 3)]
+
+    /* id, flags+frag = 0. */
+    strb    wzr, [x23, #(14 + 4)]
+    strb    wzr, [x23, #(14 + 5)]
+    strb    wzr, [x23, #(14 + 6)]
+    strb    wzr, [x23, #(14 + 7)]
+
+    /* TTL = 64 (typical for client broadcasts). */
+    mov     w0, #64
+    strb    w0, [x23, #(14 + 8)]
+    /* Protocol = UDP. */
+    mov     w0, #17
+    strb    w0, [x23, #(14 + 9)]
+    /* IP checksum = 0 (will be filled below). */
+    strb    wzr, [x23, #(14 + 10)]
+    strb    wzr, [x23, #(14 + 11)]
+
+    /* IP src = 0.0.0.0. */
+    strb    wzr, [x23, #(14 + 12)]
+    strb    wzr, [x23, #(14 + 13)]
+    strb    wzr, [x23, #(14 + 14)]
+    strb    wzr, [x23, #(14 + 15)]
+
+    /* IP dst = 255.255.255.255. */
+    mov     w0, #0xFF
+    strb    w0, [x23, #(14 + 16)]
+    strb    w0, [x23, #(14 + 17)]
+    strb    w0, [x23, #(14 + 18)]
+    strb    w0, [x23, #(14 + 19)]
+
+    /* IP checksum over the 20-byte header. ip_checksum returns
+     * the value already in wire-byte order (low byte first when
+     * stored at offset 10), matching how lib/icmp.S writes it. */
+    add     x0, x23, #14
+    mov     w1, #20
+    bl      ip_checksum
+    lsr     w1, w0, #8
+    strb    w0, [x23, #(14 + 10)]
+    strb    w1, [x23, #(14 + 11)]
+
+    /* UDP header at offset 34. sport = 68, dport = 67. */
+    strb    wzr, [x23, #(14 + 20)]
+    mov     w0, #68
+    strb    w0, [x23, #(14 + 21)]
+    strb    wzr, [x23, #(14 + 22)]
+    mov     w0, #67
+    strb    w0, [x23, #(14 + 23)]
+
+    /* UDP length = 8 + payload_len (BE). */
+    add     w0, w24, #8
+    lsr     w1, w0, #8
+    strb    w1, [x23, #(14 + 24)]
+    strb    w0, [x23, #(14 + 25)]
+
+    /* UDP checksum = 0. */
+    strb    wzr, [x23, #(14 + 26)]
+    strb    wzr, [x23, #(14 + 27)]
+
+    ldr     x24, [sp, #24]
+    ldr     x23, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret

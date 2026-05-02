@@ -155,6 +155,7 @@ _start:
     bl      test_dhcp_fsa_step_oob_state
     bl      test_dhcp_fsa_step_panic_d_runs
     bl      test_dhcp_start_populates_ctx_and_fires
+    bl      test_dhcp_start_sends_discover_broadcast
     bl      test_dhcp_build_discover_header
     bl      test_dhcp_build_discover_options
     bl      test_dhcp_build_request_selecting_has_50_and_54

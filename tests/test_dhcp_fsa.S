@@ -21,6 +21,7 @@
 .global test_dhcp_fsa_step_oob_state
 .global test_dhcp_fsa_step_panic_d_runs
 .global test_dhcp_start_populates_ctx_and_fires
+.global test_dhcp_start_sends_discover_broadcast
 
 .section .text
 
@@ -258,6 +259,36 @@ test_dhcp_fsa_step_panic_d_runs:
     ret
 
 
+/* Fake send_fn used by dhcp_start tests. Captures (frame_ptr,
+ * frame_len) into BSS globals so tests can assert on the wire-
+ * format bytes of the emitted DISCOVER. Args:
+ *   x0 = dwc2_base (ignored), x1 = ecm_state (ignored),
+ *   x2 = frame ptr,           w3 = frame length.
+ */
+_dhcp_send_capture:
+    adrp    x4, _dhcp_send_count
+    add     x4, x4, :lo12:_dhcp_send_count
+    ldr     w5, [x4]
+    add     w5, w5, #1
+    str     w5, [x4]
+    adrp    x4, _dhcp_last_frame
+    add     x4, x4, :lo12:_dhcp_last_frame
+    str     x2, [x4]
+    str     w3, [x4, #8]
+    mov     w0, #0
+    ret
+
+_dhcp_send_capture_reset:
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    str     wzr, [x0]
+    adrp    x0, _dhcp_last_frame
+    add     x0, x0, :lo12:_dhcp_last_frame
+    str     xzr, [x0]
+    str     wzr, [x0, #8]
+    ret
+
+
 /* ========================================================================
  * test_dhcp_start_populates_ctx_and_fires — dhcp_start writes its
  * args into dhcp_send_ctx, fires E_START, and the FSA advances
@@ -267,15 +298,18 @@ test_dhcp_start_populates_ctx_and_fires:
     stp     x29, x30, [sp, #-16]!
 
     bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
 
-    /* Args: dwc2_base / ecm_state / tx_buf / timer_pool / send_fn.
-     * Use easily-recognizable sentinels (low addresses) — dhcp_start
-     * just stores them; no dereference. */
+    /* dwc2_base / ecm_state — distinctive sentinels (no deref).
+     * tx_buf — real BSS scratch so h_send_discover can write.
+     * timer_pool — sentinel (no deref; retrans timer arming
+     *   doesn't land until I16-7).
+     * send_fn — capture stub. */
     movz    x0, #0x1111
     movz    x1, #0x2222
-    movz    x2, #0x3333
+    ldr     x2, =_dhcp_test_tx_buf
     movz    x3, #0x4444
-    movz    x4, #0x5555
+    ldr     x4, =_dhcp_send_capture
     bl      dhcp_start
 
     /* State should have advanced to S_SELECTING via h_send_discover. */
@@ -306,7 +340,7 @@ test_dhcp_start_populates_ctx_and_fires:
     cmp     x1, x2
     b.ne    .Ldsta_fail
     ldr     x1, [x0, #DHCPC_TX_BUF]
-    movz    x2, #0x3333
+    ldr     x2, =_dhcp_test_tx_buf
     cmp     x1, x2
     b.ne    .Ldsta_fail
     ldr     x1, [x0, #DHCPC_TIMER_POOL]
@@ -314,14 +348,12 @@ test_dhcp_start_populates_ctx_and_fires:
     cmp     x1, x2
     b.ne    .Ldsta_fail
     ldr     x1, [x0, #DHCPC_SEND_FN]
-    movz    x2, #0x5555
+    ldr     x2, =_dhcp_send_capture
     cmp     x1, x2
     b.ne    .Ldsta_fail
     ldr     w1, [x0, #DHCPC_RETRIES]
     cmp     w1, #DHCP_MAX_RETRIES
     b.ne    .Ldsta_fail
-    /* timer_freq is read from CNTFRQ_EL0; on QEMU this is non-zero
-     * (typical 62.5 MHz). Just assert non-zero. */
     ldr     x1, [x0, #DHCPC_TIMER_FREQ]
     cbz     x1, .Ldsta_fail
 
@@ -336,6 +368,115 @@ test_dhcp_start_populates_ctx_and_fires:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_start_sends_discover_broadcast — once dhcp_start fires
+ * E_START, the real h_send_discover handler builds a DISCOVER and
+ * pushes a complete Eth+IP+UDP+BOOTP frame through send_fn. Asserts
+ * the captured frame has the expected wire shape:
+ *   Eth dst   = ff:ff:ff:ff:ff:ff (broadcast)
+ *   Eth type  = 0x0800
+ *   IP dst    = 255.255.255.255
+ *   IP src    = 0.0.0.0
+ *   IP proto  = 17 (UDP)
+ *   IP TTL    = 64
+ *   UDP sport = 68, dport = 67
+ *   BOOTP op  = BOOTREQUEST at offset 42
+ * ======================================================================== */
+test_dhcp_start_sends_discover_broadcast:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =_dhcp_test_tx_buf
+    mov     x3, #0
+    ldr     x4, =_dhcp_send_capture
+    bl      dhcp_start
+
+    /* send_fn invoked exactly once. */
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldsd_fail
+
+    /* Captured frame is the tx_buf we passed in. */
+    adrp    x0, _dhcp_last_frame
+    add     x0, x0, :lo12:_dhcp_last_frame
+    ldr     x0, [x0]
+    cbz     x0, .Ldsd_fail
+    ldr     x1, =_dhcp_test_tx_buf
+    cmp     x0, x1
+    b.ne    .Ldsd_fail
+
+    /* Eth dst[0] == 0xFF, Eth dst[5] == 0xFF (broadcast). */
+    ldrb    w1, [x0, #0]
+    cmp     w1, #0xFF
+    b.ne    .Ldsd_fail
+    ldrb    w1, [x0, #5]
+    cmp     w1, #0xFF
+    b.ne    .Ldsd_fail
+
+    /* Eth type = 0x0800. */
+    ldrb    w1, [x0, #12]
+    cmp     w1, #0x08
+    b.ne    .Ldsd_fail
+    ldrb    w1, [x0, #13]
+    cbnz    w1, .Ldsd_fail
+
+    /* IP src = 0.0.0.0 (offsets 14+12..14+15). */
+    ldrb    w1, [x0, #(14 + 12)]
+    cbnz    w1, .Ldsd_fail
+    ldrb    w1, [x0, #(14 + 15)]
+    cbnz    w1, .Ldsd_fail
+
+    /* IP dst = 255.255.255.255. */
+    ldrb    w1, [x0, #(14 + 16)]
+    cmp     w1, #0xFF
+    b.ne    .Ldsd_fail
+    ldrb    w1, [x0, #(14 + 19)]
+    cmp     w1, #0xFF
+    b.ne    .Ldsd_fail
+
+    /* IP proto = 17, IP TTL = 64. */
+    ldrb    w1, [x0, #(14 + 8)]
+    cmp     w1, #64
+    b.ne    .Ldsd_fail
+    ldrb    w1, [x0, #(14 + 9)]
+    cmp     w1, #17
+    b.ne    .Ldsd_fail
+
+    /* UDP sport = 68 (low byte 0x44 at offset 14+21). */
+    ldrb    w1, [x0, #(14 + 20)]
+    cbnz    w1, .Ldsd_fail
+    ldrb    w1, [x0, #(14 + 21)]
+    cmp     w1, #68
+    b.ne    .Ldsd_fail
+    /* UDP dport = 67. */
+    ldrb    w1, [x0, #(14 + 22)]
+    cbnz    w1, .Ldsd_fail
+    ldrb    w1, [x0, #(14 + 23)]
+    cmp     w1, #67
+    b.ne    .Ldsd_fail
+
+    /* BOOTP op at offset 42 == BOOTREQUEST (1). */
+    ldrb    w1, [x0, #42]
+    cmp     w1, #1
+    b.ne    .Ldsd_fail
+
+    ldr     x0, =_dhcp_name_start_sends
+    bl      test_pass
+    b       .Ldsd_done
+.Ldsd_fail:
+    ldr     x0, =_dhcp_name_start_sends
+    bl      test_fail
+.Ldsd_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -343,3 +484,18 @@ _dhcp_name_step_oob_event:     .asciz "dhcp_fsa_step_oob_event"
 _dhcp_name_step_oob_state:     .asciz "dhcp_fsa_step_oob_state"
 _dhcp_name_step_panic_d_runs:  .asciz "dhcp_fsa_step_panic_d_runs"
 _dhcp_name_start:              .asciz "dhcp_start_populates_ctx_and_fires"
+_dhcp_name_start_sends:        .asciz "dhcp_start_sends_discover_broadcast"
+
+
+.section .bss
+.balign 8
+_dhcp_test_tx_buf:
+    .space 512                          /* room for Eth+IP+UDP+BOOTP */
+
+.balign 8
+_dhcp_send_count:
+    .space 4
+.balign 8
+_dhcp_last_frame:
+    .space 8                            /* captured frame ptr */
+    .space 8                            /* captured len + pad */

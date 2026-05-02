@@ -158,12 +158,10 @@ dhcp_start:
     str     x2, [x5, #DHCPC_TX_BUF]
     str     x3, [x5, #DHCPC_TIMER_POOL]
     str     x4, [x5, #DHCPC_SEND_FN]
-    /* Initial retry budget. */
     mov     w0, #DHCP_MAX_RETRIES
     str     w0, [x5, #DHCPC_RETRIES]
 
-    /* Cache timer_freq. (Pure read of CNTFRQ_EL0; no clobber of x5
-     * but reload it after to be safe.) */
+    /* Cache timer_freq. (Pure read of CNTFRQ_EL0; clobbers x0..x18.) */
     bl      timer_freq
     adrp    x5, dhcp_send_ctx
     add     x5, x5, :lo12:dhcp_send_ctx
@@ -207,7 +205,73 @@ dhcp_start:
     ret
 .endm
 
-DHCP_STUB h_send_discover,                dhcp_count_send_discover
+/* h_send_discover — real implementation (replaces the stub). Build
+ * a DHCPDISCOVER, wrap it in an Eth+IP+UDP broadcast, hand the
+ * frame to send_fn. Skips silently if dhcp_send_ctx hasn't been
+ * initialized (send_fn = 0) — that lets the legacy
+ * test_dhcp_fsa_step_init_start case keep working without setting
+ * up a fake send context.
+ *
+ * Retrans timer arming lands in I16-7. For now this fires-and-
+ * forgets — if no OFFER comes back, the FSA stays in S_SELECTING
+ * indefinitely.
+ *
+ * Bumps dhcp_count_send_discover for test observability.
+ * Pollutes x3 with 0xDEAD on the way out — same regression guard
+ * the stubs carry. */
+h_send_discover:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+
+    movz    x3, #0xDEAD                     /* regression poison */
+
+    /* Bump dispatch counter (always, including test-mode path). */
+    adrp    x0, dhcp_count_send_discover
+    add     x0, x0, :lo12:dhcp_count_send_discover
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    /* Bail if the context isn't initialised (no send_fn). */
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhsd_done
+
+    /* xid = lower 32 bits of CNTPCT_EL0 (cheap, varies per call). */
+    mrs     x0, CNTPCT_EL0
+    str     w0, [x19, #DHCPC_XID]
+
+    /* Reset retry budget for this fresh DISCOVER pass. */
+    mov     w0, #DHCP_MAX_RETRIES
+    str     w0, [x19, #DHCPC_RETRIES]
+
+    /* Build payload at frame[42..] (after Eth+IP+UDP slot). */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    add     x0, x0, #42
+    ldr     w1, [x19, #DHCPC_XID]
+    bl      dhcp_build_discover
+    mov     w20, w0                         /* payload length */
+
+    /* Wrap with broadcast Eth+IP+UDP headers. */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    mov     w1, w20
+    bl      dhcp_wrap_broadcast
+
+    /* Send: send_fn(dwc2_base, ecm_state, frame, frame_len). */
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    ldr     x0, [x19, #DHCPC_DWC2_BASE]
+    ldr     x1, [x19, #DHCPC_ECM_STATE]
+    ldr     x2, [x19, #DHCPC_TX_BUF]
+    add     w3, w20, #42                    /* total frame length */
+    blr     x5
+
+.Lhsd_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 DHCP_STUB h_resend_discover,              dhcp_count_resend_discover
 DHCP_STUB h_record_offer_send_request,    dhcp_count_record_offer_send_request
 DHCP_STUB h_resend_request_selecting,     dhcp_count_resend_request_selecting
