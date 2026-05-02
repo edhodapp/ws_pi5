@@ -178,71 +178,30 @@ mdns_build_response:
     cbz     w0, .Lmb_drop
 
     /* --- Build response into x21. --- */
+    /*
+     * RFC 6762 §6.7: "Multicast DNS responses MUST NOT contain any
+     * questions in the Question Section."
+     *
+     * Implementation: delegate to mdns_build_announce_payload, which
+     * already produces the right shape (QDCOUNT=0, ANCOUNT=1, full
+     * inline NAME, no compression — there's no question to point at).
+     * Then overwrite bytes [0..1] with the query's transaction ID per
+     * RFC 6762 §18.1 (legacy clients echo the ID; modern mDNS uses 0
+     * either way, so the echo is harmless).
+     *
+     * The validation logic above (length, QR, QDCOUNT==1, QNAME walk,
+     * QTYPE/QCLASS, hostname match) still gates this branch — only a
+     * well-formed query for our hostname reaches here.
+     */
+    mov     x0, x21
+    bl      mdns_build_announce_payload
+    cbz     w0, .Lmb_drop           /* defensive: hostname unset */
 
-    /* Header: ID echoed, flags=0x8400, QDCOUNT=1, ANCOUNT=1. */
-    ldrb    w0, [x19, #0]
-    strb    w0, [x21, #0]
-    ldrb    w0, [x19, #1]
-    strb    w0, [x21, #1]
-    mov     w0, #0x84
-    strb    w0, [x21, #2]
-    strb    wzr, [x21, #3]
-    strb    wzr, [x21, #4]
-    mov     w0, #1
-    strb    w0, [x21, #5]
-    strb    wzr, [x21, #6]
-    strb    w0, [x21, #7]
-    strh    wzr, [x21, #8]
-    strh    wzr, [x21, #10]
-
-    /* Question section: copy [12, qclass_end) from query.
-     * qclass_end = x24 + 5 (terminator + QTYPE 2 + QCLASS 2).
-     * _mdns_memcpy clobbers x0/x1/x2/x3, so we re-derive
-     * question_len from x24 (callee-saved) afterwards instead of
-     * trusting x2. */
-    add     x0, x19, #DNS_HDR_LEN
-    add     x1, x21, #DNS_HDR_LEN
-    add     x2, x24, #5
-    sub     x2, x2, #DNS_HDR_LEN    /* question section length */
-    bl      _mdns_memcpy
-    /* question_len = x24 + 5 - DNS_HDR_LEN = x24 - 7. */
-    sub     x0, x24, #7
-    add     x22, x21, #DNS_HDR_LEN
-    add     x22, x22, x0
-
-    /* Answer section.
-     * NAME: pointer 0xC0 0x0C (offset 12). */
-    mov     w0, #0xC0
-    strb    w0, [x22], #1
-    mov     w0, #0x0C
-    strb    w0, [x22], #1
-    /* TYPE: 0x00 0x01 (A). */
-    strb    wzr, [x22], #1
-    mov     w0, #1
-    strb    w0, [x22], #1
-    /* CLASS: 0x80 0x01 (IN | cache-flush). */
-    mov     w0, #0x80
-    strb    w0, [x22], #1
-    mov     w0, #1
-    strb    w0, [x22], #1
-    /* TTL: 0x00 0x00 0x00 0x78 (120s). */
-    strb    wzr, [x22], #1
-    strb    wzr, [x22], #1
-    strb    wzr, [x22], #1
-    mov     w0, #0x78
-    strb    w0, [x22], #1
-    /* RDLENGTH: 0x00 0x04. */
-    strb    wzr, [x22], #1
-    mov     w0, #4
-    strb    w0, [x22], #1
-    /* RDATA: our IPv4 (wire-order, already correct in net_our_ip). */
-    adrp    x0, net_our_ip
-    add     x0, x0, :lo12:net_our_ip
-    ldr     w0, [x0]
-    str     w0, [x22], #4
-
-    /* Total response length = x22 - x21. */
-    sub     x0, x22, x21
+    ldrb    w1, [x19, #0]
+    strb    w1, [x21, #0]
+    ldrb    w1, [x19, #1]
+    strb    w1, [x21, #1]
+    /* w0 = response length from announce builder; pass through. */
     b       .Lmb_done
 
 .Lmb_drop:

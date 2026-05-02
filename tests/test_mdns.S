@@ -154,34 +154,53 @@ test_mdns_a_query_match:
     ldr     x2, =_mdns_resp_buf
     bl      mdns_build_response
 
-    /* Expect non-zero response length. */
+    /* Expect non-zero response length. RFC 6762 §6.7: response
+     * MUST NOT contain a question section. The response is therefore
+     * announce-shaped: 12 (hdr) + 13 (NAME inline for "qemu") + 13
+     * (TYPE/CLASS/TTL/RDLEN/RDATA) = 38. */
     cbz     w0, .Ltma_fail
-    /* Expect length to be 12 (hdr) + question + 12 + 4 (answer)
-     * = 12 + 16 + 16 = 44. */
-    cmp     w0, #44
+    cmp     w0, #38
     b.ne    .Ltma_fail
 
-    /* Header byte 2 (flags high) = 0x84. */
     ldr     x0, =_mdns_resp_buf
+    /* ID echoed from query (synthetic query has id=0x1234). */
+    ldrb    w1, [x0, #0]
+    cmp     w1, #0x12
+    b.ne    .Ltma_fail
+    ldrb    w1, [x0, #1]
+    cmp     w1, #0x34
+    b.ne    .Ltma_fail
+    /* Header byte 2 (flags high) = 0x84. */
     ldrb    w1, [x0, #2]
     cmp     w1, #0x84
     b.ne    .Ltma_fail
+    /* QDCOUNT (bytes 4..5) MUST be 0 per RFC 6762 §6.7. */
+    ldrb    w1, [x0, #4]
+    cbnz    w1, .Ltma_fail
+    ldrb    w1, [x0, #5]
+    cbnz    w1, .Ltma_fail
     /* ANCOUNT (bytes 6..7) = 0x00 0x01. */
     ldrb    w1, [x0, #6]
     cbnz    w1, .Ltma_fail
     ldrb    w1, [x0, #7]
     cmp     w1, #1
     b.ne    .Ltma_fail
-    /* Last 4 bytes = our IP (10, 0, 2, 15). */
-    ldrb    w1, [x0, #40]
+    /* NAME at offset 12: [4]"qemu" — first byte is the label length 4
+     * (NOT a 0xC0 compression-pointer byte). This locks in the
+     * inline-NAME requirement. */
+    ldrb    w1, [x0, #12]
+    cmp     w1, #4
+    b.ne    .Ltma_fail
+    /* RDATA at offset 34..37 = our IP (10, 0, 2, 15). */
+    ldrb    w1, [x0, #34]
     cmp     w1, #10
     b.ne    .Ltma_fail
-    ldrb    w1, [x0, #41]
+    ldrb    w1, [x0, #35]
     cbnz    w1, .Ltma_fail
-    ldrb    w1, [x0, #42]
+    ldrb    w1, [x0, #36]
     cmp     w1, #2
     b.ne    .Ltma_fail
-    ldrb    w1, [x0, #43]
+    ldrb    w1, [x0, #37]
     cmp     w1, #15
     b.ne    .Ltma_fail
 
@@ -283,8 +302,9 @@ test_mdns_dispatch_a_match:
     mov     w1, #_mdns_dispatch_in_len
     bl      mdns_dispatch
     cbz     w0, .Ltmd_fail
-    /* Expect frame length: ETH(14) + IP(20) + UDP(8) + payload(44) = 86. */
-    cmp     w0, #86
+    /* RFC 6762 §6.7 announce-shape response: ETH(14) + IP(20) +
+     * UDP(8) + payload(38) = 80. */
+    cmp     w0, #80
     b.ne    .Ltmd_fail
 
     ldr     x0, =_mdns_frame_buf
@@ -350,6 +370,13 @@ test_mdns_dispatch_a_match:
     ldrb    w1, [x0, #(42 + 2)]
     cmp     w1, #0x84
     b.ne    .Ltmd_fail
+    /* QDCOUNT (bytes 42+4, 42+5) MUST be 0 per RFC 6762 §6.7.
+     * avahi-daemon silently drops responses that include a question
+     * section — caught on hardware, not in the original QEMU tests. */
+    ldrb    w1, [x0, #(42 + 4)]
+    cbnz    w1, .Ltmd_fail
+    ldrb    w1, [x0, #(42 + 5)]
+    cbnz    w1, .Ltmd_fail
     /* ANCOUNT (bytes 42+6, 42+7) = 0x00 0x01. */
     ldrb    w1, [x0, #(42 + 6)]
     cbnz    w1, .Ltmd_fail
@@ -429,8 +456,8 @@ test_mdns_net_recv_e2e:
     mov     w1, #_mdns_dispatch_in_len
     bl      net_recv_one
     cbz     w0, .Ltme_fail
-    /* Same expected length as the dispatch test. */
-    cmp     w0, #86
+    /* Same expected length as the dispatch test (announce-shape). */
+    cmp     w0, #80
     b.ne    .Ltme_fail
 
     bl      _mdns_test_restore
@@ -1582,7 +1609,7 @@ test_mdns_dispatch_responds_in_announce:
     ldr     x0, =_mdns_frame_buf
     mov     w1, #_mdns_dispatch_in_len
     bl      mdns_dispatch
-    cmp     w0, #86                    /* must produce a response frame */
+    cmp     w0, #80                    /* must produce a response frame */
     b.ne    .Ltdra_fail
 
     bl      _mdns_test_restore
