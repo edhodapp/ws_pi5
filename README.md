@@ -211,6 +211,14 @@ The reasoning: that conventional wisdom is calibrated to human costs. When a hum
 
 Implementation-specific tests serve as a ratchet against AI hallucination. A behavioral test says "the callback fired" — the AI could produce a broken scan loop that happens to work for one timer. An implementation-specific test says "slot 0's callback field is zero after cancel" — there's nowhere to hide. Every test that pins internal state narrows the space of wrong-but-compiles outputs the AI could produce.
 
+### A data point: DHCP client, first-boot success
+
+The DHCP client (D017 — RFC 2131 client subset, table-driven 11-state FSA in `lib/dhcp_fsa.S`, builders/parser in `lib/dhcp.S`, 54-cell transition table cross-checked against the ELF by `scripts/verify_dhcp_fsa_table.py`) was developed entirely under the process described above: TSV transition table → PICT model → unit tests → assembly implementation → independent Gemini and clean-Claude reviews → QEMU green → flash. It worked on the first boot against a real `dnsmasq` server: DISCOVER → OFFER → REQUEST → ACK → lease commit → mDNS announce on the assigned address, with HTTP serving on the new IP. No serial-console debugging cycle, no panic-LED diagnosis, no incremental fixes.
+
+This is not a claim that the AI produced perfect code in isolation — the process did. The transition-table-first design forced the receive-path validators to be enumerated before any handler was written; the PICT model surfaced edge combinations that drove specific test cases; the dual-review step caught register-clobber bugs (a caller-saved register held across `blr`) and a 32-bit multiplication that would have wrapped at large lease values, both before they shipped. The result was an end-to-end protocol implementation that lit up correctly on first contact with real hardware.
+
+A skilled human engineer could have achieved the same correctness, given enough time. What changed is the cycle time: the kind of methodical, table-driven, exhaustively-reviewed work that used to be reserved for safety-critical code is now within reach for routine protocol features.
+
 ## What It Does
 
 Boots on a Raspberry Pi 4, brings up Ethernet, and serves HTTP on port 80. The full path:
