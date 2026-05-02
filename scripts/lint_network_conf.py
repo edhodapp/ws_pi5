@@ -31,8 +31,11 @@ from pydantic import BaseModel
 
 MAGIC = "# WSPI5CFG"
 REQUIRED_KEYS: tuple[str, ...] = ("ip", "netmask", "gateway", "hostname")
-OPTIONAL_KEYS: tuple[str, ...] = ("ntp_server", "mac")
+OPTIONAL_KEYS: tuple[str, ...] = ("ntp_server", "mac", "dhcp")
 ALL_KEYS: frozenset[str] = frozenset(REQUIRED_KEYS) | frozenset(OPTIONAL_KEYS)
+# Per D017, when dhcp=yes the ip/netmask/gateway fields become
+# optional (DHCP supplies them). Only hostname stays required.
+DHCP_RELAXED_REQUIRED: tuple[str, ...] = ("hostname",)
 HOSTNAME_MAX_LEN = 63
 
 # Hostname character classes per D006 / RFC 1123 LDH:
@@ -94,6 +97,10 @@ def _validate_ip(s: str) -> bool:
     return True
 
 
+def _validate_yesno(s: str) -> bool:
+    return s in ("yes", "no")
+
+
 def _validate_hostname(s: str) -> bool:
     if not s or len(s) > HOSTNAME_MAX_LEN:
         return False
@@ -140,6 +147,8 @@ _VALIDATORS: dict[str, tuple[Callable[[str], bool], str, str]] = {
                  "got {!r}"),
     "mac": (_validate_mac, "E_MAC",
             "MAC must be six colon-separated 2-digit hex bytes; got {!r}"),
+    "dhcp": (_validate_yesno, "E_LINE",
+             "dhcp must be 'yes' or 'no'; got {!r}"),
 }
 
 
@@ -231,12 +240,19 @@ def _parse_line(
 
 
 def _check_required(config: dict[str, str]) -> list[LintError]:
+    # Per D017: dhcp=yes relaxes the required-field rule — DHCP
+    # supplies ip/netmask/gateway, so only hostname must be present.
+    required = (
+        DHCP_RELAXED_REQUIRED
+        if config.get("dhcp") == "yes"
+        else REQUIRED_KEYS
+    )
     return [
         LintError(
             line=0, code="E_REQ",
             message=f"required key missing: {k!r}",
         )
-        for k in REQUIRED_KEYS if k not in config
+        for k in required if k not in config
     ]
 
 

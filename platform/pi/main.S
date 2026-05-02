@@ -195,6 +195,23 @@ main:
     ldr     x4, =NET_SEND_SYM
     bl      arp_start
 
+    /* Per D017: if network.conf set dhcp=yes, run the DHCP client.
+     * dhcp_start fires E_START into the FSA, which sends DISCOVER
+     * via NET_SEND_SYM and arms a retransmit timer. ARP for the
+     * gateway runs in parallel via arp_start above; net_gw_ip will
+     * be stamped by h_commit_lease_arm_timers on ACK, so the
+     * already-armed gateway ARP is harmless until then. */
+    ldr     x0, =net_dhcp
+    ldr     w0, [x0]
+    cbz     w0, .Lskip_dhcp
+    ldr     x0, =NET_BASE_SYM
+    ldr     x1, =NET_STATE_SYM
+    ldr     x2, =dhcp_tx_buf
+    ldr     x3, =timer_pool
+    ldr     x4, =NET_SEND_SYM
+    bl      dhcp_start
+.Lskip_dhcp:
+
     /* Initialize NTP (cache timer frequency) */
     bl      ntp_init
 
@@ -384,6 +401,12 @@ ntp_tx_buf:
 .balign 16
 mdns_tx_buf:
     .space  256
+
+/* DHCP frame max: ETH(14) + IP(20) + UDP(8) + payload(261 for
+ * REQUEST-SELECTING) = 303. Round to 384 for alignment. */
+.balign 16
+dhcp_tx_buf:
+    .space  384
 
 .balign 16
 tcp_tx_buf:

@@ -295,6 +295,16 @@ hostname=wspi5
 # mailbox call fails AND no override is provided, the kernel
 # halts with panic pattern M (`——`) — see D011.
 #mac=de:ad:be:ef:ca:fe
+
+# Optional: DHCP mode (per D017). Set "dhcp=yes" to have the kernel
+# acquire its IP / netmask / gateway via DHCP at boot — the ip /
+# netmask / gateway fields above become optional in that case
+# (DHCP supplies them). On DHCP failure the kernel halts with
+# panic pattern D (`─··`) so a misconfigured server is loud, not
+# silent. The two modes are mutually exclusive — there is no
+# static fallback. Default "no" preserves the static-only behavior
+# this file shipped before the DHCP client landed.
+dhcp=no
 EOF
 
 # --testrig: replace the placeholder ip / gateway with the standard

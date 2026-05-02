@@ -30,6 +30,7 @@
 .global net_gw_mac
 .global net_gw_mac_valid
 .global net_hw_csum_tx
+.global net_dhcp
 
 /* --- Invariant constants (.rodata) --- */
 .section .rodata
@@ -131,4 +132,13 @@ net_gw_mac_valid:
  * and TBUF_64B_EN is enabled). QEMU builds leave this at 0. */
 .balign 4
 net_hw_csum_tx:
+    .word   0
+
+/* DHCP-mode flag set by the network.conf parser (dhcp=yes|no, per
+ * D017). 0 = static config (use the ip / netmask / gateway fields
+ * verbatim, default), 1 = run the DHCP client at boot and let it
+ * stamp net_our_ip / net_netmask / net_gw_ip. main.S gates
+ * dhcp_start on this flag. */
+.balign 4
+net_dhcp:
     .word   0

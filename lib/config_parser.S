@@ -70,6 +70,7 @@ _keys:
     .byte 8;  .ascii "hostname"
     .byte 10; .ascii "ntp_server"
     .byte 3;  .ascii "mac"
+    .byte 4;  .ascii "dhcp"
     .byte 0
 _keys_end:
 
@@ -87,6 +88,13 @@ config_parse:
     add     x20, x0, x1             /* limit  */
     mov     x21, #0                 /* seen mask */
 
+    /* Reset net_dhcp to 0 (= dhcp=no default) so a previous parse
+     * that set it to 1 doesn't leak into this one. The asm-vector
+     * harness reuses the same address space across vectors. */
+    adrp    x0, net_dhcp
+    add     x0, x0, :lo12:net_dhcp
+    str     wzr, [x0]
+
     bl      _check_magic
     cbnz    w0, .Lcp_done
 
@@ -98,9 +106,24 @@ config_parse:
     b       .Lcp_loop
 
 .Lcp_finish:
+    /* Required-field check. When net_dhcp == 1 (set by parsing
+     * dhcp=yes), only hostname is required (D017: ip / netmask /
+     * gateway are managed by DHCP). Otherwise all four bits 0..3
+     * must be present. Hostname is bit 3 of REQUIRED_MASK = 0x08. */
+    adrp    x0, net_dhcp
+    add     x0, x0, :lo12:net_dhcp
+    ldr     w0, [x0]
+    cbz     w0, .Lcp_strict
+    /* dhcp=yes: only hostname required. */
+    and     w0, w21, #0x08
+    cmp     w0, #0x08
+    b.ne    .Lcp_req_fail
+    b       .Lcp_ok
+.Lcp_strict:
     and     w0, w21, #REQUIRED_MASK
     cmp     w0, #REQUIRED_MASK
     b.eq    .Lcp_ok
+.Lcp_req_fail:
     mov     w0, #E_REQ
     b       .Lcp_done
 
@@ -459,13 +482,19 @@ _parse_line:
     b       .Lpl_val_trim_lead
 
 .Lpl_dispatch:
-    /* Dispatch on key index. 0/1/2/4 → IP; 3 → hostname; 5 → MAC. */
+    /* Dispatch on key index.
+     *   0/1/2/4 → IP
+     *   3 → hostname
+     *   5 → MAC
+     *   6 → dhcp (yes|no boolean) */
     mov     x0, x24                 /* val_start */
     mov     x1, x25                 /* val_end */
     cmp     w22, #3
     b.eq    .Lpl_do_hostname
     cmp     w22, #5
     b.eq    .Lpl_do_mac
+    cmp     w22, #6
+    b.eq    .Lpl_do_dhcp
     /* Else IP. */
     bl      _validate_ip            /* w0 = 0 or E_IP; w1..w4 = octets */
     cbnz    w0, .Lpl_return
@@ -486,6 +515,13 @@ _parse_line:
     bl      _validate_mac           /* w0 = 0 or E_MAC; w1..w6 = bytes */
     cbnz    w0, .Lpl_return
     bl      _store_mac
+    mov     w0, #0
+    b       .Lpl_advance
+
+.Lpl_do_dhcp:
+    bl      _validate_yesno         /* w0 = 0 or E_LINE; w1 = 0/1 */
+    cbnz    w0, .Lpl_return
+    bl      _store_dhcp             /* w1 → net_dhcp */
     mov     w0, #0
     b       .Lpl_advance
 
@@ -889,6 +925,59 @@ _store_mac:
     strb    w4, [x0, #3]
     strb    w5, [x0, #4]
     strb    w6, [x0, #5]
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * _validate_yesno — exact match against "yes" or "no".
+ *
+ *   x0 = value start, x1 = value end (exclusive)
+ * Returns:
+ *   w0 = 0 on success, E_LINE on bad value
+ *   w1 = 1 if "yes", 0 if "no"
+ *
+ * Preserves x19..x28; uses w2..w3 as scratch. */
+_validate_yesno:
+    sub     w2, w1, w0
+    cmp     w2, #2
+    b.eq    .Lvyn_no
+    cmp     w2, #3
+    b.eq    .Lvyn_yes
+    b       .Lvyn_bad
+.Lvyn_yes:
+    ldrb    w3, [x0, #0]
+    cmp     w3, #'y'
+    b.ne    .Lvyn_bad
+    ldrb    w3, [x0, #1]
+    cmp     w3, #'e'
+    b.ne    .Lvyn_bad
+    ldrb    w3, [x0, #2]
+    cmp     w3, #'s'
+    b.ne    .Lvyn_bad
+    mov     w0, #0
+    mov     w1, #1
+    ret
+.Lvyn_no:
+    ldrb    w3, [x0, #0]
+    cmp     w3, #'n'
+    b.ne    .Lvyn_bad
+    ldrb    w3, [x0, #1]
+    cmp     w3, #'o'
+    b.ne    .Lvyn_bad
+    mov     w0, #0
+    mov     w1, #0
+    ret
+.Lvyn_bad:
+    mov     w0, #E_LINE
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * _store_dhcp — write w1 (0 or 1) to net_dhcp. */
+_store_dhcp:
+    adrp    x0, net_dhcp
+    add     x0, x0, :lo12:net_dhcp
+    str     w1, [x0]
     ret
 
 
