@@ -106,3 +106,38 @@
 .equ DHCP_MSG_NAK,             6
 .equ DHCP_MSG_RELEASE,         7
 .equ DHCP_MSG_INFORM,          8
+
+
+/* dhcp_parsed — receive-path scratch where dhcp_parse_inbound
+ * stashes the extracted option values for the FSA action handlers
+ * to read. All fields are in HOST byte order (parse converts BE to
+ * LE) except yiaddr / server_id / subnet_mask / router_ip which
+ * stay wire-order so they can be written into net_cfg globals
+ * (which already store wire-order).
+ *
+ *  +0   msg_type        u8   (DHCP_MSG_*; 0 = invalid/dropped)
+ *  +1   flags           u8   (which options were seen — bit 0 = 51 lease,
+ *                              bit 1 = 54 server-id, bit 2 = 1 subnet,
+ *                              bit 3 = 3 router)
+ *  +4   yiaddr          u32  wire-order (server's offered IP)
+ *  +8   server_id       u32  wire-order (option 54)
+ * +12   lease_time      u32  HOST order (option 51, RFC 2131 calls
+ *                              0xFFFFFFFF "infinite")
+ * +16   subnet_mask     u32  wire-order (option 1)
+ * +20   router_ip       u32  wire-order (option 3)
+ *  size 24
+ */
+.equ DHCP_PARSED_MSG_TYPE,    0
+.equ DHCP_PARSED_FLAGS,       1
+.equ DHCP_PARSED_YIADDR,      4
+.equ DHCP_PARSED_SERVER_ID,   8
+.equ DHCP_PARSED_LEASE_TIME,  12
+.equ DHCP_PARSED_SUBNET_MASK, 16
+.equ DHCP_PARSED_ROUTER_IP,   20
+.equ DHCP_PARSED_SIZE,        24
+
+/* dhcp_parsed.flags bits — set as the parser walks options. */
+.equ DHCP_FLAG_SEEN_LEASE,    1
+.equ DHCP_FLAG_SEEN_SERVER,   2
+.equ DHCP_FLAG_SEEN_SUBNET,   4
+.equ DHCP_FLAG_SEEN_ROUTER,   8

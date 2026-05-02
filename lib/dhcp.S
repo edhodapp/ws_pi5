@@ -38,6 +38,8 @@
 .global dhcp_build_discover
 .global dhcp_build_request_selecting
 .global dhcp_build_request_renewing
+.global dhcp_parse_inbound
+.global dhcp_parsed
 
 .section .text
 
@@ -322,3 +324,282 @@ dhcp_build_request_renewing:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
+
+
+/* ===========================================================================
+ * dhcp_parse_inbound — RFC 2131 receive-path validator.
+ *
+ *   x0 = DHCP payload pointer (UDP body, starting at BOOTP_OP)
+ *   w1 = payload length in bytes
+ *   w2 = expected xid (host order; the xid we sent in DISCOVER /
+ *        REQUEST and are still tracking)
+ *
+ * Returns:
+ *   w0 = msg_type (DHCP_MSG_OFFER, DHCP_MSG_ACK, DHCP_MSG_NAK), or
+ *        0 if the packet is malformed, addressed to someone else,
+ *        or violates a "MUST" rule (e.g. OFFER without server-id).
+ *
+ * Side effect: on success (return != 0), dhcp_parsed.* is populated.
+ * On failure dhcp_parsed is left in whatever state — caller MUST
+ * NOT read it. Setting msg_type=0 explicitly makes it safe to
+ * inspect even after a drop.
+ *
+ * Validation (drops cause w0=0):
+ *   1. len >= BOOTP_HEADER_LEN + 1
+ *   2. op == BOOTREPLY
+ *   3. htype == 1, hlen == 6
+ *   4. xid == expected_xid (BE on wire → host order compare)
+ *   5. chaddr[0..5] == net_our_mac
+ *   6. magic cookie == 63 82 53 63
+ *   7. options walk: opt 53 (msg-type) MUST be present
+ *   8. for OFFER/ACK: opt 54 (server-id) and opt 51 (lease) MUST
+ *      be present
+ *
+ * Register convention:
+ *   x19 payload pointer (callee-saved)
+ *   w20 payload length (callee-saved)
+ *   w21 expected_xid (callee-saved)
+ *   x22 dhcp_parsed pointer (callee-saved)
+ *   w23 cursor offset into options (callee-saved)
+ * =========================================================================== */
+dhcp_parse_inbound:
+    stp     x29, x30, [sp, #-64]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    str     x23, [sp, #48]
+
+    mov     x19, x0
+    mov     w20, w1
+    mov     w21, w2
+
+    /* Reset dhcp_parsed (also clears msg_type so a drop leaves it safe). */
+    adrp    x22, dhcp_parsed
+    add     x22, x22, :lo12:dhcp_parsed
+    str     xzr, [x22, #0]
+    str     xzr, [x22, #8]
+    str     xzr, [x22, #16]
+
+    /* 1. length */
+    cmp     w20, #(BOOTP_HEADER_LEN + 1)
+    b.lt    .Lparse_drop
+
+    /* 2. op == BOOTREPLY */
+    ldrb    w0, [x19, #BOOTP_OP]
+    cmp     w0, #DHCP_OP_BOOTREPLY
+    b.ne    .Lparse_drop
+
+    /* 3. htype == 1, hlen == 6 */
+    ldrb    w0, [x19, #BOOTP_HTYPE]
+    cmp     w0, #DHCP_HTYPE_ETHERNET
+    b.ne    .Lparse_drop
+    ldrb    w0, [x19, #BOOTP_HLEN]
+    cmp     w0, #DHCP_HLEN_ETHERNET
+    b.ne    .Lparse_drop
+
+    /* 4. xid match. Wire is BE; reassemble to host order. */
+    ldrb    w0, [x19, #(BOOTP_XID + 0)]
+    ldrb    w1, [x19, #(BOOTP_XID + 1)]
+    ldrb    w3, [x19, #(BOOTP_XID + 2)]
+    ldrb    w4, [x19, #(BOOTP_XID + 3)]
+    lsl     w0, w0, #24
+    orr     w0, w0, w1, lsl #16
+    orr     w0, w0, w3, lsl #8
+    orr     w0, w0, w4
+    cmp     w0, w21
+    b.ne    .Lparse_drop
+
+    /* 5. chaddr[0..5] == net_our_mac. Byte compare so unaligned
+     * MAC storage doesn't matter. */
+    adrp    x3, net_our_mac
+    add     x3, x3, :lo12:net_our_mac
+    mov     w4, #0
+.Lparse_mac_loop:
+    cmp     w4, #6
+    b.eq    .Lparse_mac_ok
+    add     x5, x19, w4, uxtw
+    ldrb    w0, [x5, #BOOTP_CHADDR]
+    ldrb    w1, [x3, w4, uxtw]
+    cmp     w0, w1
+    b.ne    .Lparse_drop
+    add     w4, w4, #1
+    b       .Lparse_mac_loop
+.Lparse_mac_ok:
+
+    /* 6. magic cookie */
+    ldrb    w0, [x19, #(BOOTP_MAGIC + 0)]
+    cmp     w0, #DHCP_MAGIC_BYTE0
+    b.ne    .Lparse_drop
+    ldrb    w0, [x19, #(BOOTP_MAGIC + 1)]
+    cmp     w0, #DHCP_MAGIC_BYTE1
+    b.ne    .Lparse_drop
+    ldrb    w0, [x19, #(BOOTP_MAGIC + 2)]
+    cmp     w0, #DHCP_MAGIC_BYTE2
+    b.ne    .Lparse_drop
+    ldrb    w0, [x19, #(BOOTP_MAGIC + 3)]
+    cmp     w0, #DHCP_MAGIC_BYTE3
+    b.ne    .Lparse_drop
+
+    /* Header passed validation. Stash yiaddr (always 4 bytes,
+     * wire-order) so OFFER/ACK action handlers find it ready. */
+    ldrb    w0, [x19, #(BOOTP_YIADDR + 0)]
+    strb    w0, [x22, #(DHCP_PARSED_YIADDR + 0)]
+    ldrb    w0, [x19, #(BOOTP_YIADDR + 1)]
+    strb    w0, [x22, #(DHCP_PARSED_YIADDR + 1)]
+    ldrb    w0, [x19, #(BOOTP_YIADDR + 2)]
+    strb    w0, [x22, #(DHCP_PARSED_YIADDR + 2)]
+    ldrb    w0, [x19, #(BOOTP_YIADDR + 3)]
+    strb    w0, [x22, #(DHCP_PARSED_YIADDR + 3)]
+
+    /* 7. Walk options. */
+    mov     w23, #BOOTP_OPTIONS
+.Lparse_opt_loop:
+    cmp     w23, w20
+    b.hs    .Lparse_opt_done
+    ldrb    w0, [x19, w23, uxtw]
+    cmp     w0, #DHCP_OPT_END
+    b.eq    .Lparse_opt_done
+    cmp     w0, #DHCP_OPT_PAD
+    b.eq    .Lparse_opt_pad
+
+    /* len byte must exist and the option's data must fit. */
+    add     w1, w23, #1
+    cmp     w1, w20
+    b.hs    .Lparse_drop
+    ldrb    w3, [x19, w1, uxtw]                  /* w3 = option len */
+    add     w1, w1, #1                           /* w1 = data start offset */
+    add     w4, w1, w3                           /* w4 = data end offset */
+    cmp     w4, w20
+    b.hi    .Lparse_drop
+
+    /* Dispatch on option code. */
+    cmp     w0, #DHCP_OPT_MSG_TYPE
+    b.eq    .Lparse_opt_msg_type
+    cmp     w0, #DHCP_OPT_SERVER_ID
+    b.eq    .Lparse_opt_server_id
+    cmp     w0, #DHCP_OPT_LEASE_TIME
+    b.eq    .Lparse_opt_lease
+    cmp     w0, #DHCP_OPT_SUBNET_MASK
+    b.eq    .Lparse_opt_subnet
+    cmp     w0, #DHCP_OPT_ROUTER
+    b.eq    .Lparse_opt_router
+    /* Unknown option: skip. */
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_pad:
+    add     w23, w23, #1
+    b       .Lparse_opt_loop
+
+.Lparse_opt_msg_type:
+    cmp     w3, #1
+    b.ne    .Lparse_drop
+    ldrb    w0, [x19, w1, uxtw]
+    strb    w0, [x22, #DHCP_PARSED_MSG_TYPE]
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_server_id:
+    cmp     w3, #4
+    b.ne    .Lparse_drop
+    add     x5, x19, w1, uxtw
+    ldrb    w0, [x5, #0]; strb w0, [x22, #(DHCP_PARSED_SERVER_ID + 0)]
+    ldrb    w0, [x5, #1]; strb w0, [x22, #(DHCP_PARSED_SERVER_ID + 1)]
+    ldrb    w0, [x5, #2]; strb w0, [x22, #(DHCP_PARSED_SERVER_ID + 2)]
+    ldrb    w0, [x5, #3]; strb w0, [x22, #(DHCP_PARSED_SERVER_ID + 3)]
+    ldrb    w0, [x22, #DHCP_PARSED_FLAGS]
+    orr     w0, w0, #DHCP_FLAG_SEEN_SERVER
+    strb    w0, [x22, #DHCP_PARSED_FLAGS]
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_lease:
+    cmp     w3, #4
+    b.ne    .Lparse_drop
+    /* RFC: 32-bit BE seconds. Convert to host order here so callers
+     * compare directly against `now + lease` in seconds. */
+    add     x5, x19, w1, uxtw
+    ldrb    w0, [x5, #0]
+    ldrb    w6, [x5, #1]
+    ldrb    w7, [x5, #2]
+    ldrb    w8, [x5, #3]
+    lsl     w0, w0, #24
+    orr     w0, w0, w6, lsl #16
+    orr     w0, w0, w7, lsl #8
+    orr     w0, w0, w8
+    str     w0, [x22, #DHCP_PARSED_LEASE_TIME]
+    ldrb    w0, [x22, #DHCP_PARSED_FLAGS]
+    orr     w0, w0, #DHCP_FLAG_SEEN_LEASE
+    strb    w0, [x22, #DHCP_PARSED_FLAGS]
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_subnet:
+    cmp     w3, #4
+    b.ne    .Lparse_drop
+    add     x5, x19, w1, uxtw
+    ldrb    w0, [x5, #0]; strb w0, [x22, #(DHCP_PARSED_SUBNET_MASK + 0)]
+    ldrb    w0, [x5, #1]; strb w0, [x22, #(DHCP_PARSED_SUBNET_MASK + 1)]
+    ldrb    w0, [x5, #2]; strb w0, [x22, #(DHCP_PARSED_SUBNET_MASK + 2)]
+    ldrb    w0, [x5, #3]; strb w0, [x22, #(DHCP_PARSED_SUBNET_MASK + 3)]
+    ldrb    w0, [x22, #DHCP_PARSED_FLAGS]
+    orr     w0, w0, #DHCP_FLAG_SEEN_SUBNET
+    strb    w0, [x22, #DHCP_PARSED_FLAGS]
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_router:
+    /* Option 3 may carry multiple router IPs; we record only the
+     * first per D010 (always-via-gateway routing). */
+    cmp     w3, #4
+    b.lt    .Lparse_drop
+    add     x5, x19, w1, uxtw
+    ldrb    w0, [x5, #0]; strb w0, [x22, #(DHCP_PARSED_ROUTER_IP + 0)]
+    ldrb    w0, [x5, #1]; strb w0, [x22, #(DHCP_PARSED_ROUTER_IP + 1)]
+    ldrb    w0, [x5, #2]; strb w0, [x22, #(DHCP_PARSED_ROUTER_IP + 2)]
+    ldrb    w0, [x5, #3]; strb w0, [x22, #(DHCP_PARSED_ROUTER_IP + 3)]
+    ldrb    w0, [x22, #DHCP_PARSED_FLAGS]
+    orr     w0, w0, #DHCP_FLAG_SEEN_ROUTER
+    strb    w0, [x22, #DHCP_PARSED_FLAGS]
+    mov     w23, w4
+    b       .Lparse_opt_loop
+
+.Lparse_opt_done:
+    /* 8. Required-options check based on msg_type. */
+    ldrb    w0, [x22, #DHCP_PARSED_MSG_TYPE]
+    cmp     w0, #DHCP_MSG_OFFER
+    b.eq    .Lparse_check_offer_ack
+    cmp     w0, #DHCP_MSG_ACK
+    b.eq    .Lparse_check_offer_ack
+    cmp     w0, #DHCP_MSG_NAK
+    b.eq    .Lparse_ok                  /* NAK has no required options */
+    /* msg_type missing or other → drop */
+    b       .Lparse_drop
+
+.Lparse_check_offer_ack:
+    /* Both server-id (54) and lease (51) MUST be present. */
+    ldrb    w1, [x22, #DHCP_PARSED_FLAGS]
+    and     w3, w1, #(DHCP_FLAG_SEEN_LEASE | DHCP_FLAG_SEEN_SERVER)
+    cmp     w3, #(DHCP_FLAG_SEEN_LEASE | DHCP_FLAG_SEEN_SERVER)
+    b.ne    .Lparse_drop
+
+.Lparse_ok:
+    /* w0 already holds msg_type from the check above. */
+    b       .Lparse_done
+.Lparse_drop:
+    /* Force msg_type=0 in dhcp_parsed so callers that ignore the
+     * return value can still safely read it. */
+    strb    wzr, [x22, #DHCP_PARSED_MSG_TYPE]
+    mov     w0, #0
+.Lparse_done:
+    ldr     x23, [sp, #48]
+    ldp     x21, x22, [sp, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #64
+    ret
+
+
+.section .bss
+.balign 8
+dhcp_parsed:
+    .space DHCP_PARSED_SIZE
