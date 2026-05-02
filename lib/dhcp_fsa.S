@@ -506,9 +506,11 @@ h_resend_request_selecting:
  *     surfaces in long-running deployments.
  *
  *   - Timer arming converts host-order seconds → ticks via
- *     ctx.timer_freq. Lease values up to 0xFFFFFFFF (RFC's
- *     "infinite") would overflow x0 when multiplied by freq;
- *     accept that limitation in v1 — typical leases are ≤ 24 h. */
+ *     ctx.timer_freq. lease*freq fits in 64 bits comfortably even
+ *     for 0xFFFFFFFF leases (~2^32 × 5×10^7 ≈ 2×10^17 < 2^63), so
+ *     the existing 64-bit `mul` is enough — no overflow check
+ *     needed. The intermediate `lease*7` (computed for T2 below)
+ *     uses a 64-bit umull so the 7 × 2^32 case doesn't wrap. */
 h_commit_lease_arm_timers:
     stp     x29, x30, [sp, #-32]!
     mov     x29, sp
@@ -582,11 +584,13 @@ h_commit_lease_arm_timers:
     mov     x3, x19
     bl      timer_set
 
-    /* T2 = now + (lease * 7 / 8) * freq. */
+    /* T2 = now + (lease * 7 / 8) * freq. The lease*7 multiply uses
+     * 64-bit arithmetic to handle the RFC's 0xFFFFFFFF "infinite"
+     * sentinel without truncation (32-bit mul of 7 × 2^32 wraps). */
     ldr     w0, [x19, #DHCPC_LEASE_TIME]
-    mov     w1, #7
-    mul     w0, w0, w1
-    lsr     w0, w0, #3                  /* lease*7/8 */
+    mov     x1, #7
+    umull   x0, w0, w1                  /* x0 = lease * 7, 64-bit */
+    lsr     x0, x0, #3                  /* lease*7/8 */
     ldr     x1, [x19, #DHCPC_TIMER_FREQ]
     mul     x0, x0, x1
     add     x1, x20, x0
