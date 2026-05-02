@@ -99,8 +99,8 @@ _dhcp_zero_header:
     ldrb    w4, [x3, #3]; strb w4, [x0, #(BOOTP_CHADDR + 3)]
     ldrb    w4, [x3, #4]; strb w4, [x0, #(BOOTP_CHADDR + 4)]
     ldrb    w4, [x3, #5]; strb w4, [x0, #(BOOTP_CHADDR + 5)]
-    str     xzr, [x0, #(BOOTP_CHADDR + 6)]   /* 8 zero bytes */
-    str     wzr, [x0, #(BOOTP_CHADDR + 14)]  /* 4 zero bytes (overlaps fine) */
+    str     xzr, [x0, #(BOOTP_CHADDR + 6)]   /* 8 bytes: chaddr[6..13] */
+    strh    wzr, [x0, #(BOOTP_CHADDR + 14)]  /* 2 bytes: chaddr[14..15] */
 
     /* sname (64 bytes) — write 8 × 8 bytes. */
     str     xzr, [x0, #(BOOTP_SNAME + 0)]
@@ -175,12 +175,23 @@ _dhcp_append_param_request:
  *   w1 = option code
  *   w2 = IP value (u32 wire-order — 4 bytes written verbatim)
  * Returns: x0 advanced by 6.
+ *
+ * Byte-at-a-time stores: option offsets aren't guaranteed to be
+ * 4-aligned, so a `str w2` here would alignment-fault on hardware
+ * with strict alignment checking enabled (SCTLR_EL1.A) even though
+ * Normal memory permits unaligned access today.
  * --------------------------------------------------------------------------- */
 _dhcp_append_ip_option:
     strb    w1, [x0], #1
     mov     w1, #4
     strb    w1, [x0], #1
-    str     w2, [x0], #4
+    strb    w2, [x0], #1                /* IP byte 0 */
+    lsr     w3, w2, #8
+    strb    w3, [x0], #1                /* IP byte 1 */
+    lsr     w3, w2, #16
+    strb    w3, [x0], #1                /* IP byte 2 */
+    lsr     w3, w2, #24
+    strb    w3, [x0], #1                /* IP byte 3 */
     ret
 
 
@@ -226,7 +237,7 @@ dhcp_build_discover:
     bl      _dhcp_append_param_request
     bl      _dhcp_append_end
     /* x0 now points to end of packet. */
-    sub     w0, w0, w19
+    sub     x0, x0, x19                 /* 64-bit subtract; fits in w0 */
 
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
@@ -254,10 +265,9 @@ dhcp_build_request_selecting:
     mov     w21, w2                     /* server_id */
     mov     w22, w3                     /* requested_ip */
 
-    /* Header with ciaddr=0. xid in w1 is preserved across the call
-     * because _dhcp_zero_header doesn't touch it (uses x3 onward as
-     * scratch). Just to be safe, save w1 too. */
-    mov     w20, w1                     /* xid */
+    /* Header with ciaddr=0. _dhcp_zero_header uses x3+ as scratch
+     * and doesn't touch w1 (xid), so the caller's w1 reaches the
+     * helper unchanged. */
     mov     w2, #0
     bl      _dhcp_zero_header
 
@@ -274,7 +284,7 @@ dhcp_build_request_selecting:
     bl      _dhcp_append_ip_option
     bl      _dhcp_append_param_request
     bl      _dhcp_append_end
-    sub     w0, w0, w19
+    sub     x0, x0, x19                 /* 64-bit subtract; fits in w0 */
 
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
@@ -307,7 +317,7 @@ dhcp_build_request_renewing:
     bl      _dhcp_append_msg_type
     bl      _dhcp_append_param_request
     bl      _dhcp_append_end
-    sub     w0, w0, w19
+    sub     x0, x0, x19                 /* 64-bit subtract; fits in w0 */
 
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
