@@ -27,6 +27,8 @@
 .global test_dhcp_retrans_cb_fires_giveup
 .global test_dhcp_offer_drives_request
 .global test_dhcp_ack_commits_lease
+.global test_dhcp_t1_drives_renew
+.global test_dhcp_t2_drives_rebind
 
 .section .text
 
@@ -855,6 +857,175 @@ test_dhcp_ack_commits_lease:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_t1_drives_renew — BOUND + E_TIMER_T1 dispatches
+ * h_send_request_renew, which sends a renewing-shape REQUEST and
+ * advances state to RENEWING. The captured frame's BOOTP body
+ * has ciaddr = net_our_ip and msg-type option = REQUEST.
+ * ======================================================================== */
+test_dhcp_t1_drives_renew:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Set net_our_ip = 10.0.0.100 so ciaddr in the renewing
+     * REQUEST has a recognizable signature. Save + restore. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldr     w1, [x0]
+    adrp    x2, _dhcp_saved_net_our_ip
+    add     x2, x2, :lo12:_dhcp_saved_net_our_ip
+    str     w1, [x2]
+    mov     w1, #10
+    strb    w1, [x0, #0]
+    strb    wzr, [x0, #1]
+    strb    wzr, [x0, #2]
+    mov     w1, #100
+    strb    w1, [x0, #3]
+
+    /* Pre-populate ctx with capture send_fn, no timer pool. */
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    str     xzr, [x0, #DHCPC_DWC2_BASE]
+    str     xzr, [x0, #DHCPC_ECM_STATE]
+    ldr     x1, =_dhcp_test_tx_buf
+    str     x1, [x0, #DHCPC_TX_BUF]
+    str     xzr, [x0, #DHCPC_TIMER_POOL]
+    ldr     x1, =_dhcp_send_capture
+    str     x1, [x0, #DHCPC_SEND_FN]
+
+    /* state = BOUND. */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_BOUND
+    str     w2, [x1]
+
+    /* Fire T1. */
+    mov     w0, #E_TIMER_T1
+    bl      dhcp_fsa_step
+
+    /* state advanced to RENEWING. */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_RENEWING
+    b.ne    .Lhrenew_fail
+
+    /* h_send_request_renew counter == 1. */
+    adrp    x0, dhcp_count_send_request_renew
+    add     x0, x0, :lo12:dhcp_count_send_request_renew
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lhrenew_fail
+
+    /* send_count == 1. */
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Lhrenew_fail
+
+    /* Captured frame: ciaddr at BOOTP_CIADDR (offset 12 in BOOTP,
+     * 42 + 12 = 54 from frame start) starts with 10. */
+    adrp    x0, _dhcp_last_frame
+    add     x0, x0, :lo12:_dhcp_last_frame
+    ldr     x0, [x0]
+    cbz     x0, .Lhrenew_fail
+    ldrb    w1, [x0, #(42 + 12)]
+    cmp     w1, #10
+    b.ne    .Lhrenew_fail
+    ldrb    w1, [x0, #(42 + 15)]
+    cmp     w1, #100
+    b.ne    .Lhrenew_fail
+    /* Option 53 (msg-type) at BOOTP_OPTIONS+0..2 = 282..284. */
+    ldrb    w1, [x0, #(42 + 240 + 2)]
+    cmp     w1, #DHCP_MSG_REQUEST
+    b.ne    .Lhrenew_fail
+
+    /* Restore net_our_ip. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+
+    ldr     x0, =_dhcp_name_t1_renew
+    bl      test_pass
+    b       .Lhrenew_done
+.Lhrenew_fail:
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+    ldr     x0, =_dhcp_name_t1_renew
+    bl      test_fail
+.Lhrenew_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_dhcp_t2_drives_rebind — RENEWING + E_TIMER_T2 dispatches
+ * h_send_request_rebind, advances state to REBINDING.
+ * ======================================================================== */
+test_dhcp_t2_drives_rebind:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    adrp    x0, dhcp_send_ctx
+    add     x0, x0, :lo12:dhcp_send_ctx
+    str     xzr, [x0, #DHCPC_DWC2_BASE]
+    str     xzr, [x0, #DHCPC_ECM_STATE]
+    ldr     x1, =_dhcp_test_tx_buf
+    str     x1, [x0, #DHCPC_TX_BUF]
+    str     xzr, [x0, #DHCPC_TIMER_POOL]
+    ldr     x1, =_dhcp_send_capture
+    str     x1, [x0, #DHCPC_SEND_FN]
+
+    /* state = RENEWING. */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_RENEWING
+    str     w2, [x1]
+
+    mov     w0, #E_TIMER_T2
+    bl      dhcp_fsa_step
+
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_REBINDING
+    b.ne    .Ldtb_fail
+
+    adrp    x0, dhcp_count_send_request_rebind
+    add     x0, x0, :lo12:dhcp_count_send_request_rebind
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldtb_fail
+
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ldtb_fail
+
+    ldr     x0, =_dhcp_name_t2_rebind
+    bl      test_pass
+    b       .Ldtb_done
+.Ldtb_fail:
+    ldr     x0, =_dhcp_name_t2_rebind
+    bl      test_fail
+.Ldtb_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -867,6 +1038,8 @@ _dhcp_name_cb_retry:           .asciz "dhcp_retrans_cb_fires_retry"
 _dhcp_name_cb_giveup:          .asciz "dhcp_retrans_cb_fires_giveup"
 _dhcp_name_offer_drives:       .asciz "dhcp_offer_drives_request"
 _dhcp_name_ack_commits:        .asciz "dhcp_ack_commits_lease"
+_dhcp_name_t1_renew:           .asciz "dhcp_t1_drives_renew"
+_dhcp_name_t2_rebind:          .asciz "dhcp_t2_drives_rebind"
 
 
 .section .bss

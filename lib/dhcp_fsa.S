@@ -640,10 +640,182 @@ dhcp_lease_cb:
     bl      dhcp_fsa_step
     ldp     x29, x30, [sp], #16
     ret
-DHCP_STUB h_send_request_renew,           dhcp_count_send_request_renew
-DHCP_STUB h_resend_request_renew,         dhcp_count_resend_request_renew
-DHCP_STUB h_send_request_rebind,          dhcp_count_send_request_rebind
-DHCP_STUB h_resend_request_rebind,        dhcp_count_resend_request_rebind
+/* _dhcp_request_renewing_send_arm — shared body for the four
+ * BOUND-state outbound handlers (renew + rebind, send + resend).
+ * Builds a renewing-shape REQUEST (no opt 50, no opt 54, ciaddr =
+ * net_our_ip per RFC 2131 §4.3.6), wraps in Eth+IP+UDP broadcast,
+ * sends, arms retrans at +4 s.
+ *
+ * v1 deviation: RFC 2131 §4.4.5 specifies RENEWING uses unicast to
+ * the leasing server, REBINDING uses broadcast. We broadcast in
+ * both cases — the original server still answers (it sees the
+ * BOOTREQUEST in ciaddr scope), and a unicast variant requires
+ * resolving the server's MAC via ARP first. v2 can split the
+ * helpers if a deployment shows the unicast distinction matters.
+ *
+ * Caller MUST set x19 = &dhcp_send_ctx with XID populated and
+ * have already verified send_fn != 0. */
+_dhcp_request_renewing_send_arm:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x20, [sp, #16]
+
+    /* dhcp_build_request_renewing(buf, xid, ciaddr=net_our_ip) */
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    add     x0, x0, #42
+    ldr     w1, [x19, #DHCPC_XID]
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    bl      dhcp_build_request_renewing
+    mov     w20, w0
+
+    ldr     x0, [x19, #DHCPC_TX_BUF]
+    mov     w1, w20
+    bl      dhcp_wrap_broadcast
+
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    ldr     x0, [x19, #DHCPC_DWC2_BASE]
+    ldr     x1, [x19, #DHCPC_ECM_STATE]
+    ldr     x2, [x19, #DHCPC_TX_BUF]
+    add     w3, w20, #42
+    blr     x5
+
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    cbz     x0, .Lrnsa_done
+    bl      timer_now
+    mov     x1, x0
+    ldr     x2, [x19, #DHCPC_TIMER_FREQ]
+    mov     x3, #4
+    mul     x2, x2, x3
+    add     x1, x1, x2
+    ldr     x0, [x19, #DHCPC_TIMER_POOL]
+    ldr     x2, =dhcp_retrans_cb
+    mov     x3, x19
+    bl      timer_set
+
+.Lrnsa_done:
+    ldr     x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_send_request_renew — BOUND + T1. Initial RENEWING-state send.
+ * Picks a fresh xid (new transaction) and resets the retry budget. */
+h_send_request_renew:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_send_request_renew
+    add     x0, x0, :lo12:dhcp_count_send_request_renew
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhsrn_done
+
+    mrs     x0, CNTPCT_EL0
+    str     w0, [x19, #DHCPC_XID]
+    mov     w0, #DHCP_MAX_RETRIES
+    str     w0, [x19, #DHCPC_RETRIES]
+
+    bl      _dhcp_request_renewing_send_arm
+
+.Lhsrn_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_resend_request_renew — RENEWING + TIMER_RETRANS_RETRY. Re-sends
+ * the renewing-shape REQUEST with the same xid; cb already
+ * decremented retries. */
+h_resend_request_renew:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_resend_request_renew
+    add     x0, x0, :lo12:dhcp_count_resend_request_renew
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhrrn_done
+
+    bl      _dhcp_request_renewing_send_arm
+
+.Lhrrn_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_send_request_rebind — BOUND/RENEWING + T2. Initial REBINDING
+ * send. Picks fresh xid and resets retry budget. */
+h_send_request_rebind:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_send_request_rebind
+    add     x0, x0, :lo12:dhcp_count_send_request_rebind
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhsrb_done
+
+    mrs     x0, CNTPCT_EL0
+    str     w0, [x19, #DHCPC_XID]
+    mov     w0, #DHCP_MAX_RETRIES
+    str     w0, [x19, #DHCPC_RETRIES]
+
+    bl      _dhcp_request_renewing_send_arm
+
+.Lhsrb_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* h_resend_request_rebind — REBINDING + TIMER_RETRANS_RETRY. */
+h_resend_request_rebind:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    movz    x3, #0xDEAD
+
+    adrp    x0, dhcp_count_resend_request_rebind
+    add     x0, x0, :lo12:dhcp_count_resend_request_rebind
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     x5, [x19, #DHCPC_SEND_FN]
+    cbz     x5, .Lhrrb_done
+
+    bl      _dhcp_request_renewing_send_arm
+
+.Lhrrb_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
 DHCP_STUB h_panic_d,                      dhcp_count_panic_d
 /* h_panic_d is a stub here so tests can observe dispatch. The real
  * panic_d (lib/panic.S) is invoked from action-handler glue in
