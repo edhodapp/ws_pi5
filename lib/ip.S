@@ -165,19 +165,22 @@ ip_handle:
      *      a) net_our_ip (unicast for us)
      *      b) 224.0.0.251 (the IPv4 mDNS multicast group,
      *         per RFC 6762 §3, supported per D008/D009)
-     *    Both are wire-format compares (no rev needed —
-     *    the constants are stored in the same byte order).
-     *    Wire bytes 0xE0 0x00 0x00 0xFB → LE u32 0xFB0000E0. */
+     *      c) 255.255.255.255 (limited broadcast, accepted so
+     *         DHCP server replies addressed to bcast pre-bound
+     *         per RFC 2131 §4.1 reach our stack). */
     ldr     w0, [x19, #(ETH_PAYLOAD + IP_DST)]
     ldr     x3, =net_our_ip
     ldr     w3, [x3]
     cmp     w0, w3
     b.eq    .Lip_dst_ok
-    /* Build 0xFB0000E0 in w3 via movz/movk (single immediate
-     * doesn't reach the high half cleanly). */
+    /* mDNS multicast 224.0.0.251 — wire bytes 0xE0 0x00 0x00 0xFB,
+     * LE u32 0xFB0000E0. */
     movz    w3, #0x00E0
     movk    w3, #0xFB00, lsl #16
     cmp     w0, w3
+    b.eq    .Lip_dst_ok
+    /* Limited broadcast 255.255.255.255 = 0xFFFFFFFF. */
+    cmn     w0, #1
     b.ne    .Lip_drop
 .Lip_dst_ok:
 

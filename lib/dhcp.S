@@ -41,6 +41,7 @@
 .global dhcp_parse_inbound
 .global dhcp_parsed
 .global dhcp_wrap_broadcast
+.global dhcp_dispatch
 
 .section .text
 
@@ -82,9 +83,15 @@ _dhcp_zero_header:
     strb    w3, [x0, #(BOOTP_XID + 2)]
     strb    w1, [x0, #(BOOTP_XID + 3)]
 
-    /* secs = 0, flags = 0 */
+    /* secs = 0, flags = 0x8000 (BROADCAST). Per RFC 2131 §4.1, a
+     * client that cannot receive unicast IP datagrams until its
+     * stack has an IP MUST set BROADCAST so the server replies to
+     * 255.255.255.255 instead of unicasting to the offered yiaddr
+     * (which we don't own yet). */
     strh    wzr, [x0, #BOOTP_SECS]
-    strh    wzr, [x0, #BOOTP_FLAGS]
+    mov     w3, #0x80
+    strb    w3, [x0, #BOOTP_FLAGS]
+    strb    wzr, [x0, #(BOOTP_FLAGS + 1)]
 
     /* ciaddr (caller-provided, already wire-order). */
     str     w2, [x0, #BOOTP_CIADDR]
@@ -736,5 +743,82 @@ dhcp_wrap_broadcast:
 
     ldr     x24, [sp, #24]
     ldr     x23, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+
+/* ===========================================================================
+ * dhcp_dispatch — UDP-port-68 frame handler.
+ *
+ *   x0 = frame buffer (Eth + IP + UDP + DHCP body)
+ *   w1 = frame length
+ *
+ * Returns:
+ *   w0 = 0 always — DHCP responses don't generate immediate replies.
+ *        The FSA action handlers (h_record_offer_send_request,
+ *        h_commit_lease_arm_timers, etc.) emit any outbound packets
+ *        asynchronously when the corresponding event fires.
+ *
+ * Pipeline:
+ *   1. Confirm frame is long enough to contain Eth+IP+UDP headers.
+ *   2. Compute payload pointer = frame + 42, payload length = frame_len - 42.
+ *   3. Read ctx.XID as the expected transaction id.
+ *   4. dhcp_parse_inbound(payload, len, expected_xid) → msg_type.
+ *   5. Switch msg_type:
+ *      - DHCP_MSG_OFFER → fire E_RX_OFFER_VALID
+ *      - DHCP_MSG_ACK   → fire E_RX_ACK_VALID
+ *      - DHCP_MSG_NAK   → fire E_RX_NAK_VALID
+ *      - 0 (drop)       → no event
+ *
+ * The FSA's transition table decides what to do with each event
+ * based on current state — invalid combinations (e.g., RX_ACK in
+ * INIT) are NONE/NONE and silently no-op.
+ * =========================================================================== */
+.equ DHCP_FRAME_PAYLOAD_OFF, (14 + 20 + 8)   /* 42: ETH+IP+UDP */
+
+dhcp_dispatch:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x19, [sp, #16]
+
+    /* Length sanity. */
+    cmp     w1, #DHCP_FRAME_PAYLOAD_OFF
+    b.lt    .Ldd_done
+
+    /* Read expected_xid from ctx. */
+    adrp    x19, dhcp_send_ctx
+    add     x19, x19, :lo12:dhcp_send_ctx
+    ldr     w2, [x19, #DHCPC_XID]
+
+    /* Parse: x0=payload, w1=payload_len, w2=expected_xid */
+    add     x0, x0, #DHCP_FRAME_PAYLOAD_OFF
+    sub     w1, w1, #DHCP_FRAME_PAYLOAD_OFF
+    bl      dhcp_parse_inbound
+
+    /* w0 = msg_type or 0. Map to FSA event. */
+    cmp     w0, #DHCP_MSG_OFFER
+    b.eq    .Ldd_offer
+    cmp     w0, #DHCP_MSG_ACK
+    b.eq    .Ldd_ack
+    cmp     w0, #DHCP_MSG_NAK
+    b.eq    .Ldd_nak
+    /* Drop (msg_type = 0 or anything else). */
+    b       .Ldd_done
+
+.Ldd_offer:
+    mov     w0, #E_RX_OFFER_VALID
+    bl      dhcp_fsa_step
+    b       .Ldd_done
+.Ldd_ack:
+    mov     w0, #E_RX_ACK_VALID
+    bl      dhcp_fsa_step
+    b       .Ldd_done
+.Ldd_nak:
+    mov     w0, #E_RX_NAK_VALID
+    bl      dhcp_fsa_step
+
+.Ldd_done:
+    mov     w0, #0
+    ldr     x19, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret

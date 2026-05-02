@@ -104,6 +104,7 @@
 .equ UDP_HDR_LEN,      8
 .equ UDP_ECHO_PORT,    7
 .equ MDNS_PORT,        5353
+.equ DHCP_CLIENT_PORT, 68
 
 /* IP fragment reassembly — slot layout
  *

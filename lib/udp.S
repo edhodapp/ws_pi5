@@ -146,6 +146,8 @@ udp_handle:
     movz    w1, #MDNS_PORT
     cmp     w0, w1
     b.eq    .Ludp_mdns
+    cmp     w0, #DHCP_CLIENT_PORT
+    b.eq    .Ludp_dhcp
 
     /* Unknown port → ICMP Port Unreachable (type 3, code 3) */
     mov     x0, x19
@@ -163,6 +165,17 @@ udp_handle:
     mov     x0, x19
     mov     w1, w20
     bl      mdns_dispatch
+    b       .Ludp_done
+
+.Ludp_dhcp:
+    /* DHCP server reply (port 67 → 68). Hand to dhcp_dispatch
+     * which parses the BOOTP/DHCP body and fires E_RX_OFFER_VALID /
+     * _ACK_VALID / _NAK_VALID into the FSA. Returns 0 (DHCP doesn't
+     * generate immediate replies — the FSA action handlers do that
+     * asynchronously when the next event fires). */
+    mov     x0, x19
+    mov     w1, w20
+    bl      dhcp_dispatch
     b       .Ludp_done
 
 .Ludp_ntp:
