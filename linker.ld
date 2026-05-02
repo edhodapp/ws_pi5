@@ -29,6 +29,9 @@ SECTIONS
         __mmu_l2_table = .;
         . += 4096;
 
+        /* See linker_hw.ld for the rationale: the BSS-zero loop in
+         * boot.S requires __bss_end to be 8-byte aligned. */
+        . = ALIGN(8);
         __bss_end = .;
     }
 

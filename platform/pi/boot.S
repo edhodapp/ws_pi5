@@ -3,8 +3,32 @@
 .global _start
 
 _start:
+    /* Stash firmware-passed DTB pointer (in x0) into a callee-saved
+     * register so we can park non-zero cores first without losing it.
+     * mpidr_el1 read clobbers x0 next. x19 is callee-saved by AAPCS;
+     * nothing between here and the store-to-.data below touches it. */
+    mov     x19, x0
+
+    /* Only let core 0 proceed; park cores 1-3. Everything below is
+     * single-threaded — including the DTB save and the early '0'
+     * UART breadcrumb, which used to fire on all four cores and
+     * race over both the global _saved_dtb_ptr (D004) and the UART
+     * FIFO. Same value being written four times made the race silent
+     * on the DTB side, but the four '0' chars were visible. */
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
+    cbnz    x0, .Lpark
+
+    /* Commit DTB pointer to .data. config_parser reads it after boot
+     * setup completes — see D004. On the chainloader path x0 holds
+     * whatever the chainloader left it as; config_parser is responsible
+     * for validating it before dereferencing. */
+    adrp    x9, _saved_dtb_ptr
+    add     x9, x9, :lo12:_saved_dtb_ptr
+    str     x19, [x9]
+
 .ifdef PLATFORM_PI4
-    /* Debug: print '0' — UART already configured by firmware/chainloader */
+    /* Debug: print '0' — UART already configured by firmware/chainloader. */
     movz    x9, #0xFE20, lsl #16
     movk    x9, #0x1000
     mov     w10, #'0'
@@ -13,22 +37,6 @@ _start:
     b.ne    7b
     str     w10, [x9]
 .endif
-
-    /* Save firmware-passed DTB pointer (x0) before any code that
-     * clobbers it (the next instruction reads mpidr_el1 into x0).
-     * Stored in .data (loaded with the kernel image, not zeroed by
-     * the BSS loop below) so config_parser can read it after
-     * boot setup completes. Per D004. On the chainloader path x0
-     * holds whatever the chainloader left it as — config_parser
-     * is responsible for validating it before dereferencing. */
-    adrp    x9, _saved_dtb_ptr
-    add     x9, x9, :lo12:_saved_dtb_ptr
-    str     x0, [x9]
-
-    /* Only let core 0 proceed, park other cores */
-    mrs     x0, mpidr_el1
-    and     x0, x0, #3
-    cbnz    x0, .Lpark
 
     /* Drop from EL2 to EL1 if needed (Pi 4 boots at EL2) */
     mrs     x0, CurrentEL

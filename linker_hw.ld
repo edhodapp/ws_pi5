@@ -39,6 +39,13 @@ SECTIONS
         __mmu_l2_table = .;
         . += 4096;
 
+        /* The BSS-zero loop in boot.S writes 8 bytes per iteration and
+         * exits with `cmp; b.ge __bss_end` — so __bss_end MUST be on
+         * an 8-byte boundary, otherwise the loop spills 1-7 bytes past
+         * the end. Today MMU tables above already make this 4 KB-aligned,
+         * but stating the constraint locally keeps it from regressing
+         * silently if those tables ever move out of .bss. */
+        . = ALIGN(8);
         __bss_end = .;
     }
 
