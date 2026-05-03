@@ -2,16 +2,14 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* Link address controlled by Makefile via --defsym LINK_ADDR=...
-     *   - Default 0x200000: paired with the UART chainloader, which
-     *     writes HEX records directly there and jumps. Inner-loop dev
-     *     path; works on every Pi. (Direct chainloader writes to
-     *     0x80000 are corrupted by firmware DMA — see attempt 16 in
-     *     debug_log_0x80000.md; staging is overkill for a dev tool.)
-     *   - 0x80000 (`make ... SHIP=1`): firmware default kernel address,
-     *     used by the SD-direct ship path (scripts/mk_sd.sh). End
-     *     users plug in an SD card and the firmware lands the kernel
-     *     where linker_hw.ld targets. */
+    /* Link address comes from the Makefile via --defsym LINK_ADDR=...
+     * Default 0x80000 — the BCM2711 firmware's default kernel load
+     * address, and also the address the UART chainloader writes the
+     * received HEX records to and jumps to. One value for both paths;
+     * dev iteration via UART exercises the exact bytes that ship to
+     * end users. Earlier two-address regime (0x200000 chainload vs
+     * 0x80000 ship) lost its rationale once the cache invalidation
+     * order/way-bit bug was fixed (991b84c). */
     . = LINK_ADDR;
 
     .text : {

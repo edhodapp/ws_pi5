@@ -64,8 +64,9 @@ CHAINLOAD=0
 # --chainload is dev-only: builds + ships chainload/chainload.img as
 # kernel8.img and adds kernel_address=0x4000000 to config.txt, so the
 # Pi boots into the UART chainloader and waits for hw_send.py to push
-# a kernel built at LINK_ADDR=0x200000. Implies --testrig and --image
-# (chainloader SDs are only meaningful as flashable images for the rig).
+# a kernel built at LINK_ADDR=0x80000 (same as SD-direct). Implies
+# --testrig and --image (chainloader SDs are only meaningful as
+# flashable images for the rig).
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --image)     MODE="image"; shift ;;
@@ -88,7 +89,7 @@ usage:
   kernel8.img on the SD bundle along with kernel_address=0x4000000
   in config.txt and the testrig network.conf. The Pi will boot into
   the chainloader and wait for hw_send.py to push a kernel built
-  with the default 'make PLATFORM=pi4' (LINK_ADDR=0x200000).
+  with the default 'make PLATFORM=pi4' (LINK_ADDR=0x80000).
 USAGE
         exit 2
     fi
@@ -150,11 +151,10 @@ if [[ "$MODE" == "build" ]]; then
     CONTENT_MAX=$(( (SITE_BYTES + SLACK + SLACK_1MB - 1) / SLACK_1MB * SLACK_1MB ))
 
     echo "mk_sd: site is $SITE_BYTES B; building kernel with CONTENT_MAX=$CONTENT_MAX B"
-    # SHIP=1 → kernel linked at 0x80000 to match firmware default
-    # (no kernel_address= override needed in config.txt). The chainloader
-    # path uses LINK_ADDR=0x200000 by default; SD-direct ship images
-    # always need 0x80000.
-    ( cd "$PROJECT_DIR" && make clean >/dev/null && make PLATFORM=pi4 SHIP=1 CONTENT_MAX="$CONTENT_MAX" >/dev/null )
+    # Kernel links at 0x80000 unconditionally — same address the
+    # firmware's default kernel load uses, and the same address the
+    # chainloader jumps to. No SHIP / CHAINLOAD knob to remember.
+    ( cd "$PROJECT_DIR" && make clean >/dev/null && make PLATFORM=pi4 CONTENT_MAX="$CONTENT_MAX" >/dev/null )
 
     APPLIANCE_TMP=$(mktemp -u --suffix=.img)
     python3 "$PROJECT_DIR/scripts/mk_appliance.py" \

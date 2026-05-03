@@ -16,18 +16,13 @@ PLATFORM_ASFLAGS =
 ifeq ($(PLATFORM),pi4)
   PLATFORM_ASFLAGS = --defsym PLATFORM_PI4=1
   LINKER_SCRIPT = linker_hw.ld
-  # Kernel link address — controls where literal-pool absolute
-  # addresses resolve. Two regimes (see linker_hw.ld and
-  # debug_log_0x80000.md):
-  #   * Default 0x200000 — pairs with the UART chainloader (writes
-  #     records directly to 0x200000 and jumps). Inner-loop dev path.
-  #   * `make ... SHIP=1` → 0x80000 — pairs with SD-direct firmware
-  #     boot (mk_sd.sh's bundle). End-user ship path.
-  ifeq ($(SHIP),1)
-    LINK_ADDR ?= 0x80000
-  else
-    LINK_ADDR ?= 0x200000
-  endif
+  # Kernel link address — single value for both paths (SD-direct boot
+  # and UART chainloader). 0x80000 is the BCM2711 firmware's default
+  # kernel load address, and the chainloader (chainload/boot.S) jumps
+  # there too, so the same kernel binary serves both. One link address
+  # means dev iteration via UART exercises the exact bytes that ship
+  # to end users — no link-address asymmetry, no per-path retest.
+  LINK_ADDR ?= 0x80000
   LDFLAGS_EXTRA = --defsym LINK_ADDR=$(LINK_ADDR)
 else
   LINKER_SCRIPT = linker.ld
@@ -221,7 +216,7 @@ kernel8.img: $(BUILD)/kernel8.elf
 # ---------------------------------------------------------------------------
 pi4-test:
 	$(MAKE) clean
-	$(MAKE) PLATFORM=pi4 SHIP=1 CONTENT_MAX=65536 MAX_ROUTES=8
+	$(MAKE) PLATFORM=pi4 CONTENT_MAX=65536 MAX_ROUTES=8
 
 # ---------------------------------------------------------------------------
 # verify-fsa-table — cross-check tests/func/http_output_fsa_vectors.tsv

@@ -9,24 +9,31 @@
  * of the time, so caching adds complexity for no benefit.
  *
  * Receives a kernel image in Intel HEX format over UART0 (GPIO 14/15)
- * with per-line checksums and ACK/NAK flow control, then jumps to 0x200000.
+ * with per-line checksums and ACK/NAK flow control, then jumps to 0x80000.
  * Uses CTS/RTS hardware flow control (GPIO 16/17).
  *
  * Protocol:
  *   1. Chainloader prints "READY\r\n" when initialized
  *   2. Host sends Intel HEX records (ASCII, \r\n terminated)
  *   3. Chainloader sends 2-byte ACK (line_len + checksum) or NAK (len + cksum^0xFF)
- *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x200000
+ *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x80000
  *   5. Host resets Pi via DTR (GLOBAL_EN) when needed
  *
- * Pairs with kernels built at LINK_ADDR=0x200000 (the dev/chainloader
- * default). The SD-direct ship path uses LINK_ADDR=0x80000 and bypasses
- * the chainloader entirely — see scripts/mk_sd.sh + debug_log_0x80000.md.
+ * Pairs with kernels built at LINK_ADDR=0x80000 — the same address the
+ * SD-direct ship path uses (firmware default kernel address). One link
+ * address for all paths: dev iteration through the chainloader exercises
+ * the exact bytes that ship to end users, no link-address asymmetry. The
+ * earlier 0x200000 link address (and the fb37a83 stage-and-jump attempt)
+ * lost the unification because the chainloader's `dc isw` ran AFTER BSS
+ * zero with the wrong way bit, leaving stale L1D lines that shadowed the
+ * fresh writes — fixed in 991b84c (reorder + per-platform way bits).
  */
 
 /* Pi 4 UART0 (PL011) — firmware configures GPIO 14/15 via enable_uart=1 */
 .equ CL_UART_BASE,    0xFE201000
-.equ CL_KERNEL_ADDR,  0x200000    /* HEX target + jump address */
+.equ CL_KERNEL_ADDR,  0x80000     /* HEX target + jump address; matches
+                                     SD-direct firmware default + the
+                                     kernel's LINK_ADDR. */
 
 /* PL011 register offsets */
 .equ PL011_DR,         0x000
@@ -184,7 +191,7 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
-    /* Jump to kernel (loaded directly at 0x200000, no staging needed) */
+    /* Jump to kernel (loaded directly at 0x80000, no staging needed) */
     mov     x0, #CL_KERNEL_ADDR
     br      x0
 

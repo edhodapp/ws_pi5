@@ -395,7 +395,7 @@ def main():
 
     kernel_path = sys.argv[1]
     port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
-    base_addr = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x200000
+    base_addr = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x80000
 
     # Always clear stale hw_send processes before touching the port.
     kill_stale_hw_send()
