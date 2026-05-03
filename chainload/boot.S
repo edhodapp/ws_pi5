@@ -65,6 +65,26 @@
 .global _start
 
 _start:
+    /* Diagnostic: print 'A' raw to PL011 the very first thing, before
+     * even the parking check or relocate. The PL011 was configured by
+     * firmware (enable_uart=1 in config.txt), so writing PL011_DR
+     * directly works without any setup. Three breadcrumbs in this
+     * stub bracket the boot:
+     *   'A' = entry — chainload.img reached _start at 0x80000
+     *   'B' = relocate copy loop done, about to ic iallu + br
+     *   'C' = inside the relocated copy at 0x4000000+offset
+     * After 'C' the code falls into the existing chainloader body
+     * which prints "READY\r\n" once UART is re-initialized. If we see
+     * no characters, firmware isn't placing chainload.img at 0x80000
+     * (or 0x80000 is otherwise being clobbered before we run). */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'A'
+1:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    1b
+    str     w10, [x9]
+
     /* Park cores 1-3 immediately, while we're still at 0x80000.
      * Doing this before the self-relocate avoids a four-way race on
      * 0x4000000 during the copy and a four-way UART contention on
@@ -101,6 +121,15 @@ _start:
     subs    x2, x2, #16
     b.gt    .Lreloc_loop
 
+    /* Breadcrumb 'B': copy done, about to ic iallu + br into the copy. */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'B'
+2:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    2b
+    str     w10, [x9]
+
     /* I-cache hygiene before branching into the copied bytes. With
      * MMU off the stp went straight to RAM (Device-nGnRnE), so no
      * dc cvau is needed; but I-cache could have stale lines for the
@@ -122,6 +151,16 @@ _start:
     br      x0
 
 .Lpost_reloc:
+    /* Breadcrumb 'C': we're now executing in the relocated copy at
+     * 0x4000000+offset. From here on, literal-pool refs resolve correctly. */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'C'
+3:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    3b
+    str     w10, [x9]
+
 
     /* EL2 → EL1 drop (Pi 4 boots at EL2) */
     mrs     x0, CurrentEL
