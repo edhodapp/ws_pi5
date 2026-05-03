@@ -191,6 +191,33 @@ _start:
     tst     w0, #PL011_FR_BUSY
     b.ne    .Luart_drain
 
+    /* I-cache hygiene before the jump.
+     *
+     * The chainloader wrote the kernel's bytes to 0x80000 via D-side
+     * stores. With MMU off those writes are Device-nGnRnE — they hit
+     * RAM directly, bypassing the D-cache, so no `dc cvau` is needed.
+     *
+     * BUT: any I-cache lines that exist for the 0x80000 region from
+     * an earlier boot stage (firmware splash, prior boot blob, or a
+     * previous chainloader run that the host chained twice without a
+     * power cycle) would shadow the freshly-written instructions when
+     * the CPU branches there. Cortex-A72 also speculatively prefetches
+     * along recent branch-predictor entries; without an isb, the core
+     * may fetch from a predicted target derived from the chainloader's
+     * own code at 0x4000000.
+     *
+     * The fix is the standard ARM self-modifying-code recipe minus the
+     * D-cache clean (already handled by Device-nGnRnE writes):
+     *   dsb sy   — drain prior stores and ack-pending barriers
+     *   ic iallu — invalidate the entire I-cache to PoU
+     *   dsb sy   — wait for the invalidate to complete
+     *   isb      — flush the pipeline so the next fetch comes from RAM
+     */
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+
     /* Jump to kernel (loaded directly at 0x80000, no staging needed) */
     mov     x0, #CL_KERNEL_ADDR
     br      x0
