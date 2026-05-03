@@ -1,12 +1,28 @@
 /*
  * boot.S — UART chainloader for Pi 4
  *
- * Loaded at 0x4000000 (64 MB) by GPU firmware (via config.txt kernel_address).
- * Must be above the kernel's memory footprint (~34 MB for 128 TCP connections).
+ * Boot model: the chainloader IMAGE is loaded by GPU firmware at the
+ * default kernel address 0x80000 (no kernel_address= override in
+ * config.txt). The first thing _start does is copy itself from
+ * 0x80000 to 0x4000000 (its link address) and jump into the relocated
+ * copy — see the relocate stub below for the rationale and mechanics.
  *
- * Runs WITHOUT MMU or caches. All RAM writes go directly to physical memory,
- * eliminating cache coherency issues. At 115200 baud the CPU is idle >99%
- * of the time, so caching adds complexity for no benefit.
+ * Why this dance: an earlier design loaded the chainloader directly at
+ * 0x4000000 via kernel_address=0x4000000. That worked for the chain-
+ * loader itself, but when the chainloader later wrote the kernel HEX
+ * records to 0x80000, those writes raced firmware activity (framebuffer,
+ * VC agent scratch) that was still touching 0x80000 in the background.
+ * Symptom: writes corrupted at deterministic-but-arbitrary record
+ * offsets, ACK checksum mismatch, host-side bail. SD-direct boot avoids
+ * this because firmware FINISHES its 0x80000 work before releasing the
+ * ARM cores. Loading the chainloader at 0x80000 imports the same
+ * quiescence guarantee: by the time we're running, firmware has handed
+ * off and stopped touching 0x80000 — exactly what we need so the
+ * chainloader can write the kernel there cleanly.
+ *
+ * Runs WITHOUT MMU or caches. All RAM writes go directly to physical
+ * memory, eliminating D-cache coherency issues. At 115200 baud the CPU
+ * is idle >99% of the time, so caching adds complexity for no benefit.
  *
  * Receives a kernel image in Intel HEX format over UART0 (GPIO 14/15)
  * with per-line checksums and ACK/NAK flow control, then jumps to 0x80000.
@@ -19,14 +35,9 @@
  *   4. On EOF record: ACK, print "BOOT:NNNN\r\n", jump to 0x80000
  *   5. Host resets Pi via DTR (GLOBAL_EN) when needed
  *
- * Pairs with kernels built at LINK_ADDR=0x80000 — the same address the
- * SD-direct ship path uses (firmware default kernel address). One link
- * address for all paths: dev iteration through the chainloader exercises
- * the exact bytes that ship to end users, no link-address asymmetry. The
- * earlier 0x200000 link address (and the fb37a83 stage-and-jump attempt)
- * lost the unification because the chainloader's `dc isw` ran AFTER BSS
- * zero with the wrong way bit, leaving stale L1D lines that shadowed the
- * fresh writes — fixed in 991b84c (reorder + per-platform way bits).
+ * Kernel link address (LINK_ADDR=0x80000) matches both the chainloader's
+ * jump target and the SD-direct firmware default — one binary, one
+ * address, no per-path asymmetry.
  */
 
 /* Pi 4 UART0 (PL011) — firmware configures GPIO 14/15 via enable_uart=1 */
@@ -54,10 +65,63 @@
 .global _start
 
 _start:
-    /* Park cores 1-3 */
+    /* Park cores 1-3 immediately, while we're still at 0x80000.
+     * Doing this before the self-relocate avoids a four-way race on
+     * 0x4000000 during the copy and a four-way UART contention on
+     * the "READY" message later. Cores 1-3 wfe forever in the live
+     * copy at 0x80000 — they don't follow us to 0x4000000. */
     mrs     x0, mpidr_el1
     and     x0, x0, #3
     cbnz    x0, .Lpark
+
+    /* === Self-relocate from 0x80000 (firmware load addr) to 0x4000000
+     * (link addr) ===
+     *
+     * The chainloader is linked at 0x4000000 so its literal-pool
+     * absolute references resolve there. Firmware loaded the IMAGE at
+     * 0x80000 (default kernel address), so we currently execute at
+     * 0x80000 with the live binary at 0x80000+offset. Copy the loaded
+     * image to 0x4000000, then branch into the copy and continue.
+     *
+     * Why use literal-pool reads in the stub when we haven't relocated
+     * yet: PC-relative ldr `=sym` reads from the literal pool, and the
+     * literal pool is part of the .text image — so it's at 0x80000+pool
+     * in the LIVE copy. The VALUES it returns are linked addresses
+     * (0x4000000, _chainload_size) — what we need for the copy.
+     *
+     * After the copy we read .Lpost_reloc's linked address and br to
+     * it; that lands us at 0x4000000+offset, where every subsequent
+     * literal-pool reference is correct. */
+    adr     x0, _start                /* source base = current PC = 0x80000 */
+    ldr     x1, =_chainload_dest       /* dest base = 0x4000000 */
+    ldr     x2, =_chainload_size       /* size in bytes (16-aligned) */
+.Lreloc_loop:
+    ldp     x3, x4, [x0], #16
+    stp     x3, x4, [x1], #16
+    subs    x2, x2, #16
+    b.gt    .Lreloc_loop
+
+    /* I-cache hygiene before branching into the copied bytes. With
+     * MMU off the stp went straight to RAM (Device-nGnRnE), so no
+     * dc cvau is needed; but I-cache could have stale lines for the
+     * 0x4000000 region from any prior boot stage, and Cortex-A72
+     * speculatively prefetches. Standard self-modifying-code recipe:
+     *   dsb sy   — drain prior stores
+     *   ic iallu — invalidate I-cache to PoU
+     *   dsb sy   — wait for invalidate
+     *   isb      — pipeline flush so next fetch is from RAM */
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+
+    /* Branch into the relocated copy. From here on, literal-pool
+     * absolute references resolve correctly because we're running at
+     * 0x4000000+offset, where the linker placed everything. */
+    ldr     x0, =.Lpost_reloc
+    br      x0
+
+.Lpost_reloc:
 
     /* EL2 → EL1 drop (Pi 4 boots at EL2) */
     mrs     x0, CurrentEL

@@ -62,11 +62,11 @@ CHAINLOAD=0
 # (10.0.0.2 / 10.0.0.1 / wspi5) so dev iteration doesn't have to
 # hand-edit the file every time. Release users never pass it.
 # --chainload is dev-only: builds + ships chainload/chainload.img as
-# kernel8.img and adds kernel_address=0x4000000 to config.txt, so the
-# Pi boots into the UART chainloader and waits for hw_send.py to push
-# a kernel built at LINK_ADDR=0x80000 (same as SD-direct). Implies
-# --testrig and --image (chainloader SDs are only meaningful as
-# flashable images for the rig).
+# kernel8.img on the SD bundle. The chainloader is loaded by firmware
+# at 0x80000 (default kernel address), self-relocates to 0x4000000 at
+# startup, then receives a kernel via UART and writes it to 0x80000.
+# Implies --testrig and --image (chainloader SDs are only meaningful
+# as flashable images for the rig).
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --image)     MODE="image"; shift ;;
@@ -86,10 +86,12 @@ usage:
   $(basename "$0") --chainload <output_image.img>
 
   Builds chainload/chainload.img if missing, then ships it as the
-  kernel8.img on the SD bundle along with kernel_address=0x4000000
-  in config.txt and the testrig network.conf. The Pi will boot into
-  the chainloader and wait for hw_send.py to push a kernel built
-  with the default 'make PLATFORM=pi4' (LINK_ADDR=0x80000).
+  kernel8.img on the SD bundle along with the testrig network.conf.
+  The Pi will boot into the chainloader (loaded at 0x80000 by firmware,
+  same as a regular kernel) and wait for hw_send.py to push a kernel
+  built with the default 'make PLATFORM=pi4' (LINK_ADDR=0x80000). The
+  chainloader self-relocates to 0x4000000 at startup, then writes the
+  pushed kernel back to 0x80000 — no kernel_address= override needed.
 USAGE
         exit 2
     fi
@@ -291,14 +293,11 @@ dtoverlay=disable-bt
 initramfs network.conf $INITRAMFS_ADDR
 EOF
 
-# --chainload: append kernel_address=0x4000000 so firmware lands
-# chainload.img at the address its linker script targets (chainload.ld
-# sets `. = 0x4000000`). Without this the firmware lands kernel8.img
-# at the default 0x80000 and the chainloader's literal-pool addresses
-# resolve wrong — leading to silent wedge or cache-coherency garbage.
-if (( CHAINLOAD == 1 )); then
-    echo "kernel_address=0x4000000" >> "$BUNDLE_DIR/config.txt"
-fi
+# --chainload: no kernel_address= override needed any more. The
+# chainloader is built to be loaded at 0x80000 (firmware default) and
+# self-relocates to 0x4000000 — see chainload/boot.S file header for
+# the rationale. Firmware quiescence at 0x80000 by handoff time is the
+# whole point.
 
 # Default network.conf — placeholder values that pass the linter
 # (D003 syntax) but won't bring up the network on most home LANs
