@@ -957,3 +957,560 @@ PERF_STATS: n=512 recv_count=513 recv_none=8508 dispatch_count=0 drop_count=0 se
 PERF_STATS: n=1024 recv_count=1025 recv_none=8853 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1920 dispatch_ns=0 send_ns=0
 
 --- BASELINE_RESET PERF=recv 2026-04-29T17:22:31Z perf_check now gates on Pi-side counters (recv_ns/dispatch_ns/send_ns) instead of laptop-observed wire_pps; pre-baseline-reset history is not comparable to the new gate's metric scope ---
+
+--- 7a465a0 2026-04-29T17:56:14Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.11 p99=0.21 max=0.21 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=45.0 wire_pps=16129 total_ms=45.1
+PERF_STATS: n=1 recv_count=2 recv_none=7826 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1028 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=42.3 wire_pps=173611 total_ms=43.8
+PERF_STATS: n=50 recv_count=51 recv_none=6760 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1897 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=47.3 wire_pps=238318 total_ms=52.0
+PERF_STATS: n=255 recv_count=256 recv_none=8234 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2011 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=56.3 wire_pps=216582 total_ms=62.2
+PERF_STATS: n=256 recv_count=257 recv_none=8029 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2054 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=52.6 wire_pps=215966 total_ms=58.2
+PERF_STATS: n=257 recv_count=258 recv_none=8433 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2035 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=43.4 wire_pps=101026 total_ms=52.2
+PERF_STATS: n=512 recv_count=513 recv_none=7291 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1872 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=41.3 wire_pps=253717 total_ms=71.7
+PERF_STATS: n=1024 recv_count=1025 recv_none=8359 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2070 dispatch_ns=0 send_ns=0
+
+--- 7a465a0 2026-04-29T17:57:31Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=99 send_ns=0
+
+--- 7a465a0 2026-04-29T17:58:58Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.18 max=0.24 ms (n=100)
+
+--- 7a465a0 2026-04-29T18:00:19Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=290
+
+--- 03e81f5 2026-04-29T22:29:54Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.20 max=0.22 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=47.2 wire_pps=18868 total_ms=47.3
+PERF_STATS: n=1 recv_count=2 recv_none=8226 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1028 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=42.1 wire_pps=318471 total_ms=43.1
+PERF_STATS: n=50 recv_count=51 recv_none=8492 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1982 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=50.2 wire_pps=202381 total_ms=53.7
+PERF_STATS: n=255 recv_count=256 recv_none=7156 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2005 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=39.6 wire_pps=504931 total_ms=42.9
+PERF_STATS: n=256 recv_count=257 recv_none=7052 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2066 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=53.0 wire_pps=488593 total_ms=55.8
+PERF_STATS: n=257 recv_count=258 recv_none=8711 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2065 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=45.2 wire_pps=262564 total_ms=54.8
+PERF_STATS: n=512 recv_count=513 recv_none=9004 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2064 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=925 send_ms=46.0 wire_pps=432615 total_ms=564.0
+PERF_STATS: n=1024 recv_count=926 recv_none=57221 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=99 recv_ns=2090 dispatch_ns=0 send_ns=0
+
+--- 03e81f5 2026-04-29T22:31:11Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=99 send_ns=0
+
+--- 03e81f5 2026-04-29T22:32:37Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.22 max=0.24 ms (n=100)
+
+--- 03e81f5 2026-04-29T22:33:57Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=307
+
+--- 03e81f5 2026-04-30T07:01:35Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.11 p99=0.64 max=0.66 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=50.8 wire_pps=23810 total_ms=50.8
+PERF_STATS: n=1 recv_count=2 recv_none=7828 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1009 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=60.8 wire_pps=393701 total_ms=61.3
+PERF_STATS: n=50 recv_count=51 recv_none=8004 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1984 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=46.8 wire_pps=502959 total_ms=49.4
+PERF_STATS: n=255 recv_count=256 recv_none=7645 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2056 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=62.1 wire_pps=279781 total_ms=64.7
+PERF_STATS: n=256 recv_count=257 recv_none=8705 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2067 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=49.4 wire_pps=474170 total_ms=52.1
+PERF_STATS: n=257 recv_count=258 recv_none=7371 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2078 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=46.9 wire_pps=474074 total_ms=52.3
+PERF_STATS: n=512 recv_count=513 recv_none=7590 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2083 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=60.8 wire_pps=266736 total_ms=71.2
+PERF_STATS: n=1024 recv_count=1025 recv_none=8667 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2083 dispatch_ns=0 send_ns=0
+
+--- 03e81f5 2026-04-30T07:01:53Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.19 max=0.21 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=57.9 wire_pps=22222 total_ms=58.0
+PERF_STATS: n=1 recv_count=2 recv_none=8294 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=1056 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=49.7 wire_pps=342466 total_ms=50.2
+PERF_STATS: n=50 recv_count=51 recv_none=7805 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2036 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=62.8 wire_pps=280528 total_ms=65.4
+PERF_STATS: n=255 recv_count=256 recv_none=8317 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2052 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=49.0 wire_pps=277657 total_ms=51.6
+PERF_STATS: n=256 recv_count=257 recv_none=7199 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2053 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=42.9 wire_pps=440823 total_ms=47.4
+PERF_STATS: n=257 recv_count=258 recv_none=7398 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2066 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=56.1 wire_pps=481656 total_ms=62.5
+PERF_STATS: n=512 recv_count=513 recv_none=7780 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2076 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=55.0 wire_pps=129228 total_ms=65.7
+PERF_STATS: n=1024 recv_count=1025 recv_none=8540 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=1921 dispatch_ns=0 send_ns=0
+
+--- 03e81f5 2026-04-30T07:02:11Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.15 max=0.21 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=58.7 wire_pps=25000 total_ms=58.8
+PERF_STATS: n=1 recv_count=2 recv_none=9151 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=1065 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=51.8 wire_pps=250000 total_ms=52.3
+PERF_STATS: n=50 recv_count=51 recv_none=8785 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=1986 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=58.8 wire_pps=227475 total_ms=61.3
+PERF_STATS: n=255 recv_count=256 recv_none=9010 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2048 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=51.0 wire_pps=409600 total_ms=53.7
+PERF_STATS: n=256 recv_count=257 recv_none=7650 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2086 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=44.0 wire_pps=307416 total_ms=46.7
+PERF_STATS: n=257 recv_count=258 recv_none=7459 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2065 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=51.7 wire_pps=315660 total_ms=56.8
+PERF_STATS: n=512 recv_count=513 recv_none=7665 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=179 recv_ns=2076 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=861 send_ms=61.8 wire_pps=520855 total_ms=571.9
+PERF_STATS: n=1024 recv_count=862 recv_none=57808 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=342 recv_ns=2086 dispatch_ns=0 send_ns=0
+
+--- 03e81f5 2026-04-30T07:03:32Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=99 send_ns=0
+
+--- 03e81f5 2026-04-30T07:03:40Z PERF=dispatch ---
+    (pytest exit=1 — test failed; stats below are from the failed run)
+
+--- 03e81f5 2026-04-30T07:03:42Z PERF=dispatch ---
+hw_test/test_dispatch_perf.py .BURST_STATS: n=255 replies=261 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=261 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=98 send_ns=0
+
+--- 03e81f5 2026-04-30T07:05:11Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.18 max=0.64 ms (n=100)
+
+--- 03e81f5 2026-04-30T07:05:24Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.08 median=0.09 p99=0.18 max=0.18 ms (n=100)
+
+--- 03e81f5 2026-04-30T07:05:38Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.18 max=0.19 ms (n=100)
+
+--- 03e81f5 2026-04-30T07:07:02Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=327
+
+--- 03e81f5 2026-04-30T07:07:10Z PERF=send ---
+    (pytest exit=1 — test failed; stats below are from the failed run)
+
+--- 03e81f5 2026-04-30T07:07:15Z PERF=send ---
+hw_test/test_l4_perf.py .BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=327
+
+--- ab54ac1 2026-04-30T09:54:15Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.10 p99=0.19 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=49.8 wire_pps=20833 total_ms=49.8
+PERF_STATS: n=1 recv_count=2 recv_none=7543 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1028 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=33.2 wire_pps=273224 total_ms=33.9
+PERF_STATS: n=50 recv_count=51 recv_none=6294 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1998 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=60.2 wire_pps=180979 total_ms=63.5
+PERF_STATS: n=255 recv_count=256 recv_none=7994 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1977 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=61.2 wire_pps=444444 total_ms=65.0
+PERF_STATS: n=256 recv_count=257 recv_none=8845 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2073 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=60.6 wire_pps=426202 total_ms=63.4
+PERF_STATS: n=257 recv_count=258 recv_none=8802 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2083 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=57.2 wire_pps=380669 total_ms=62.8
+PERF_STATS: n=512 recv_count=513 recv_none=8247 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2055 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=53.5 wire_pps=351769 total_ms=64.5
+PERF_STATS: n=1024 recv_count=1025 recv_none=8249 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2084 dispatch_ns=0 send_ns=0
+
+--- ab54ac1 2026-04-30T09:55:33Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=98 send_ns=0
+
+--- ab54ac1 2026-04-30T09:57:00Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.22 max=0.23 ms (n=100)
+
+--- ab54ac1 2026-04-30T09:58:21Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=311
+
+--- 0aec4cd 2026-04-30T17:28:10Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.10 p99=0.18 max=0.22 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=52.5 wire_pps=14706 total_ms=52.5
+PERF_STATS: n=1 recv_count=2 recv_none=7561 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1028 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=44.1 wire_pps=264550 total_ms=44.7
+PERF_STATS: n=50 recv_count=51 recv_none=7172 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1951 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=41.9 wire_pps=420792 total_ms=44.6
+PERF_STATS: n=255 recv_count=256 recv_none=7161 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2062 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=51.1 wire_pps=314110 total_ms=53.6
+PERF_STATS: n=256 recv_count=257 recv_none=8341 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2073 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=47.8 wire_pps=426910 total_ms=50.5
+PERF_STATS: n=257 recv_count=258 recv_none=8408 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2085 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=55.7 wire_pps=491835 total_ms=61.0
+PERF_STATS: n=512 recv_count=513 recv_none=8553 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2093 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=837 send_ms=44.9 wire_pps=481203 total_ms=556.3
+PERF_STATS: n=1024 recv_count=838 recv_none=56335 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=187 recv_ns=2102 dispatch_ns=0 send_ns=0
+
+--- 0aec4cd 2026-04-30T17:29:28Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=101 send_ns=0
+
+--- 0aec4cd 2026-04-30T17:30:54Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.11 p99=0.21 max=0.27 ms (n=100)
+
+--- 0aec4cd 2026-04-30T17:32:15Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=347
+
+--- 2d4043a 2026-04-30T23:09:29Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.19 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=46.8 wire_pps=18868 total_ms=46.9
+PERF_STATS: n=1 recv_count=2 recv_none=6746 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1037 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=47.6 wire_pps=299401 total_ms=48.2
+PERF_STATS: n=50 recv_count=51 recv_none=8462 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2001 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=50.8 wire_pps=460289 total_ms=53.5
+PERF_STATS: n=255 recv_count=256 recv_none=7669 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2067 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=63.9 wire_pps=173677 total_ms=66.6
+PERF_STATS: n=256 recv_count=257 recv_none=8187 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1998 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=50.8 wire_pps=471560 total_ms=53.4
+PERF_STATS: n=257 recv_count=258 recv_none=7404 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2063 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=46.8 wire_pps=360310 total_ms=52.1
+PERF_STATS: n=512 recv_count=513 recv_none=7437 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2077 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=885 send_ms=62.1 wire_pps=498539 total_ms=573.1
+PERF_STATS: n=1024 recv_count=886 recv_none=58231 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=139 recv_ns=2082 dispatch_ns=0 send_ns=0
+
+--- 2d4043a 2026-04-30T23:10:50Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=95 send_ns=0
+
+--- 2d4043a 2026-04-30T23:12:19Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.11 p99=0.23 max=0.24 ms (n=100)
+
+--- 2d4043a 2026-04-30T23:13:43Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=311
+
+--- 199d490 2026-05-01T02:52:41Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.11 p99=0.18 max=0.89 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=45.8 wire_pps=19231 total_ms=45.8
+PERF_STATS: n=1 recv_count=2 recv_none=7323 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1000 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=55.2 wire_pps=263158 total_ms=55.7
+PERF_STATS: n=50 recv_count=51 recv_none=7564 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1980 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=63.8 wire_pps=430017 total_ms=66.4
+PERF_STATS: n=255 recv_count=256 recv_none=8680 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2060 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=55.9 wire_pps=458781 total_ms=58.6
+PERF_STATS: n=256 recv_count=257 recv_none=8215 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2075 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=53.1 wire_pps=305952 total_ms=55.8
+PERF_STATS: n=257 recv_count=258 recv_none=7419 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2063 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=57.1 wire_pps=464610 total_ms=62.4
+PERF_STATS: n=512 recv_count=513 recv_none=8125 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2075 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=866 send_ms=41.6 wire_pps=502947 total_ms=551.7
+PERF_STATS: n=1024 recv_count=867 recv_none=54713 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=158 recv_ns=2103 dispatch_ns=0 send_ns=0
+
+--- 199d490 2026-05-01T02:54:00Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=99 send_ns=0
+
+--- 199d490 2026-05-01T02:55:28Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.20 max=0.21 ms (n=100)
+
+--- 199d490 2026-05-01T02:56:51Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=289
+
+--- 409c92b 2026-05-01T03:46:09Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.23 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=55.9 wire_pps=20833 total_ms=55.9
+PERF_STATS: n=1 recv_count=2 recv_none=9053 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1046 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=41.9 wire_pps=344828 total_ms=42.5
+PERF_STATS: n=50 recv_count=51 recv_none=6555 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1968 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=49.7 wire_pps=116812 total_ms=52.4
+PERF_STATS: n=255 recv_count=256 recv_none=7905 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1907 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=55.1 wire_pps=227353 total_ms=57.8
+PERF_STATS: n=256 recv_count=257 recv_none=8297 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2024 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=46.1 wire_pps=426202 total_ms=48.7
+PERF_STATS: n=257 recv_count=258 recv_none=7261 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2076 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=51.1 wire_pps=423140 total_ms=58.6
+PERF_STATS: n=512 recv_count=513 recv_none=7302 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2092 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=55.0 wire_pps=100758 total_ms=75.3
+PERF_STATS: n=1024 recv_count=1025 recv_none=10358 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1875 dispatch_ns=0 send_ns=0
+
+--- 409c92b 2026-05-01T03:47:29Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=97 send_ns=0
+
+--- 409c92b 2026-05-01T03:48:57Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.12 p99=0.18 max=0.20 ms (n=100)
+
+--- 409c92b 2026-05-01T03:50:20Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=346
+
+--- 9300439 2026-05-01T04:23:25Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.20 max=0.20 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=56.4 wire_pps=13514 total_ms=56.5
+PERF_STATS: n=1 recv_count=2 recv_none=8801 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1037 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=52.0 wire_pps=310559 total_ms=53.0
+PERF_STATS: n=50 recv_count=51 recv_none=7346 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2007 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=67.9 wire_pps=299647 total_ms=71.5
+PERF_STATS: n=255 recv_count=256 recv_none=9352 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2054 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=40.7 wire_pps=421053 total_ms=43.6
+PERF_STATS: n=256 recv_count=257 recv_none=6129 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2081 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=60.1 wire_pps=517103 total_ms=62.7
+PERF_STATS: n=257 recv_count=258 recv_none=7935 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2062 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=47.6 wire_pps=255107 total_ms=52.8
+PERF_STATS: n=512 recv_count=513 recv_none=8064 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2080 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=803 send_ms=44.2 wire_pps=573027 total_ms=554.2
+PERF_STATS: n=1024 recv_count=804 recv_none=55376 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=221 recv_ns=2086 dispatch_ns=0 send_ns=0
+
+--- 9300439 2026-05-01T04:24:46Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=97 send_ns=0
+
+--- 9300439 2026-05-01T04:26:15Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.12 p99=0.22 max=0.43 ms (n=100)
+
+--- 9300439 2026-05-01T04:27:39Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=366
+
+--- 70d9e0d 2026-05-01T05:40:57Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.11 p99=0.22 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=42.2 wire_pps=14084 total_ms=42.3
+PERF_STATS: n=1 recv_count=2 recv_none=7848 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=991 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=44.1 wire_pps=253807 total_ms=44.9
+PERF_STATS: n=50 recv_count=51 recv_none=6777 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1960 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=52.6 wire_pps=173587 total_ms=58.1
+PERF_STATS: n=255 recv_count=256 recv_none=8151 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2003 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=41.3 wire_pps=91723 total_ms=45.2
+PERF_STATS: n=256 recv_count=257 recv_none=7300 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1825 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=34.2 wire_pps=431208 total_ms=37.5
+PERF_STATS: n=257 recv_count=258 recv_none=5673 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2076 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=55.0 wire_pps=410915 total_ms=62.0
+PERF_STATS: n=512 recv_count=513 recv_none=9299 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2068 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=1024 send_ms=52.2 wire_pps=200981 total_ms=75.0
+PERF_STATS: n=1024 recv_count=1025 recv_none=9129 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2051 dispatch_ns=0 send_ns=0
+
+--- 70d9e0d 2026-05-01T05:42:17Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=98 send_ns=0
+
+--- 70d9e0d 2026-05-01T05:43:45Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.18 max=0.20 ms (n=100)
+
+--- 70d9e0d 2026-05-01T05:45:10Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=332
+
+--- c2a3891 2026-05-01T06:12:28Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.19 max=0.21 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=43.9 wire_pps=20833 total_ms=43.9
+PERF_STATS: n=1 recv_count=2 recv_none=7206 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1000 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=50.5 wire_pps=239234 total_ms=51.1
+PERF_STATS: n=50 recv_count=51 recv_none=7954 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1907 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=39.8 wire_pps=460289 total_ms=42.6
+PERF_STATS: n=255 recv_count=256 recv_none=7221 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2060 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=41.9 wire_pps=389058 total_ms=44.5
+PERF_STATS: n=256 recv_count=257 recv_none=6544 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2081 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=40.5 wire_pps=407290 total_ms=45.0
+PERF_STATS: n=257 recv_count=258 recv_none=7196 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2077 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=49.1 wire_pps=447552 total_ms=54.3
+PERF_STATS: n=512 recv_count=513 recv_none=8966 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2074 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=864 send_ms=59.9 wire_pps=486461 total_ms=569.9
+PERF_STATS: n=1024 recv_count=865 recv_none=56583 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=160 recv_ns=2078 dispatch_ns=0 send_ns=0
+
+--- c2a3891 2026-05-01T06:13:49Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=96 send_ns=0
+
+--- c2a3891 2026-05-01T06:15:19Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.16 max=0.17 ms (n=100)
+
+--- c2a3891 2026-05-01T06:16:46Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=361
+
+--- c2a3891 2026-05-01T07:01:38Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.24 max=0.62 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=38.4 wire_pps=21277 total_ms=38.4
+PERF_STATS: n=1 recv_count=2 recv_none=7185 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1111 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=41.2 wire_pps=285714 total_ms=41.8
+PERF_STATS: n=50 recv_count=51 recv_none=6405 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1998 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=51.8 wire_pps=537975 total_ms=54.5
+PERF_STATS: n=255 recv_count=256 recv_none=8467 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2062 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=48.6 wire_pps=406349 total_ms=51.4
+PERF_STATS: n=256 recv_count=257 recv_none=7897 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2066 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=60.9 wire_pps=435593 total_ms=63.5
+PERF_STATS: n=257 recv_count=258 recv_none=8449 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2071 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=45.0 wire_pps=469294 total_ms=50.2
+PERF_STATS: n=512 recv_count=513 recv_none=8048 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2085 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=839 send_ms=59.7 wire_pps=546133 total_ms=569.6
+PERF_STATS: n=1024 recv_count=840 recv_none=56861 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2089 dispatch_ns=0 send_ns=0
+
+--- c2a3891 2026-05-01T07:01:56Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.22 max=0.22 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=54.9 wire_pps=19608 total_ms=54.9
+PERF_STATS: n=1 recv_count=2 recv_none=8060 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=1028 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=66.9 wire_pps=370370 total_ms=67.4
+PERF_STATS: n=50 recv_count=51 recv_none=9051 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2008 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=47.9 wire_pps=480226 total_ms=51.4
+PERF_STATS: n=255 recv_count=256 recv_none=7686 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2053 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=42.9 wire_pps=494208 total_ms=45.5
+PERF_STATS: n=256 recv_count=257 recv_none=7016 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2072 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=45.7 wire_pps=314565 total_ms=48.3
+PERF_STATS: n=257 recv_count=258 recv_none=7498 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2061 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=52.9 wire_pps=486692 total_ms=58.3
+PERF_STATS: n=512 recv_count=513 recv_none=8499 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=185 recv_ns=2082 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=879 send_ms=48.0 wire_pps=459605 total_ms=558.8
+PERF_STATS: n=1024 recv_count=880 recv_none=56259 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2092 dispatch_ns=0 send_ns=0
+
+--- c2a3891 2026-05-01T07:02:15Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.16 max=0.20 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=61.1 wire_pps=20408 total_ms=61.2
+PERF_STATS: n=1 recv_count=2 recv_none=8697 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=1065 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=47.9 wire_pps=250000 total_ms=48.5
+PERF_STATS: n=50 recv_count=51 recv_none=7466 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2031 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=60.7 wire_pps=386364 total_ms=63.4
+PERF_STATS: n=255 recv_count=256 recv_none=8645 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2064 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=68.8 wire_pps=303318 total_ms=71.5
+PERF_STATS: n=256 recv_count=257 recv_none=10067 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2091 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=44.7 wire_pps=424793 total_ms=47.4
+PERF_STATS: n=257 recv_count=258 recv_none=7216 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2075 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=51.5 wire_pps=336399 total_ms=57.0
+PERF_STATS: n=512 recv_count=513 recv_none=8242 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=330 recv_ns=2078 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=832 send_ms=60.8 wire_pps=490892 total_ms=570.8
+PERF_STATS: n=1024 recv_count=833 recv_none=56871 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=522 recv_ns=2104 dispatch_ns=0 send_ns=0
+
+--- c2a3891 2026-05-01T07:03:39Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=97 send_ns=0
+
+--- c2a3891 2026-05-01T07:03:43Z PERF=dispatch ---
+    (pytest exit=1 — test failed; stats below are from the failed run)
+hw_test/test_dispatch_perf.py EBURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=97 send_ns=0
+
+--- c2a3891 2026-05-01T07:03:50Z PERF=dispatch ---
+    (pytest exit=1 — test failed; stats below are from the failed run)
+
+--- c2a3891 2026-05-01T07:05:22Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.10 p99=0.19 max=0.22 ms (n=100)
+
+--- c2a3891 2026-05-01T07:05:35Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.14 max=0.19 ms (n=100)
+
+--- c2a3891 2026-05-01T07:05:48Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.07 median=0.08 p99=0.16 max=0.21 ms (n=100)
+
+--- c2a3891 2026-05-01T07:07:15Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=318
+
+--- c2a3891 2026-05-01T07:07:22Z PERF=send ---
+    (pytest exit=1 — test failed; stats below are from the failed run)
+
+--- c2a3891 2026-05-01T07:07:28Z PERF=send ---
+hw_test/test_l4_perf.py .BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=317
+
+--- ff8fc59 2026-05-01T18:25:17Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.63 max=0.65 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=63.1 wire_pps=12987 total_ms=63.2
+PERF_STATS: n=1 recv_count=2 recv_none=9315 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=991 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=51.9 wire_pps=316456 total_ms=52.5
+PERF_STATS: n=50 recv_count=51 recv_none=7854 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1954 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=42.8 wire_pps=476636 total_ms=45.8
+PERF_STATS: n=255 recv_count=256 recv_none=6724 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2067 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=48.7 wire_pps=331606 total_ms=51.4
+PERF_STATS: n=256 recv_count=257 recv_none=8208 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2072 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=39.4 wire_pps=505906 total_ms=42.3
+PERF_STATS: n=257 recv_count=258 recv_none=7640 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2066 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=51.0 wire_pps=515609 total_ms=56.5
+PERF_STATS: n=512 recv_count=513 recv_none=7435 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2080 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=932 send_ms=45.8 wire_pps=435004 total_ms=557.0
+PERF_STATS: n=1024 recv_count=933 recv_none=56137 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=92 recv_ns=2090 dispatch_ns=0 send_ns=0
+
+--- ff8fc59 2026-05-01T18:26:38Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=96 send_ns=0
+
+--- ff8fc59 2026-05-01T18:28:08Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.22 max=0.68 ms (n=100)
+
+--- ff8fc59 2026-05-01T18:29:33Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=389
+
+--- 70fd975 2026-05-01T20:15:22Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.20 max=0.22 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=56.6 wire_pps=21277 total_ms=56.7
+PERF_STATS: n=1 recv_count=2 recv_none=10490 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=991 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=44.1 wire_pps=147059 total_ms=44.6
+PERF_STATS: n=50 recv_count=51 recv_none=6892 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1931 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=58.9 wire_pps=405405 total_ms=61.4
+PERF_STATS: n=255 recv_count=256 recv_none=8234 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2052 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=41.8 wire_pps=482109 total_ms=44.4
+PERF_STATS: n=256 recv_count=257 recv_none=7180 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2062 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=46.9 wire_pps=504912 total_ms=49.5
+PERF_STATS: n=257 recv_count=258 recv_none=7580 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2049 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=48.8 wire_pps=464610 total_ms=54.0
+PERF_STATS: n=512 recv_count=513 recv_none=9240 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2067 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=858 send_ms=62.0 wire_pps=565433 total_ms=572.8
+PERF_STATS: n=1024 recv_count=859 recv_none=56342 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=166 recv_ns=2083 dispatch_ns=0 send_ns=0
+
+--- 70fd975 2026-05-01T20:16:45Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=100 send_ns=0
+
+--- 70fd975 2026-05-01T20:18:16Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.21 max=0.25 ms (n=100)
+
+--- 70fd975 2026-05-01T20:19:42Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=308
+
+--- d799dfa 2026-05-04T04:09:03Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.11 p99=0.22 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=40.9 wire_pps=21739 total_ms=41.0
+PERF_STATS: n=1 recv_count=2 recv_none=5840 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1009 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=41.2 wire_pps=190840 total_ms=41.8
+PERF_STATS: n=50 recv_count=51 recv_none=5817 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1958 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=56.3 wire_pps=337748 total_ms=59.4
+PERF_STATS: n=255 recv_count=256 recv_none=8253 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2065 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=53.8 wire_pps=126046 total_ms=57.2
+PERF_STATS: n=256 recv_count=257 recv_none=9007 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1928 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=45.9 wire_pps=452465 total_ms=49.6
+PERF_STATS: n=257 recv_count=258 recv_none=6806 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2077 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=50.3 wire_pps=200470 total_ms=56.7
+PERF_STATS: n=512 recv_count=513 recv_none=7648 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2037 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=837 send_ms=49.2 wire_pps=507936 total_ms=561.0
+PERF_STATS: n=1024 recv_count=838 recv_none=55481 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=187 recv_ns=2092 dispatch_ns=0 send_ns=0
+
+--- d799dfa 2026-05-04T04:10:27Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=98 send_ns=0
+
+--- d799dfa 2026-05-04T04:11:59Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.18 max=0.19 ms (n=100)
+
+--- d799dfa 2026-05-04T04:13:26Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=287
+
+--- d799dfa 2026-05-04T18:04:46Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.20 max=0.25 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=37.0 wire_pps=23256 total_ms=37.0
+PERF_STATS: n=1 recv_count=2 recv_none=6124 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1019 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=42.7 wire_pps=352113 total_ms=43.3
+PERF_STATS: n=50 recv_count=51 recv_none=6679 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1947 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=42.0 wire_pps=461121 total_ms=44.6
+PERF_STATS: n=255 recv_count=256 recv_none=6227 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2054 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=47.8 wire_pps=457143 total_ms=50.4
+PERF_STATS: n=256 recv_count=257 recv_none=7480 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2074 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=38.7 wire_pps=535417 total_ms=41.4
+PERF_STATS: n=257 recv_count=258 recv_none=6235 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2083 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=54.2 wire_pps=466727 total_ms=59.8
+PERF_STATS: n=512 recv_count=513 recv_none=8558 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2070 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=882 send_ms=58.1 wire_pps=501469 total_ms=571.0
+PERF_STATS: n=1024 recv_count=883 recv_none=57512 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=142 recv_ns=2094 dispatch_ns=0 send_ns=0
+
+--- d799dfa 2026-05-04T18:06:09Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=103 send_ns=0
+
+--- d799dfa 2026-05-04T18:07:43Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.09 p99=0.22 max=0.24 ms (n=100)
+
+--- d799dfa 2026-05-04T18:09:13Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=308

@@ -3,8 +3,32 @@
 .global _start
 
 _start:
+    /* Stash firmware-passed DTB pointer (in x0) into a callee-saved
+     * register so we can park non-zero cores first without losing it.
+     * mpidr_el1 read clobbers x0 next. x19 is callee-saved by AAPCS;
+     * nothing between here and the store-to-.data below touches it. */
+    mov     x19, x0
+
+    /* Only let core 0 proceed; park cores 1-3. Everything below is
+     * single-threaded — including the DTB save and the early '0'
+     * UART breadcrumb, which used to fire on all four cores and
+     * race over both the global _saved_dtb_ptr (D004) and the UART
+     * FIFO. Same value being written four times made the race silent
+     * on the DTB side, but the four '0' chars were visible. */
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
+    cbnz    x0, .Lpark
+
+    /* Commit DTB pointer to .data. config_parser reads it after boot
+     * setup completes — see D004. On the chainloader path x0 holds
+     * whatever the chainloader left it as; config_parser is responsible
+     * for validating it before dereferencing. */
+    adrp    x9, _saved_dtb_ptr
+    add     x9, x9, :lo12:_saved_dtb_ptr
+    str     x19, [x9]
+
 .ifdef PLATFORM_PI4
-    /* Debug: print '0' — UART already configured by firmware/chainloader */
+    /* Debug: print '0' — UART already configured by firmware/chainloader. */
     movz    x9, #0xFE20, lsl #16
     movk    x9, #0x1000
     mov     w10, #'0'
@@ -13,22 +37,6 @@ _start:
     b.ne    7b
     str     w10, [x9]
 .endif
-
-    /* Save firmware-passed DTB pointer (x0) before any code that
-     * clobbers it (the next instruction reads mpidr_el1 into x0).
-     * Stored in .data (loaded with the kernel image, not zeroed by
-     * the BSS loop below) so config_parser can read it after
-     * boot setup completes. Per D004. On the chainloader path x0
-     * holds whatever the chainloader left it as — config_parser
-     * is responsible for validating it before dereferencing. */
-    adrp    x9, _saved_dtb_ptr
-    add     x9, x9, :lo12:_saved_dtb_ptr
-    str     x0, [x9]
-
-    /* Only let core 0 proceed, park other cores */
-    mrs     x0, mpidr_el1
-    and     x0, x0, #3
-    cbnz    x0, .Lpark
 
     /* Drop from EL2 to EL1 if needed (Pi 4 boots at EL2) */
     mrs     x0, CurrentEL
@@ -80,7 +88,79 @@ _start:
     str     w10, [x9]
 .endif
 
-    /* Zero BSS */
+    /* --- Force MMU + caches OFF, invalidate, *before* BSS zero ---
+     *
+     * Why: a previous boot stage (firmware, chainloader) may have left
+     * SCTLR_EL1.{M,C,I} set with dirty/valid lines in the D-cache that
+     * happen to alias the kernel's BSS or MMU-table physical addresses.
+     * If we leave those lines in place, our subsequent uncached writes
+     * (BSS zero, page table fill — done with MMU off, so writes go
+     * straight to RAM as Device-nGnRnE) leave the cache holding stale
+     * shadow values. When SCTLR_EL1.M flips later, the page table
+     * walker and the kernel can both observe the stale cache values
+     * instead of the RAM values we just wrote. The kernel hangs after
+     * the early breadcrumbs but before any visible kernel output —
+     * exactly the failure mode of fb37a83 (chainloader stage-and-jump
+     * to 0x80000).
+     *
+     * `dc isw` (invalidate, not clean+invalidate): we want to discard
+     * the chainloader's leftover lines, NOT write them back over our
+     * fresh RAM contents. Way-bit position is associativity-dependent:
+     *   Cortex-A72 (Pi 4):  L1D 2-way, way bit at [31].
+     *   Cortex-A53 (Pi 3):  L1D 4-way, way bits at [31:30].
+     * The historical code used (1 << 30) for both, which on A72 silently
+     * invalidated way 0 twice and missed way 1 entirely — leaving half
+     * of L1D un-invalidated, and exactly the failure mode above. */
+    mrs     x0, SCTLR_EL1
+    bic     x0, x0, #(1 << 0)             /* M: MMU */
+    bic     x0, x0, #(1 << 2)             /* C: D-cache */
+    bic     x0, x0, #(1 << 12)            /* I: I-cache */
+    msr     SCTLR_EL1, x0
+    isb
+
+    /* I-cache + branch predictor — invalidate to PoU. */
+    ic      iallu
+    dsb     ish
+    isb
+
+.ifdef PLATFORM_PI4
+    /* Cortex-A72 L1D: 32 KB, 2-way, 64 B line → 256 sets.
+     * SetWay register: way at [31], set at [13:6]. */
+    mov     w5, #0                        /* way counter (0..1) */
+.Linv_way:
+    lsl     x4, x5, #31                   /* way bits */
+    mov     w1, #256                      /* sets, counted down */
+.Linv_set:
+    sub     w1, w1, #1
+    lsl     x0, x1, #6                    /* set in [13:6] */
+    orr     x0, x0, x4                    /* | way */
+    dc      isw, x0
+    cbnz    w1, .Linv_set
+    add     w5, w5, #1
+    cmp     w5, #2
+    b.lt    .Linv_way
+.else
+    /* Cortex-A53 L1D: 32 KB, 4-way, 64 B line → 128 sets.
+     * SetWay register: way at [31:30], set at [12:6]. */
+    mov     w5, #0                        /* way counter (0..3) */
+.Linv_way:
+    lsl     x4, x5, #30                   /* way bits */
+    mov     w1, #128
+.Linv_set:
+    sub     w1, w1, #1
+    lsl     x0, x1, #6
+    orr     x0, x0, x4
+    dc      isw, x0
+    cbnz    w1, .Linv_set
+    add     w5, w5, #1
+    cmp     w5, #4
+    b.lt    .Linv_way
+.endif
+
+    dsb     sy
+    isb
+
+    /* Zero BSS — now safe: writes hit RAM uncached, no shadow lines. */
     ldr     x0, =__bss_start
     ldr     x1, =__bss_end
 .Lbss_loop:
@@ -89,6 +169,22 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
+
+.ifdef PLATFORM_PI4
+    /* Debug: '3' = BSS zero complete. Reaching this proves the
+     * literal-pool load of __bss_start / __bss_end returned addresses
+     * the CPU could actually walk and write to. On the chainloader →
+     * 0x80000 path this is the first observable signal that the bytes
+     * placed at 0x80000 by the chainloader match what the linker
+     * planned (since BSS bounds depend on link-time layout). */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'3'
+6:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    6b
+    str     w10, [x9]
+.endif
 
     /* --- MMU setup: identity map, Normal RAM + Device peripherals --- */
 
@@ -175,23 +271,10 @@ _start:
     ldr     x0, =__mmu_l1_table
     msr     TTBR0_EL1, x0
 
-    /* Invalidate TLB and D-cache before enabling MMU.
-     * Critical when chainloaded — the chainloader's D-cache may
-     * contain stale lines (from prefetching during HEX transfer)
-     * that would shadow the BSS zero we just wrote to RAM. */
+    /* TLB invalidate before enabling the new translation regime.
+     * D-cache invalidation already happened at the top of .Lel1_ready,
+     * before BSS zero / table fill — see the comment block there. */
     tlbi    vmalle1
-
-    /* Invalidate entire D-cache by set/way (L1: 32KB, 2-way, 64B) */
-    mov     x0, #0                     /* set/way value */
-    mov     x1, #256                   /* 256 sets (32KB / 2 ways / 64B) */
-.Linv_l1:
-    dc      isw, x0                    /* invalidate set, way 0 */
-    orr     x2, x0, #(1 << 30)        /* way 1 (bit 30 for L1 on A72) */
-    dc      isw, x2
-    add     x0, x0, #(1 << 6)         /* next set (bit 6 = set field) */
-    subs    x1, x1, #1
-    b.ne    .Linv_l1
-
     dsb     sy
     isb
 
@@ -200,6 +283,20 @@ _start:
     msr     VBAR_EL1, x0
     isb
 
+.ifdef PLATFORM_PI4
+    /* Debug: '4' = MMU tables filled, vector table installed, ready
+     * to enable MMU. Reaching this means the L1/L2 table fills walked
+     * the literal-pool addresses for __mmu_l1_table / __mmu_l2_table
+     * without crashing — i.e., those literals point at writable RAM. */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'4'
+4:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    4b
+    str     w10, [x9]
+.endif
+
     /* Enable MMU + data cache + instruction cache */
     mrs     x0, SCTLR_EL1
     orr     x0, x0, #(1 << 0)     /* M: MMU enable */
@@ -207,6 +304,20 @@ _start:
     orr     x0, x0, #(1 << 12)    /* I: instruction cache */
     msr     SCTLR_EL1, x0
     isb
+
+.ifdef PLATFORM_PI4
+    /* Debug: '5' = MMU enabled, jumping to main(). If '4' prints but
+     * '5' does not, the MMU enable itself faulted (typically a wrong
+     * translation table walk because the L1/L2 entries were corrupt
+     * or the table physical addresses didn't survive the boot). */
+    movz    x9, #0xFE20, lsl #16
+    movk    x9, #0x1000
+    mov     w10, #'5'
+5:  ldr     w11, [x9, #0x18]
+    tst     w11, #0x20
+    b.ne    5b
+    str     w10, [x9]
+.endif
 
     bl      main
     cbz     w0, .Lnet_loop

@@ -149,6 +149,9 @@ _start:
     bl      test_mdns_dispatch_drops_in_probe
     bl      test_mdns_dispatch_responds_in_announce
     bl      test_mdns_dispatch_panics_on_conflict
+    bl      test_mdns_start_defers_when_ip_zero
+    bl      test_mdns_kick_arms_after_ip_set
+    bl      test_mdns_kick_noop_in_probe
     bl      test_dhcp_fsa_step_init_start
     bl      test_dhcp_fsa_step_no_handler
     bl      test_dhcp_fsa_step_oob_event

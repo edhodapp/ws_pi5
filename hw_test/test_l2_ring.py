@@ -259,7 +259,8 @@ class TestRingWraparound:
 
     @pytest.mark.parametrize("n", RING_BURST_SIZES)
     def test_pi_responsive_after_burst(
-        self, n, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms
+        self, n, eth_iface, laptop_mac, laptop_ip, pi_mac, rtt_p99_ms,
+        tmp_path,
     ):
         """After an n-frame burst, the Pi answers a fresh probe within
         normal RTT — proving the GENET driver state (and the
@@ -274,12 +275,25 @@ class TestRingWraparound:
         time.sleep(PRE_TEST_QUIESCE_MS / 1000.0)
 
         request = eth_frames.build_arp_request(laptop_mac, laptop_ip, PI4_IP)
-        burst = [request] * n
+        # Use tcpreplay for the burst (same approach as the burst-counting
+        # sibling test). The naive Python `sock.send` loop hits
+        # BlockingIOError [EAGAIN] on the laptop's USB NIC TX queue at
+        # N=1024 when USB scheduling is contended (per the Gemini review
+        # at 7753129's commit gate; observed live with the NIC in a
+        # different-port topology).
+        laptop_mac_str = ":".join(f"{b:02x}" for b in laptop_mac)
+        pcap_path = tmp_path / f"arp_burst_resp_{n}.pcap"
+        wire.build_arp_pcap(
+            pcap_path,
+            count=n,
+            src_mac=laptop_mac_str,
+            src_ip=laptop_ip,
+            target_ip=PI4_IP,
+        )
 
         with wire.RawL2Socket(eth_iface) as sock:
             sock.drain()
-            for frame in burst:
-                sock.send(frame)
+            wire.tcpreplay_send(eth_iface, pcap_path, topspeed=True)
             # Don't bother counting burst replies — that's the other
             # test's job. Just drain whatever's queued so we don't
             # confuse the post-burst probe with leftover replies.

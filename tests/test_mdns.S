@@ -48,6 +48,9 @@
 .global test_mdns_dispatch_drops_in_probe
 .global test_mdns_dispatch_responds_in_announce
 .global test_mdns_dispatch_panics_on_conflict
+.global test_mdns_start_defers_when_ip_zero
+.global test_mdns_kick_arms_after_ip_set
+.global test_mdns_kick_noop_in_probe
 
 .section .text
 
@@ -1515,6 +1518,175 @@ test_mdns_state_live_noop:
     ret
 
 
+/* ========================================================================
+ * test_mdns_start_defers_when_ip_zero — when mdns_start is called
+ * with net_our_ip == 0.0.0.0 (the DHCP-mode boot situation), the
+ * timer arm is skipped and state stays IDLE. mdns_kick later will
+ * complete the arm once h_commit_lease_arm_timers stamps the IP.
+ * ======================================================================== */
+test_mdns_start_defers_when_ip_zero:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+    bl      _mdns_send_capture_reset
+    ldr     x0, =_mdns_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+
+    /* Zero net_our_ip to mimic mdns_start running before DHCP commit. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     wzr, [x0]
+
+    /* mdns_start with all five args. */
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =_mdns_frame_buf
+    ldr     x3, =_mdns_test_tpool
+    ldr     x4, =_mdns_send_capture
+    bl      mdns_start
+
+    /* State must be IDLE — the deferred arm. */
+    bl      mdns_get_state
+    cbnz    w0, .Ltsdz_fail
+
+    /* No frames sent. */
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cbnz    w0, .Ltsdz_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_start_defers_when_ip_zero
+    bl      test_pass
+    b       .Ltsdz_done
+.Ltsdz_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_start_defers_when_ip_zero
+    bl      test_fail
+.Ltsdz_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_kick_arms_after_ip_set — start IDLE-with-zero-IP, then
+ * commit the IP and call mdns_kick. State transitions IDLE → PROBE_1
+ * and the next timer_cb sends a probe (proves the timer was armed).
+ * ======================================================================== */
+test_mdns_kick_arms_after_ip_set:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state
+    bl      _mdns_send_capture_reset
+    ldr     x0, =_mdns_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+
+    /* net_our_ip = 0 → mdns_start defers. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     wzr, [x0]
+
+    mov     x0, #0
+    mov     x1, #0
+    ldr     x2, =_mdns_frame_buf
+    ldr     x3, =_mdns_test_tpool
+    ldr     x4, =_mdns_send_capture
+    bl      mdns_start
+
+    /* Confirm IDLE before kick. */
+    bl      mdns_get_state
+    cbnz    w0, .Ltkai_fail
+
+    /* Restore the QEMU default IP (10.0.2.15) and kick. */
+    bl      _mdns_test_set_state
+    /* _mdns_test_set_state forces state back to LIVE; reset to IDLE
+     * so kick's "only arm if IDLE" guard exercises the deferred-arm
+     * code path rather than the "skip a running cycle" path. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    str     wzr, [x0, #48]              /* MDNSC_STATE = IDLE */
+
+    bl      mdns_kick
+
+    /* State is now PROBE_1. */
+    bl      mdns_get_state
+    cmp     w0, #1                      /* MDNS_STATE_PROBE_1 */
+    b.ne    .Ltkai_fail
+
+    /* And the timer is armed: one mdns_timer_cb call sends a probe
+     * and advances state to PROBE_2. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #2                      /* MDNS_STATE_PROBE_2 */
+    b.ne    .Ltkai_fail
+
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ltkai_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_arms_after_ip_set
+    bl      test_pass
+    b       .Ltkai_done
+.Ltkai_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_arms_after_ip_set
+    bl      test_fail
+.Ltkai_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_kick_noop_in_probe — if a probe cycle is already
+ * running, mdns_kick must NOT reset the state machine. Catches the
+ * "DHCP renews mid-probe" hazard: the kick must not unwind progress
+ * already made by an earlier kick (or by static-mode mdns_start).
+ * ======================================================================== */
+test_mdns_kick_noop_in_probe:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Standard setup → mdns_start arms PROBE_1. */
+    bl      _mdns_state_setup
+
+    /* Advance one step: PROBE_1 → PROBE_2, send_count = 1. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    /* Now kick. Must be a no-op: state stays PROBE_2, no extra send. */
+    bl      mdns_kick
+
+    bl      mdns_get_state
+    cmp     w0, #2                      /* MDNS_STATE_PROBE_2 */
+    b.ne    .Ltknp_fail
+
+    adrp    x0, _mdns_send_count
+    add     x0, x0, :lo12:_mdns_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ltknp_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_noop_in_probe
+    bl      test_pass
+    b       .Ltknp_done
+.Ltknp_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_noop_in_probe
+    bl      test_fail
+.Ltknp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Stub panic handler for tests: increments _mdns_panic_count and
  * returns. Wired in via mdns_panic_fn; the production default
  * (mdns_panic_fn = NULL → fall through to bl panic_n in mdns.S)
@@ -1759,6 +1931,12 @@ _mdns_name_dispatch_responds_in_announce:
     .asciz "mdns_dispatch_responds_in_announce"
 _mdns_name_dispatch_panics_on_conflict:
     .asciz "mdns_dispatch_panics_on_conflict"
+_mdns_name_start_defers_when_ip_zero:
+    .asciz "mdns_start_defers_when_ip_zero"
+_mdns_name_kick_arms_after_ip_set:
+    .asciz "mdns_kick_arms_after_ip_set"
+_mdns_name_kick_noop_in_probe:
+    .asciz "mdns_kick_noop_in_probe"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.

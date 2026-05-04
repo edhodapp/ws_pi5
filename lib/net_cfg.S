@@ -56,11 +56,18 @@ net_our_mac:
 
 /* IPv4 fields stored as raw wire-format bytes (network byte order).
  * `ldr w` from these labels gives the same value as `ldr w` from a
- * wire buffer, enabling zero-cost comparison without rev. */
+ * wire buffer, enabling zero-cost comparison without rev.
+ *
+ * Pi 4 default is 0.0.0.0 so subsystems that read net_our_ip before
+ * config_parse / DHCP commits can detect "not yet configured" with
+ * a single cbz check (e.g. mdns_start defers its probe arm). config
+ * parser sets this for static configs (ip= is required when dhcp=no
+ * per D012/D013); DHCP commits set it via h_commit_lease_arm_timers.
+ * QEMU has no SD/network.conf, so the 10.0.2.15 default stays. */
 .balign 4
 net_our_ip:
 .ifdef PLATFORM_PI4
-    .byte   0x0A, 0x00, 0x00, 0x02     /* 10.0.0.2 */
+    .word   0
 .else
     .byte   0x0A, 0x00, 0x02, 0x0F     /* 10.0.2.15 (QEMU default) */
 .endif

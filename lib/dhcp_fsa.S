@@ -569,6 +569,14 @@ h_commit_lease_arm_timers:
     add     x19, x19, :lo12:dhcp_send_ctx
     str     w0, [x19, #DHCPC_LEASE_TIME]
 
+    /* Now that net_our_ip is committed, kick the mDNS state machine.
+     * In DHCP mode mdns_start ran at boot before this commit, found
+     * net_our_ip == 0, and deferred its arm. mdns_kick performs that
+     * arm now so the probe + announce phases carry the correct IP.
+     * No-op if mDNS isn't IDLE (renewal on existing lease, static
+     * mode, or mdns_start was never called). */
+    bl      mdns_kick
+
     /* Arm timers: T1=lease/2, T2=lease*7/8, full=lease.
      * Skip if no timer pool (test mode without pool). */
     ldr     x0, [x19, #DHCPC_TIMER_POOL]

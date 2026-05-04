@@ -389,13 +389,41 @@ def _write_all(fd, data):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <kernel.img> [serial_port] [base_addr]")
+    # Two flag forms supported:
+    #   hw_send.py [--network-conf <path>] <kernel.img>
+    #              [serial_port] [base_addr]
+    #
+    # --network-conf prepends the file's bytes as Intel HEX records targeting
+    # 0x20000000 — the same address the firmware loads the SD's initramfs
+    # network.conf to. With the chainloader path, this overwrites whatever
+    # was in the SD's network.conf, letting one chainloader SD serve both
+    # static and DHCP test passes by pushing the appropriate config alongside
+    # the kernel. Same kernel binary in both passes; only the network.conf
+    # bytes differ. Use case: dual-config CI without two SD cards.
+    args = list(sys.argv[1:])
+    network_conf_path = None
+    if args.count("--network-conf") > 1:
+        print("--network-conf may be given at most once")
+        return 1
+    if "--network-conf" in args:
+        idx = args.index("--network-conf")
+        if idx + 1 >= len(args):
+            print("--network-conf requires a path argument")
+            return 1
+        network_conf_path = args[idx + 1]
+        if not network_conf_path:
+            print("--network-conf path is empty")
+            return 1
+        del args[idx:idx + 2]
+
+    if len(args) < 1:
+        print(f"Usage: {sys.argv[0]} [--network-conf <path>] "
+              "<kernel.img> [serial_port] [base_addr]")
         return 1
 
-    kernel_path = sys.argv[1]
-    port_path = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
-    base_addr = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x200000
+    kernel_path = args[0]
+    port_path = args[1] if len(args) > 1 else "/dev/ttyUSB0"
+    base_addr = int(args[2], 0) if len(args) > 2 else 0x80000
 
     # Always clear stale hw_send processes before touching the port.
     kill_stale_hw_send()
@@ -409,7 +437,19 @@ def main():
     try:
         with open(kernel_path, "rb") as fobj:
             kernel = fobj.read()
-        records = kernel_to_hex_records(kernel, base_address=base_addr)
+        records = []
+        if network_conf_path is not None:
+            with open(network_conf_path, "rb") as nfobj:
+                nc_bytes = nfobj.read()
+            # No EOF on the preamble — the kernel records that follow
+            # carry their own EOF, which is what tells the chainloader
+            # to stop receiving and jump.
+            records += kernel_to_hex_records(
+                nc_bytes, base_address=0x20000000, include_eof=False,
+            )
+            print(f"Network.conf: {network_conf_path} "
+                  f"({len(nc_bytes)} bytes) -> 0x20000000", flush=True)
+        records += kernel_to_hex_records(kernel, base_address=base_addr)
         print(f"Kernel: {kernel_path} ({len(kernel)} bytes)", flush=True)
         print(f"HEX: {len(records)} records", flush=True)
         fd = open_serial(port_path)

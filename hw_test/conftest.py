@@ -468,6 +468,40 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
+# NETWORK_MODE-aware skip for tests gated to a specific kernel network
+# configuration. Dual-config test passes (scripts/dual_config_tests.sh)
+# set NETWORK_MODE=static or NETWORK_MODE=dhcp before invoking pytest.
+# Tests marked @pytest.mark.dhcp_only / @pytest.mark.static_only get
+# skipped (with a reason) when the active mode mismatches. When
+# NETWORK_MODE is unset (single ad-hoc pytest run), no skip applies —
+# nothing changes for operators running pytest directly.
+def pytest_collection_modifyitems(  # pylint: disable=unused-argument
+    config, items,
+):
+    mode = os.environ.get("NETWORK_MODE", "").strip().lower()
+    if mode == "":
+        return
+    if mode not in ("static", "dhcp"):
+        # Loud failure on typo (e.g. NETWORK_MODE=stati) — silently
+        # falling through would run static_only and dhcp_only items
+        # in modes that don't match either marker, producing pass/fail
+        # noise that looks legitimate.
+        pytest.exit(
+            f"invalid NETWORK_MODE={mode!r}; expected one of "
+            f"'', 'static', 'dhcp'",
+            returncode=2,
+        )
+    for item in items:
+        if mode == "static" and item.get_closest_marker("dhcp_only"):
+            item.add_marker(pytest.mark.skip(
+                reason=f"NETWORK_MODE={mode}, requires dhcp"
+            ))
+        elif mode == "dhcp" and item.get_closest_marker("static_only"):
+            item.add_marker(pytest.mark.skip(
+                reason=f"NETWORK_MODE={mode}, requires static"
+            ))
+
+
 # --- Link guard + session finalizer ---
 
 @pytest.fixture(autouse=True)

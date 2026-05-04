@@ -65,6 +65,133 @@ PHASES=()
 # ~3 min. Hangs blow past 600 s; legitimate slow runs do not.
 : "${PHASE_TIMEOUT_S:=600}"
 
+# PI4_IP resolution. Same precedence as hw_test/run_hw_tests.sh's 912c569:
+#   1. Explicit PI4_IP env var (caller knows the address — honor it)
+#   2. mDNS resolve of ${PI4_HOSTNAME:-wspi5}.local
+#   3. Static fallback 10.0.0.2 (chainloader rig with --testrig SD)
+#
+# Encapsulated as a function so we can re-call after every per-bucket
+# reflash: in DHCP-mode test passes the kernel re-issues DISCOVER on
+# each fresh boot, and although dnsmasq usually hands back the same
+# lease, we don't want the test runner to assume that. A re-resolve
+# costs one mDNS round-trip (~5 ms) and removes the assumption.
+PI4_HOSTNAME="${PI4_HOSTNAME:-wspi5}"
+PI4_FQDN="${PI4_HOSTNAME}.local"
+
+resolve_pi4_ip() {
+    # First positional: --strict-dhcp-pool requires the resolved IP to
+    # be within dnsmasq's pool (10.0.0.100-110) when NETWORK_MODE=dhcp.
+    # The post-flash call uses this so we don't latch onto a stale
+    # avahi cache entry from a prior static pass (e.g. wspi5.local ->
+    # 10.0.0.2 lingers in the laptop's mDNS cache across the Pi's
+    # reboot into DHCP mode and resolves before the fresh announce).
+    # The pre-flash sanity call doesn't pass the flag because the Pi
+    # is still on whatever kernel it was previously running and the
+    # check exists to prove the laptop side (avahi/NIC) is alive, not
+    # that the Pi is already in the new mode.
+    local strict_dhcp_pool=false
+    if [ "${1:-}" = "--strict-dhcp-pool" ]; then
+        strict_dhcp_pool=true
+    fi
+    # If caller pinned PI4_IP at script entry, keep honoring it.
+    if [ -n "${PI4_IP_PIN:-}" ]; then
+        export PI4_IP="$PI4_IP_PIN"
+        echo "  PI4_IP source: pinned env (${PI4_IP})"
+        return 0
+    fi
+    # In strict DHCP mode (post-flash), prefer dnsmasq.leases as the
+    # authoritative source. The kernel's mDNS announces don't fire
+    # reliably in DHCP mode — mdns_start arms PROBE_1 before
+    # dhcp_start completes, so the probe goes out with net_our_ip = 0
+    # and the announce phase ends up sending nothing useful (separate
+    # kernel bug to file). avahi-resolve therefore returns whatever
+    # is left in the laptop's mDNS cache, often a prior static pass's
+    # 10.0.0.2 entry. The lease file is written by dnsmasq the moment
+    # ACK is sent and is world-readable, so it sidesteps the kernel
+    # bug entirely. Pick the lease with the latest expire-epoch in
+    # case multiple pool entries coexist.
+    if [ "$strict_dhcp_pool" = "true" ] \
+       && [ "${NETWORK_MODE:-}" = "dhcp" ] \
+       && [ -r /var/lib/misc/dnsmasq.leases ]; then
+        local lease_ip
+        lease_ip=$(awk '$3 ~ /^10\.0\.0\.(10[0-9]|110)$/ {print $1, $3}' \
+                       /var/lib/misc/dnsmasq.leases \
+                   | sort -k1 -n | tail -1 | awk '{print $2}')
+        if [ -n "$lease_ip" ]; then
+            export PI4_IP="$lease_ip"
+            echo "  PI4_IP source: dnsmasq.leases pool entry -> ${PI4_IP}"
+            return 0
+        fi
+    fi
+    # Retry budget for mDNS resolve. The Pi's announce fires ~750 ms
+    # after BOUND, plus a few seconds for DHCP DISCOVER → ACK in DHCP
+    # mode and laptop-side avahi cache propagation. 30 s with 1 s
+    # cadence covers the worst case with margin while a steady-state
+    # resolve still returns in ~100 ms.
+    if command -v avahi-resolve >/dev/null 2>&1; then
+        local resolved candidate attempt deadline
+        deadline=$(( $(date +%s) + 30 ))
+        attempt=0
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            attempt=$((attempt + 1))
+            if resolved=$(avahi-resolve -4 -n "$PI4_FQDN" 2>/dev/null) \
+                    && [ -n "$resolved" ]; then
+                candidate="$(echo "$resolved" | awk '{print $2}')"
+                if [ "$strict_dhcp_pool" = "true" ] \
+                   && [ "${NETWORK_MODE:-}" = "dhcp" ] \
+                   && ! [[ "$candidate" =~ ^10\.0\.0\.(10[0-9]|110)$ ]]; then
+                    sleep 1
+                    continue
+                fi
+                PI4_IP="$candidate"
+                export PI4_IP
+                echo "  PI4_IP source: mDNS resolve of ${PI4_FQDN}" \
+                     "-> ${PI4_IP} (attempt ${attempt})"
+                return 0
+            fi
+            sleep 1
+        done
+    fi
+    # Budget exhausted (or avahi-resolve unavailable). Fallback policy
+    # depends on NETWORK_MODE — see dual_config_tests.sh for the
+    # static/dhcp dispatch:
+    #   static : fall back to 10.0.0.2 (matches the rig's pinned IP)
+    #   dhcp   : hard-fail; 10.0.0.2 is provably wrong because the Pi's
+    #            address comes from dnsmasq's lease pool 10.0.0.100-110
+    #   unset  : fall back to 10.0.0.2 (backwards-compatible default)
+    case "${NETWORK_MODE:-}" in
+        dhcp)
+            echo "  PI4_IP resolve FAILED: 30 s budget exhausted in" \
+                 "NETWORK_MODE=dhcp" >&2
+            echo "    static fallback (10.0.0.2) is invalid in DHCP" \
+                 "mode — Pi's IP" >&2
+            echo "    comes from dnsmasq pool 10.0.0.100-110. Is" \
+                 "dnsmasq up? Is the" >&2
+            echo "    Pi's kernel actually doing DHCP?" >&2
+            return 1
+            ;;
+        *)
+            export PI4_IP="10.0.0.2"
+            echo "  PI4_IP source: static fallback (mDNS resolve" \
+                 "exhausted) -> ${PI4_IP}"
+            ;;
+    esac
+}
+
+# If the caller explicitly set PI4_IP at script entry, snapshot it so
+# subsequent resolve_pi4_ip calls keep honoring it instead of querying
+# mDNS. This lets a CI driver or operator pin a known IP for a whole
+# run while the function-based design still serves the unpinned case.
+if [ -n "${PI4_IP:-}" ]; then
+    PI4_IP_PIN="$PI4_IP"
+fi
+# Hard-fail at startup if NETWORK_MODE=dhcp and the Pi isn't yet on
+# the network — better to abort with a clear error than run pytest
+# against an empty PI4_IP and watch every test ARP-time-out.
+if ! resolve_pi4_ip; then
+    exit 1
+fi
+
 # --- arg parse -------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -149,7 +276,18 @@ flash_and_wait() {
     kill_stale
     make clean > /dev/null 2>&1
     make "$@" > /dev/null 2>&1
-    "$VENV" scripts/hw_send.py kernel8.img > "$logfile" 2>&1 &
+    # NETWORK_CONF=<path> overrides the SD's initramfs network.conf for
+    # this boot — hw_send.py prepends the file's bytes as Intel HEX
+    # records targeting 0x20000000. Empty / unset means "no override":
+    # the kernel reads whatever network.conf the firmware loaded from
+    # the SD's FAT32 partition. Used to drive dual-config test runs
+    # (static vs DHCP) from the same chainloader SD.
+    local hw_send_args=()
+    if [ -n "${NETWORK_CONF:-}" ]; then
+        hw_send_args+=(--network-conf "$NETWORK_CONF")
+    fi
+    "$VENV" scripts/hw_send.py "${hw_send_args[@]}" kernel8.img \
+        > "$logfile" 2>&1 &
     local hw_pid=$!
     # 9514 hex records takes ~66 s to UART-send, then GENET init adds
     # a variable few seconds. The previous 75 s budget left only ~9 s
@@ -166,11 +304,38 @@ flash_and_wait() {
         note_fail "$label" "Pi 4 did not boot (see $logfile)"
         return 1
     fi
-    if ! ping -c 2 -W 2 10.0.0.2 > /dev/null 2>&1; then
+    # Re-resolve in case the per-bucket reflash gave the Pi a new
+    # DHCP-assigned address (no-op for static and pinned env runs).
+    # Hard-fail in NETWORK_MODE=dhcp if mDNS doesn't come back —
+    # 10.0.0.2 fallback is wrong there and would just turn into a
+    # confusing ARP timeout downstream. --strict-dhcp-pool rejects
+    # stale avahi cache entries outside dnsmasq's pool (10.0.0.100-110)
+    # so we don't latch onto a prior static pass's wspi5.local
+    # announce.
+    if ! resolve_pi4_ip --strict-dhcp-pool; then
         kill "$hw_pid" 2>/dev/null || true
-        note_fail "$label" "Pi 4 not reachable after boot"
+        note_fail "$label" "Pi 4 mDNS resolve failed after boot"
         return 1
     fi
+    # Retry ping for ~15 s. In DHCP mode, "GENET Gigabit Ethernet" can
+    # appear several seconds before the Pi is actually reachable on its
+    # leased IP — DHCP DISCOVER/OFFER/REQUEST/ACK runs after that print,
+    # then the kernel finishes initializing NTP / mDNS / HTTP, and only
+    # then is the IP layer settled enough to reliably reply to ICMP.
+    # Static mode doesn't need this margin (the IP is committed at
+    # config_parse time, before GENET prints), but the retry is harmless
+    # there: a healthy static Pi replies on the first try and exits the
+    # loop in well under a second.
+    local boot_ping_deadline=$(( $(date +%s) + 15 ))
+    while [ "$(date +%s)" -lt "$boot_ping_deadline" ]; do
+        if ping -c 1 -W 1 "$PI4_IP" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    kill "$hw_pid" 2>/dev/null || true
+    note_fail "$label" "Pi 4 not reachable at $PI4_IP after boot"
+    return 1
 }
 
 run_pytest() {
