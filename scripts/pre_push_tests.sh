@@ -15,6 +15,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# The chainloader SD no longer ships network.conf; hw_send.py prepends
+# it via UART instead. Default to the static-IP rig config when the
+# caller hasn't pinned NETWORK_CONF (dual_config_tests.sh sets it
+# explicitly per pass; the standalone pre-push gate runs static).
+export NETWORK_CONF="${NETWORK_CONF:-$PROJECT_DIR/hw_test/network-static.conf}"
 
 bash "$SCRIPT_DIR/local_tests.sh"
 bash "$SCRIPT_DIR/qemu_tests.sh"
