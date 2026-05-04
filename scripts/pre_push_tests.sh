@@ -21,7 +21,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # it via UART instead. Default to the static-IP rig config when the
 # caller hasn't pinned NETWORK_CONF (dual_config_tests.sh sets it
 # explicitly per pass; the standalone pre-push gate runs static).
+# NETWORK_MODE matches so conftest.py's collection hook skips
+# @dhcp_only items in static-mode runs (test_dhcp.py would otherwise
+# expect a 10.0.0.100-110 lease that doesn't exist on a static rig).
 export NETWORK_CONF="${NETWORK_CONF:-$PROJECT_DIR/hw_test/network-static.conf}"
+export NETWORK_MODE="${NETWORK_MODE:-static}"
 
 bash "$SCRIPT_DIR/local_tests.sh"
 bash "$SCRIPT_DIR/qemu_tests.sh"
