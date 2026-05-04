@@ -39,7 +39,7 @@ PI4_FQDN = f"{PI4_HOSTNAME}.local"
 DHCP_POOL_START = 100
 DHCP_POOL_END = 110
 
-pytestmark = pytest.mark.l5
+pytestmark = [pytest.mark.l5, pytest.mark.dhcp_only]
 
 
 def _avahi_available() -> bool:

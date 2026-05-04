@@ -65,14 +65,19 @@ CHAINLOAD=0
 # kernel8.img on the SD bundle. The chainloader is loaded by firmware
 # at 0x80000 (default kernel address), self-relocates to 0x4000000 at
 # startup, then receives a kernel via UART and writes it to 0x80000.
-# Implies --testrig and --image (chainloader SDs are only meaningful
-# as flashable images for the rig).
+# Implies --image. Does NOT ship a network.conf — the kernel pushed
+# via hw_send.py is expected to carry its own network.conf payload
+# (`hw_send.py --network-conf <path>`), so any network.conf bytes
+# the firmware would have loaded to 0x20000000 from the SD become
+# stale data the kernel parser would have to filter past. Cleaner
+# to leave 0x20000000 at DRAM-init values (typically NUL) and let
+# the UART push be the sole writer.
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --image)     MODE="image"; shift ;;
         --build)     MODE="build"; shift ;;
         --testrig)   TESTRIG=1; shift ;;
-        --chainload) CHAINLOAD=1; TESTRIG=1; MODE="image"; shift ;;
+        --chainload) CHAINLOAD=1; MODE="image"; shift ;;
         *)           echo "mk_sd: unknown flag $1" >&2; exit 2 ;;
     esac
 done
@@ -86,7 +91,12 @@ usage:
   $(basename "$0") --chainload <output_image.img>
 
   Builds chainload/chainload.img if missing, then ships it as the
-  kernel8.img on the SD bundle along with the testrig network.conf.
+  kernel8.img on the SD bundle. No network.conf is written to the
+  bundle and no `initramfs` directive is emitted into config.txt;
+  the kernel pushed via hw_send.py provides its own network.conf
+  payload (`hw_send.py --network-conf <path>`) so we don't fight
+  stale firmware-loaded bytes at 0x20000000.
+
   The Pi will boot into the chainloader (loaded at 0x80000 by firmware,
   same as a regular kernel) and wait for hw_send.py to push a kernel
   built with the default 'make PLATFORM=pi4' (LINK_ADDR=0x80000). The
@@ -290,14 +300,27 @@ arm_64bit=1
 kernel=kernel8.img
 enable_uart=1
 dtoverlay=disable-bt
-initramfs network.conf $INITRAMFS_ADDR
 EOF
 
-# --chainload: no kernel_address= override needed any more. The
-# chainloader is built to be loaded at 0x80000 (firmware default) and
-# self-relocates to 0x4000000 — see chainload/boot.S file header for
-# the rationale. Firmware quiescence at 0x80000 by handoff time is the
-# whole point.
+# --chainload: skip the `initramfs network.conf <addr>` directive
+# entirely — chainloader-mode kernels get their network.conf pushed
+# via UART by hw_send.py (see scripts/hw_send.py --network-conf), so
+# any firmware-loaded bytes at 0x20000000 would only become stale data
+# the kernel parser had to filter past. Default mode (release SDs)
+# still emits the directive and ships network.conf below.
+if (( CHAINLOAD == 0 )); then
+    echo "initramfs network.conf $INITRAMFS_ADDR" >> "$BUNDLE_DIR/config.txt"
+fi
+
+# --chainload: skip writing + linting + testrig-overlaying network.conf.
+# The kernel pushed via UART carries its own network.conf payload.
+# Cold-booting a chainloader SD without a UART push is expected to
+# halt with panic_n (no valid magic at 0x20000000) — the right
+# behaviour for an SD whose only purpose is to host the UART
+# chainloader. The conditional below brackets all three (write,
+# overlay, lint); the --image conversion at the bottom of the script
+# still runs.
+if (( CHAINLOAD == 0 )); then
 
 # Default network.conf — placeholder values that pass the linter
 # (D003 syntax) but won't bring up the network on most home LANs
@@ -386,6 +409,8 @@ if [[ -f "$BUNDLE_DIR/network.conf" ]]; then
         exit 1
     fi
 fi
+
+fi   # end CHAINLOAD == 0 block (network.conf write + testrig + lint)
 
 if [[ "$MODE" == "image" ]]; then
     python3 "$PROJECT_DIR/scripts/mk_sd_image.py" "$BUNDLE_DIR" "$TARGET"

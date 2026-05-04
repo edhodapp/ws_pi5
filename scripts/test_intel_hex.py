@@ -301,6 +301,44 @@ class TestKernelToHexRecords(unittest.TestCase):
         expected = 27576 // 16 + (1 if 27576 % 16 else 0)
         self.assertEqual(len(data_recs), expected)
 
+    def test_no_eof_when_include_eof_false(self):
+        """include_eof=False: no type-01 record at the end. Used when
+        a network.conf preamble is followed by the kernel records that
+        carry their own EOF — only the very last payload's EOF tells
+        the chainloader to stop receiving and jump."""
+        recs = kernel_to_hex_records(b'\xAB' * 8, base_address=0x20000000,
+                                     include_eof=False)
+        eof_recs = [r for r in recs
+                    if parse_hex_record(r)['type'] == 0x01]
+        self.assertEqual(eof_recs, [])
+        # ext-addr to 0x2000 + one data record = 2 records total
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(parse_hex_record(recs[0])['type'], 0x04)
+        self.assertEqual(parse_hex_record(recs[0])['data'], b'\x20\x00')
+        self.assertEqual(parse_hex_record(recs[1])['type'], 0x00)
+
+    def test_concat_preamble_and_kernel(self):
+        """Real use case: preamble (no EOF) + kernel (with EOF). The
+        chainloader sees a single stream where the kernel's leading
+        type-04 resets extended_base, then the kernel data records,
+        then the kernel's EOF — exactly the sequence we want."""
+        nc_bytes = b'# WSPI5CFG\nhostname=wspi5\ndhcp=yes\n'
+        kernel = b'\xAB' * 32
+        preamble = kernel_to_hex_records(nc_bytes, base_address=0x20000000,
+                                         include_eof=False)
+        records = preamble + kernel_to_hex_records(kernel,
+                                                   base_address=0x80000)
+        types = [parse_hex_record(r)['type'] for r in records]
+        # Exactly one EOF, at the very end.
+        self.assertEqual(types.count(0x01), 1)
+        self.assertEqual(types[-1], 0x01)
+        # Two type-04 records: 0x2000 then 0x0008 (in that order).
+        ext_recs = [parse_hex_record(r) for r in records
+                    if parse_hex_record(r)['type'] == 0x04]
+        self.assertEqual(len(ext_recs), 2)
+        self.assertEqual(ext_recs[0]['data'], b'\x20\x00')
+        self.assertEqual(ext_recs[1]['data'], b'\x00\x08')
+
 
 if __name__ == '__main__':
     unittest.main()

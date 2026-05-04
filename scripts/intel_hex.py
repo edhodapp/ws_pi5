@@ -20,13 +20,20 @@ def make_hex_record(rec_type, address, data=b''):
     return ':' + raw.hex().upper() + f'{checksum:02X}'
 
 
-def kernel_to_hex_records(kernel, base_address=0x80000, chunk_size=16):
-    """Convert raw kernel binary to list of Intel HEX record strings.
+def kernel_to_hex_records(kernel, base_address=0x80000, chunk_size=16,
+                          include_eof=True):
+    """Convert raw bytes to list of Intel HEX record strings.
 
     Args:
         kernel: Raw binary bytes
         base_address: Load address (default 0x80000)
         chunk_size: Bytes per data record (default 16)
+        include_eof: Append a type-01 EOF record (default True). Set to
+            False when these records will be followed by another payload
+            (e.g., a network.conf preamble before the kernel) — the
+            chainloader treats EOF as "stop receiving + jump", so only
+            the very last payload in a multi-payload transfer should
+            carry it.
 
     Returns:
         List of Intel HEX record strings (without \\r\\n)
@@ -49,7 +56,8 @@ def kernel_to_hex_records(kernel, base_address=0x80000, chunk_size=16):
         records.append(make_hex_record(0x00, offset, chunk))
         offset += len(chunk)
 
-    records.append(make_hex_record(0x01, 0x0000))
+    if include_eof:
+        records.append(make_hex_record(0x01, 0x0000))
     return records
 
 
