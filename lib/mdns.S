@@ -1130,8 +1130,8 @@ mdns_get_state:
 
 
 /* ---------------------------------------------------------------------------
- * mdns_start — initialize the responder context and arm the first
- * probe timer.
+ * mdns_start — initialize the responder context and try to arm the
+ * first probe timer.
  *
  *   x0 = DWC2 base address (or 0 in tests)
  *   x1 = ECM state pointer (or 0 in tests)
@@ -1141,9 +1141,14 @@ mdns_get_state:
  *
  * Returns: nothing.
  *
- * Refuses to start (state stays IDLE, no timer armed) if hostname is
- * unset — mdns_build_*_payload would silently return 0 anyway, but
- * skipping the timer arm avoids burning a slot on no-op work.
+ * Refuses to arm (state stays IDLE, no timer armed) if hostname is
+ * empty or net_our_ip is 0. The IP guard exists for DHCP mode:
+ * main.S calls mdns_start unconditionally right after dhcp_start, so
+ * net_our_ip is still 0 when this runs. In that case the context is
+ * stored but the timer is deferred; h_commit_lease_arm_timers calls
+ * mdns_kick once the lease commits to perform the actual arm. Static
+ * mode populates net_our_ip during config_parse, before mdns_start,
+ * so the arm fires on the first attempt with no kick needed.
  * --------------------------------------------------------------------------- */
 .global mdns_start
 mdns_start:
@@ -1158,11 +1163,80 @@ mdns_start:
     str     x3, [x5, #MDNSC_TIMER_POOL]
     str     x4, [x5, #MDNSC_SEND_FN]
 
-    /* Refuse to start if hostname is empty. */
+    /* Reset state to IDLE so a re-init (test harness, recovery flash)
+     * starts a fresh probe cycle rather than inheriting a stale
+     * MDNS_STATE_LIVE from a prior run. */
+    str     wzr, [x5, #MDNSC_STATE]
+
+    bl      _mdns_try_arm
+
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * mdns_kick — re-attempt to arm the probe cycle. Called by
+ * h_commit_lease_arm_timers (lib/dhcp_fsa.S) after a DHCP lease
+ * commits and net_our_ip is updated, so the deferred arm from
+ * mdns_start can complete.
+ *
+ * No-op if state is anything other than IDLE: an already-running
+ * probe / announce cycle, or a LIVE responder, must not be reset
+ * mid-flight. A second DHCP renew that gets the same IP is a no-op
+ * (state is LIVE by then, kick returns).
+ * --------------------------------------------------------------------------- */
+.global mdns_kick
+mdns_kick:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    ldr     w6, [x5, #MDNSC_STATE]
+    cbnz    w6, .Lkick_done
+
+    bl      _mdns_try_arm
+
+.Lkick_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ---------------------------------------------------------------------------
+ * _mdns_try_arm — internal: arm PROBE_1 if all preconditions hold.
+ *
+ * Preconditions:
+ *   - mdns_send_ctx.MDNSC_TIMER_POOL != 0 (mdns_start was called)
+ *   - net_hostname_len != 0
+ *   - net_our_ip != 0.0.0.0 (probe + announce RDATA must be valid)
+ *
+ * On success: caches timer_freq, sets state = PROBE_1, arms a timer
+ * at expiry = now so the next timer_check fires PROBE_1.
+ *
+ * On any guard failure: leaves state untouched (caller is responsible
+ * for setting state = IDLE if needed). Trashes x0-x6 only.
+ * --------------------------------------------------------------------------- */
+_mdns_try_arm:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
+
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    ldr     x6, [x5, #MDNSC_TIMER_POOL]
+    cbz     x6, .Larm_done
+
     adrp    x6, net_hostname_len
     add     x6, x6, :lo12:net_hostname_len
     ldr     w6, [x6]
-    cbz     w6, .Lms_skip
+    cbz     w6, .Larm_done
+
+    /* net_our_ip is 4 wire-order bytes; read as a 32-bit word and
+     * test for any non-zero byte. Endianness doesn't matter — we
+     * only care about the all-zeros case. */
+    adrp    x6, net_our_ip
+    add     x6, x6, :lo12:net_our_ip
+    ldr     w6, [x6]
+    cbz     w6, .Larm_done
 
     /* Cache timer frequency. */
     bl      timer_freq
@@ -1185,7 +1259,7 @@ mdns_start:
     add     x3, x3, :lo12:mdns_send_ctx
     bl      timer_set
 
-.Lms_skip:
+.Larm_done:
     ldp     x29, x30, [sp], #16
     ret
 
