@@ -110,12 +110,17 @@ resolve_pi4_ip() {
     # ACK is sent and is world-readable, so it sidesteps the kernel
     # bug entirely. Pick the lease with the latest expire-epoch in
     # case multiple pool entries coexist.
+    # Lease file path. Defaults to /tmp/dnsmasq-wspi5.leases (the rig
+    # path: dnsmasq runs as the operator and can't write the system
+    # default /var/lib/misc/dnsmasq.leases). Override via
+    # WSPI5_DNSMASQ_LEASES if the local rig stores leases elsewhere.
+    local lease_file="${WSPI5_DNSMASQ_LEASES:-/tmp/dnsmasq-wspi5.leases}"
     if [ "$strict_dhcp_pool" = "true" ] \
        && [ "${NETWORK_MODE:-}" = "dhcp" ] \
-       && [ -r /var/lib/misc/dnsmasq.leases ]; then
+       && [ -r "$lease_file" ]; then
         local lease_ip
         lease_ip=$(awk '$3 ~ /^10\.0\.0\.(10[0-9]|110)$/ {print $1, $3}' \
-                       /var/lib/misc/dnsmasq.leases \
+                       "$lease_file" \
                    | sort -k1 -n | tail -1 | awk '{print $2}')
         if [ -n "$lease_ip" ]; then
             export PI4_IP="$lease_ip"

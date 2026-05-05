@@ -195,7 +195,7 @@ FUZZ_ASM_OBJS = \
 # ---------------------------------------------------------------------------
 # Top-level targets
 # ---------------------------------------------------------------------------
-.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table verify-dhcp-fsa-table print-INITRAMFS_ADDR pi4-test
+.PHONY: all test test-functional fuzz fuzz-corpus fuzz-seq fuzz-corpus-seq chainload clean flash-pi4 verify-fsa-table verify-dhcp-fsa-table print-INITRAMFS_ADDR pi4-test rig-setup
 
 all: kernel8.img
 
@@ -353,6 +353,13 @@ $(BUILD):
 
 chainload:
 	$(MAKE) -C chainload
+
+# One-time hardware-rig setup. Grants /usr/sbin/dnsmasq the caps it
+# needs to bind UDP/67 without root, so the test fixture can manage
+# dnsmasq lifecycle without sudo prompts at test time. Idempotent —
+# re-run after a dnsmasq package upgrade clears the file caps.
+rig-setup:
+	bash scripts/rig_setup.sh
 
 clean:
 	rm -rf $(BUILD) kernel8.img

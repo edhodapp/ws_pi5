@@ -82,10 +82,13 @@ Most knobs are pytest fixtures or environment variables, set in
 | `NETWORK_MODE`    | unset                  | `static` / `dhcp` — gates `@dhcp_only` /    |
 |                   |                        | `@static_only` items via the conftest hook  |
 | `NETWORK_CONF`    | unset                  | Path to a `network.conf` to push via UART   |
+| `WSPI5_DNSMASQ_LEASES` | `/tmp/dnsmasq-wspi5.leases` | Lease file the resolver reads in DHCP mode  |
 
 `NETWORK_MODE=dhcp` requires `dnsmasq` running on the laptop and
-bound to the USB-Ethernet interface; the post-flash resolver reads
-`/var/lib/misc/dnsmasq.leases` directly to avoid avahi cache
+bound to the USB-Ethernet interface (start it via
+`scripts/dnsmasq-rig.sh start` after a one-time `make rig-setup` —
+see [TOOLS_SETUP.md §6b](TOOLS_SETUP.md)). The post-flash resolver
+reads `/tmp/dnsmasq-wspi5.leases` directly to sidestep avahi cache
 staleness.
 
 ## Troubleshooting
@@ -97,8 +100,9 @@ staleness.
   (caps are pre-set per [TOOLS_SETUP.md](TOOLS_SETUP.md), no `sudo`
   needed).
 - **Pi appears wedged**: check `ip neigh show dev enx00e04c0a2bed`
-  for stale ARP entries, and `cat /var/lib/misc/dnsmasq.leases` to
-  see what IP the Pi was last given.
+  for stale ARP entries, and `cat /tmp/dnsmasq-wspi5.leases` to
+  see what IP the Pi was last given (override path with
+  `$WSPI5_DNSMASQ_LEASES`).
 - **Stale `hw_send.py` from a prior run holds `/dev/ttyUSB0`**:
   `.venv/bin/python -c "from hw_send import kill_stale_hw_send;
   kill_stale_hw_send()"` (the test fixtures sweep this

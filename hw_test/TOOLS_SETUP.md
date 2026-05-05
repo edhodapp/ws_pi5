@@ -144,6 +144,29 @@ cd /home/ed/ws_pi5
 
 Should print the L2 socket class name without a permission error.
 
+## 6b. dnsmasq — bind UDP/67 without root (for the DHCP rig)
+
+The DHCP-mode integration suite needs to start, stop, and restart
+`dnsmasq` between tests. Granting `cap_net_bind_service` and
+`cap_net_admin` on `/usr/sbin/dnsmasq` lets the rig launcher
+(`scripts/dnsmasq-rig.sh`) run dnsmasq under your own UID — no sudo
+prompts at test time.
+
+```bash
+make rig-setup
+```
+
+That target runs `scripts/rig_setup.sh`, which is idempotent: safe to
+re-run after a `dnsmasq` package upgrade clears the file caps.
+Verify with:
+
+```bash
+getcap /usr/sbin/dnsmasq                           # should show the caps
+scripts/dnsmasq-rig.sh start
+scripts/dnsmasq-rig.sh status                      # pid + listening :67
+scripts/dnsmasq-rig.sh stop
+```
+
 ## 7. Final verification
 
 ```bash
