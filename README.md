@@ -594,73 +594,41 @@ The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-indepe
 
 ## Testing
 
-### Unit Tests
+The complete test inventory — every QEMU unit test, hardware
+integration test, fuzz harness, and FSA-vector model — lives in
+[`docs/TEST_PLAN.md`](docs/TEST_PLAN.md), top-down from the
+multi-day burn-in down to per-protocol assembly tests. The bucket
+discipline (A: local lints + Python unit; B: QEMU; C: hardware Pi 4)
+and the perf-gating policy live in [`TESTING.md`](TESTING.md). When
+someone says "the full test suite," it means **A + B + C**, in
+that order, run by `scripts/pre_push_tests.sh` on every push.
 
-482 assembly tests run on QEMU `raspi3b`. The shared tests cover every protocol layer from Ethernet through TCP (128 connections, WSCALE, SACK, timestamps/PAWS, congestion control with fast recovery) and HTTP/1.1 (FSA parser with 180-vector PICT coverage, chunked encoding, date formatting with Gregorian leap years, keep-alive, route matching). The VMIO output FSA adds its own 23 tests: post-gating dedup, init invariants, transition-table shape, per-way state plumbing, full send-path functional coverage, engine-counter telemetry, and the `/fsa_stats` generator. The 32-cell transition table has a standalone spec (`tests/func/http_output_fsa.pict` + `http_output_fsa_vectors.tsv`) that `make verify-fsa-table` diffs against the compiled kernel ELF so the spec cannot drift from the assembly. A dual-reviewer RFC compliance audit (Claude + independent Gemini review) identified and closed all 8 TCP defects across RFC 9293, RFC 7323, RFC 5681, and RFC 5961. Pi-specific driver tests cover GPIO function select, DWC2 USB host, USB enumeration, CDC-ECM Ethernet, VideoCore mailbox, and boot/main integration.
+Headline numbers (point-in-time; `docs/TEST_PLAN.md` is the
+authoritative source):
 
-141 Python unit tests run off-hardware: the Intel HEX library (34 tests, 100% mutation score under mutmut), the `hw_send.py` chainloader host tool (12 tests, covering ioctl DTR toggle and termios line-read deadline shaping), and the L2 hardening framework (95 tests covering `eth_frames`, `link`, and `wire` — the testable pieces of the `hw_test/` integration suite).
+- ~480 assembly unit tests on QEMU `raspi3b` covering every
+  protocol layer (Ethernet through HTTP/1.1) plus FSA-table
+  cross-checks pinned to the compiled ELF by `make
+  verify-fsa-table` and `make verify-dhcp-fsa-table`.
+- ~180 hardware integration tests across L2/L3/L4/L5 layered
+  pytest selections, gated by per-layer reflashes.
+- 141 Python unit tests for the host-side tooling (Intel HEX
+  builder at 100 % mutation score under mutmut, `hw_send.py`,
+  `link`, `wire`, frame builders).
+- Coverage-guided fuzz harnesses for the protocol parsers
+  (`make fuzz`, `make fuzz-seq`) with 23 single-packet and 16
+  multi-packet TCP seeds.
+- A dual-reviewer RFC compliance audit (Claude + independent
+  Gemini review) closed all 8 TCP defects across RFC 9293, 7323,
+  5681, and 5961 — see [`docs/l4_rfc1122_compliance.md`](docs/l4_rfc1122_compliance.md).
 
-The test architecture uses a weak `test_platform_drivers` symbol in the shared test runner. Each platform provides a strong override that calls its platform-specific tests. This lets shared protocol tests run for all platforms without modification.
-
-The test philosophy follows from the project's CLAUDE.md: failure handling code that is never tested is a liability. Functions accept MMIO base addresses as parameters rather than hardcoding constants — this is dependency injection at the ISA level, allowing tests to point hardware register accesses at fake register blocks in RAM.
-
-Branch coverage is audited after each feature: every conditional branch in production code has at least one test exercising both the taken and not-taken paths. Every test branch has an explicit assertion — executing code without checking the result is not testing.
-
-**Mutation testing** with [mutmut](https://github.com/boxed/mutmut) verifies test assertion quality on Python modules. The Intel HEX library achieves 100% mutation score (108/108 mutants killed). Surviving mutants revealed real test gaps in 64K boundary crossing logic that branch coverage alone missed.
-
-The TDD workflow:
-
-1. Write a test in `tests/` — call `test_pass` or `test_fail` with a test name string
-2. Register it in the platform's test aggregator (`tests/pi/test_pi_all.S`)
-3. `make test` — verify it fails (red)
-4. Implement in `lib/` or `platform/<name>/`
-5. `make test` — verify it passes (green)
-6. Commit
-
-### Scenario Tests — Windowing and Buffer Contents
-
-Thirteen multi-step protocol-level tests verify correctness properties across sequences of TCP operations. These go beyond single-call unit tests to exercise the interaction between receive buffering, window advertisement, data sending, send window tracking, and buffer management.
-
-**Window tests (S1-S3):**
-
-- **`test_tcp_window_tracks_fill`** (S1) — Verifies the window shrinks monotonically as data accumulates. Handshakes, sends 100 bytes, checks ACK window = `rev16(2048-100)`, then sends 200 more and checks window = `rev16(2048-300)`. Tests that the running RXLEN total feeds correctly into the NBO window computation across multiple segments.
-- **`test_tcp_window_after_flush`** (S2) — Verifies the application can reclaim buffer space. Sends 100 bytes (window shrinks), calls `tcp_rx_flush`, sends 50 more. Checks that the ACK window reflects only the 50 post-flush bytes — `rev16(2048-50)` — not the cumulative 150. This is the critical test for the consume-then-advertise cycle that prevents deadlock.
-- **`test_tcp_window_zero`** (S3) — Boundary test for zero-window advertisement. Pre-sets RXLEN to 2043, sends 5 bytes to fill the buffer exactly to 2048. Verifies the ACK window is literally 0. This is what tells the peer to stop sending until a window update arrives.
-
-**Buffer contents tests (S4-S5):**
-
-- **`test_tcp_buffer_contents`** (S4) — Verifies data integrity and ordering across concatenation. Sends "AAAA" then "BBBB" as separate segments. Peeks and byte-compares all 8 bytes against `0x41414141 0x42424242`. Catches off-by-one errors in the destination offset calculation (`pool + (slot << 11) + rxlen`).
-- **`test_tcp_buffer_survives_flush`** (S5) — Verifies flush doesn't leave stale data visible. Sends "AAAA", flushes, sends "CCCC". Peeks and verifies 4 bytes of "CCCC" — not 8 bytes with stale "AAAA" prefix. This works because flush zeroes RXLEN, so the next write starts at offset 0 in the slot, overwriting the old data.
-
-**Send + integration tests (S6-S7):**
-
-- **`test_tcp_send_frame_fields`** (S6) — Exhaustive field-level verification of a `tcp_send` output frame. Receives 100 bytes first (so the window isn't full-size), then sends "World". Checks: ETH dst matches RMAC, IP total length = 45 (NBO), TCP sport=80, dport=12345, SEQ = `rev(SND_NXT_before)`, ACK = `rev(RCV_NXT)`, flags = PSH+ACK, window = `rev16(2048-100)`, TCP checksum validates to 0, and payload bytes at offset 54 are 'W' and 'd'. This is the only test that verifies `tcp_build_frame` produces a wire-correct frame from `tcp_send`'s perspective.
-- **`test_tcp_send_rx_independent`** (S7) — Verifies send and receive paths don't interfere. Receives 50 bytes of 'X', then sends "World". Checks three things: rx peek still returns 50 bytes with 'X' at offset 0, send returned 59 (54+5), and SND_NXT advanced by exactly 5. This catches any accidental clobbering of RXLEN or the rx buffer pointer during the send path.
-
-**Send window scenario tests (S8-S13):**
-
-- **`test_tcp_send_window_exhaustion`** (S8) — Full send-window lifecycle: drain, block, reopen, resume. Sets SND_WND=15, sends three 5-byte segments (SND_WND drains 15→10→5→0), verifies a fourth send is rejected and `tcp_send_ready` returns 0. Then injects a pure ACK with window=1000, verifies SND_WND reopens to 1000, `tcp_send_ready` returns 1000, and a subsequent send succeeds with SND_WND=995.
-- **`test_tcp_window_update_partial`** (S9) — Window update with non-empty receive buffer. Handshakes, receives 500 bytes, then calls `tcp_window_update`. Verifies the returned frame advertises window = `rev16(2048-500)` = `rev16(1548)`.
-- **`test_tcp_send_boundary`** (S10) — Payload length exactly equals SND_WND. Sets SND_WND=5, sends 5 bytes. Verifies ret=59 (succeeds) and SND_WND=0.
-- **`test_tcp_send_ready_zero`** (S11) — SND_WND=0 returns 0.
-- **`test_tcp_snd_wnd_pure_ack`** (S12) — Pure ACK (no data) updates SND_WND.
-- **`test_tcp_snd_wnd_data_ack`** (S13) — Data ACK updates both rx buffer and SND_WND.
-
-### Functional Tests (PICT-Based Exhaustive Testing)
-
-Beyond unit tests, the TCP state machine has exhaustive functional coverage using [PICT](https://github.com/microsoft/pict) (Microsoft's Pairwise Independent Combinatorial Testing tool) with `/o:max` for full cross-product generation.
-
-Six independent parameters — connection state (10 states), TCP flags, port match type, payload, checksum validity, and header validity — produce a constrained cross-product of 138 PICT-generated test vectors plus 15 handcrafted scenario tests for a total of 153 functional tests. A Python oracle (`scripts/tcp_oracle.py`) independently computes the expected behavior for each vector. This gives two independent specifications of TCP correctness written in different languages.
-
-Functional tests are platform-independent and pass identically for all platforms.
-
-The pipeline:
-
-```
-tcp_func.pict  →  pict /o:max  →  tcp_vectors.tsv  →  tcp_oracle.py  →  tcp_vectors.bin
-                                                                              ↓
-                                              test_tcp_func.S (.incbin)  →  QEMU  →  PASS/FAIL
-```
+Test philosophy (excerpted from `CLAUDE.md`): failure-handling code
+that's never tested is a liability; every conditional branch has
+both-side coverage; every test branch has an explicit assertion —
+running code without checking a result is not a test. Functions
+accept MMIO base addresses as parameters rather than hardcoding
+constants, enabling dependency injection at the ISA level so tests
+can point hardware register accesses at fake register blocks in RAM.
 
 ## TCP: Table-Driven Finite State Automaton
 
@@ -711,57 +679,6 @@ Event classification maps TCP flags to 5 event codes in priority order: RST > SY
 - Persist timer: zero-window probing with exponential backoff (5s–60s)
 - DF bit set on all outgoing IP packets
 - RST generation for invalid packets, unknown ports, and unpopulated FSA entries
-
-## Fuzzing
-
-Coverage-guided fuzzing of the network packet parsers (`eth_type`, `arp_handle`, `ip_handle`, `icmp_handle`, `udp_handle`, `tcp_handle`, `net_recv_one`). All functions are pure computation on caller-provided buffers — no MMIO, no syscalls — making them ideal for user-mode fuzzing.
-
-### Prerequisites
-
-```
-sudo apt install gcc-aarch64-linux-gnu qemu-user-static
-```
-
-### Build and run
-
-Build the fuzz harness (static aarch64 Linux ELF):
-
-```
-make fuzz
-```
-
-Generate seed corpus:
-
-```
-make fuzz-corpus
-```
-
-Run a single input manually:
-
-```
-qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/fuzz_net < fuzz/corpus/arp_request.bin
-```
-
-With AFL++ (QEMU mode for aarch64 coverage):
-
-```
-afl-fuzz -Q -i fuzz/corpus -o fuzz/findings -- ./build/fuzz_net
-```
-
-### Multi-packet TCP fuzzing
-
-The single-packet harness resets `tcp_init()` each run, so TCP can only ever reach SYN_RCVD. The multi-packet harness (`fuzz/fuzz_tcp_seq.c`) feeds a *sequence* of frames per run, letting the fuzzer explore handshake completion, ESTABLISHED-state data transfer, window management, and close sequences.
-
-**Input format:** Concatenated length-prefixed frames: `[u16be len][frame bytes]...`
-
-Build the harness and generate seeds:
-
-```
-make fuzz-seq
-make fuzz-corpus-seq
-```
-
-**16 seed files** cover: handshake, data transfer, passive/active/simultaneous close, duplicate SYN flood, OOO merge, timestamp negotiation, and bad-sequence rejection.
 
 ## Platform Details
 
