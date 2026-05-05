@@ -601,3 +601,109 @@ truncated OFFER, etc.) without us hand-enumerating them.
     already covers it; no change needed.
 
 **Date:** 2026-05-01
+
+---
+
+## D018 — One kernel binary at 0x80000; chainloader self-relocates to 0x4000000
+
+**Decision:** Both the SD-direct boot path and the UART chainloader
+path link the kernel at the firmware default address (0x80000). The
+chainloader image (`chainload/boot.S`) is also loaded by firmware at
+0x80000 but copies itself to 0x4000000 on entry and jumps there
+*before* doing any UART work, freeing 0x80000 to receive the
+incoming kernel.
+
+This supersedes the earlier "two binaries, two link addresses" build
+shape (`make PLATFORM=pi4` for chainloader at 0x200000; `make
+PLATFORM=pi4 SHIP=1` for SD-direct at 0x80000). The `SHIP=1` flag is
+removed.
+
+**Rationale:** The earlier split existed to keep ARM-side writes off
+0x80000 during chainloader UART transfer — the BCM2711 GPU firmware
+runs an active agent at 0x80000 *during the chainloader's UART
+transfer phase* that corrupts the PL011 RX FIFO when ARM writes to
+that region (see the README's "firmware 0x80000 conflict" section).
+Loading the kernel at 0x200000 worked but doubled the build surface,
+made the SHIP-vs-dev choice load-bearing for every commit's perf
+gate, and meant the chainloader path could never inherit any work
+that depended on the firmware-quiescence guarantee SD-direct
+already had.
+
+The agent is *not* active during firmware-side load of `kernel8.img`
+at 0x80000 (the CPU is held off until hand-off) — that's why
+SD-direct at 0x80000 always worked. By having the chainloader move
+itself to 0x4000000 *before* opening the UART loop, we extend that
+quiescence to the chainloader path: the chainloader's runtime
+working set is at 0x4000000 and the incoming kernel HEX records
+land at 0x80000, where the agent is dormant after firmware hand-off.
+
+**Why not load the kernel at 0x4000000 instead?** The kernel's link
+address has to match what firmware loads from `kernel8.img` for
+SD-direct to work without a `kernel_address=` override in
+`config.txt`. Pinning to firmware's default (0x80000) keeps SD-direct
+no-config and lets the chainloader image be the only thing that
+chooses where to live (which is invisible to anyone not building
+the chainloader).
+
+**Implementation:** commits `e899e7a` (drop SHIP=1, unify link
+address), `7e3e774` (chainloader self-relocate stub), `905c2c2`
+(I-cache invalidate + isb before `br x0`), `991b84c` (D-cache
+invalidate before BSS zero, fix way-bit per platform).
+
+**Trigger to revisit:** If a future SoC's firmware loads
+`kernel8.img` at a different address (e.g. Pi 5 / BCM2712), the
+chainloader's self-relocate destination (currently hardcoded
+0x4000000) and the kernel's link address would need to be revisited
+together. The unification keeps that to two related changes instead
+of every Makefile target picking sides.
+
+**Date:** 2026-05-04
+
+---
+
+## D019 — Dual-config rig: chainloader SD has no `network.conf`
+
+**Decision:** A chainloader-mode SD card produced by `scripts/mk_sd.sh
+--chainload` ships **no** `network.conf` and no `initramfs` directive
+in `config.txt`. The kernel reads `network.conf` from `0x20000000`
+(the firmware-default initramfs region), which the chainloader leaves
+at DRAM-init zero unless `hw_send.py --network-conf <path>` prepends
+the file's bytes as Intel HEX records targeting that address
+alongside the kernel.
+
+Cold-booting a chainloader SD without a UART-pushed config
+intentionally panics with `panic_k` (config-parse error) because the
+0xff/0x00 bytes at 0x20000000 fail the magic check. This is loud and
+recoverable.
+
+**Rationale:** The chainloader-mode SD is a development / test fixture,
+not a shippable artifact. Coupling it to a static `network.conf`
+inside the FAT partition would force every test pass to either reflash
+the SD or push a different image — exactly the friction the
+chainloader exists to eliminate. Decoupling the config from the SD
+lets one SD serve both static and DHCP test passes via
+`scripts/dual_config_tests.sh`, with each pass differing only in the
+bytes pushed alongside the kernel (`hw_test/network-static.conf` vs
+`hw_test/network-dhcp.conf`).
+
+**Why panic instead of falling back to a hardcoded static config?**
+Same reasoning as D017's "no static fallback when DHCP fails": a
+silent fallback in this position would make a misconfigured rig look
+like it was running, where in fact the kernel was on a wrong /
+stale config. `panic_k` on the LED tells the operator immediately
+that something didn't push the expected bytes. The rig harness'
+post-flash ping check would also catch a wrong config quickly, but
+"loud at the LED" is a strictly better diagnostic than "ARP timeout
+deep inside pytest."
+
+**Out of scope for end users.** SD-direct boot images built by
+`scripts/mk_sd.sh --build` (the user-facing path) ship with a
+default `network.conf` exactly as before — D019 changes the
+chainloader-mode SD only.
+
+**Implementation:** commit `76d0135` (`scripts/mk_sd.sh --chainload`
+no longer ships `network.conf` or the `initramfs` directive;
+`scripts/hw_send.py --network-conf` is the sole writer of
+`0x20000000`).
+
+**Date:** 2026-05-04
