@@ -43,11 +43,14 @@ main:
     ldr     x0, =msg_hello_pi4
     bl      uart_puts
 
-    /* Diagnostic: dump first 16 bytes at INITRAMFS_ADDR so we can
-     * see whether the firmware actually loaded network.conf.
-     * If we see "# WSPI5CFG" the firmware is honoring the config.txt
-     * `initramfs` directive; if zeros or garbage, the directive
-     * isn't taking. Removeable once SD-direct boot is verified. */
+    /* Dump first 16 bytes at INITRAMFS_ADDR so we can see whether
+     * the firmware (or hw_send.py --network-conf in chainloader mode)
+     * actually loaded network.conf. If we see "# WSPI5CFG" the bytes
+     * arrived; if zeros or 0xff garbage, the SD's initramfs directive
+     * isn't taking or the UART push didn't include --network-conf.
+     * Permanent infrastructure: this readout was load-bearing during
+     * dual-config rig debugging (D019) and stays as a first-line
+     * diagnostic for any "kernel boots but config seems wrong" report. */
     ldr     x0, =msg_initramfs_probe
     bl      uart_puts
     ldr     x19, =INITRAMFS_ADDR
