@@ -152,6 +152,10 @@ _start:
     bl      test_mdns_start_defers_when_ip_zero
     bl      test_mdns_kick_arms_after_ip_set
     bl      test_mdns_kick_noop_in_probe
+    bl      test_mdns_announced_ip_set_on_arm
+    bl      test_mdns_kick_reannounces_on_ip_change_from_live
+    bl      test_mdns_kick_noop_on_same_ip_in_live
+    bl      test_mdns_kick_reannounces_on_ip_change_mid_probe
     bl      test_dhcp_fsa_step_init_start
     bl      test_dhcp_fsa_step_no_handler
     bl      test_dhcp_fsa_step_oob_event

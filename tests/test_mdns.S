@@ -51,6 +51,10 @@
 .global test_mdns_start_defers_when_ip_zero
 .global test_mdns_kick_arms_after_ip_set
 .global test_mdns_kick_noop_in_probe
+.global test_mdns_announced_ip_set_on_arm
+.global test_mdns_kick_reannounces_on_ip_change_from_live
+.global test_mdns_kick_noop_on_same_ip_in_live
+.global test_mdns_kick_reannounces_on_ip_change_mid_probe
 
 .section .text
 
@@ -1687,6 +1691,236 @@ test_mdns_kick_noop_in_probe:
     ret
 
 
+/* ========================================================================
+ * test_mdns_announced_ip_set_on_arm — after mdns_start arms the
+ * cycle, MDNSC_ANNOUNCED_IP equals net_our_ip. mdns_kick uses this
+ * to detect a DHCP rebind to a different IP.
+ * ======================================================================== */
+test_mdns_announced_ip_set_on_arm:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup       /* state=PROBE_1, IP=10.0.2.15 */
+
+    /* MDNSC_ANNOUNCED_IP == net_our_ip == 0x0F02000A. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]           /* MDNSC_ANNOUNCED_IP */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldr     w0, [x0]
+    cmp     w0, w1
+    b.ne    .Ltaai_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_announced_ip_set_on_arm
+    bl      test_pass
+    b       .Ltaai_done
+.Ltaai_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_announced_ip_set_on_arm
+    bl      test_fail
+.Ltaai_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_kick_reannounces_on_ip_change_from_live — drive the
+ * state machine to LIVE (5 timer callbacks), change net_our_ip to
+ * a new value, call mdns_kick. Assert state went back to PROBE_1
+ * and ANNOUNCED_IP matches the new value. This is the DHCP-rebind-
+ * to-a-different-IP case after the responder is already live.
+ * ======================================================================== */
+test_mdns_kick_reannounces_on_ip_change_from_live:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+    /* Drive to LIVE (5 callbacks). */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #6                  /* MDNS_STATE_LIVE */
+    b.ne    .Ltkrl_fail
+
+    /* Change net_our_ip from 10.0.2.15 to 10.0.2.99
+     * (0x0F02000A → 0x6302000A — only the high byte differs). */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    mov     w1, #99
+    strb    w1, [x0, #3]
+
+    /* Sanity: ANNOUNCED_IP still has the old value, so net_our_ip
+     * and ANNOUNCED_IP differ (kick will detect this). */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]           /* MDNSC_ANNOUNCED_IP */
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    cmp     w1, w2
+    b.eq    .Ltkrl_fail             /* must differ pre-kick */
+
+    bl      mdns_kick
+
+    /* State went back to PROBE_1. */
+    bl      mdns_get_state
+    cmp     w0, #1                  /* MDNS_STATE_PROBE_1 */
+    b.ne    .Ltkrl_fail
+
+    /* ANNOUNCED_IP now matches the new net_our_ip. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]           /* MDNSC_ANNOUNCED_IP */
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    cmp     w1, w2
+    b.ne    .Ltkrl_fail
+
+    /* And the timer is armed: one timer_cb call sends a probe
+     * and advances state to PROBE_2. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    bl      mdns_get_state
+    cmp     w0, #2                  /* MDNS_STATE_PROBE_2 */
+    b.ne    .Ltkrl_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_reannounces_on_ip_change_from_live
+    bl      test_pass
+    b       .Ltkrl_done
+.Ltkrl_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_reannounces_on_ip_change_from_live
+    bl      test_fail
+.Ltkrl_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_kick_noop_on_same_ip_in_live — drive to LIVE, call
+ * mdns_kick without changing net_our_ip. State must stay LIVE and
+ * the cycle must not restart. This is the DHCP-renewal-on-same-
+ * lease case (the common one — kick fires every commit but most
+ * commits don't change the IP).
+ * ======================================================================== */
+test_mdns_kick_noop_on_same_ip_in_live:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup
+    /* Drive to LIVE. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+
+    bl      mdns_get_state
+    cmp     w0, #6                  /* MDNS_STATE_LIVE */
+    b.ne    .Ltksl_fail
+
+    /* Snapshot send count, kick, verify state stays LIVE and no
+     * additional sends happened. */
+    adrp    x1, _mdns_send_count
+    add     x1, x1, :lo12:_mdns_send_count
+    ldr     w2, [x1]
+    cmp     w2, #5
+    b.ne    .Ltksl_fail
+
+    bl      mdns_kick
+
+    bl      mdns_get_state
+    cmp     w0, #6                  /* still LIVE */
+    b.ne    .Ltksl_fail
+
+    adrp    x1, _mdns_send_count
+    add     x1, x1, :lo12:_mdns_send_count
+    ldr     w2, [x1]
+    cmp     w2, #5                  /* unchanged */
+    b.ne    .Ltksl_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_noop_on_same_ip_in_live
+    bl      test_pass
+    b       .Ltksl_done
+.Ltksl_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_noop_on_same_ip_in_live
+    bl      test_fail
+.Ltksl_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ========================================================================
+ * test_mdns_kick_reannounces_on_ip_change_mid_probe — IP changes
+ * during the probe phase (PROBE_2). The in-flight cycle is stale;
+ * mdns_kick must cancel the existing timer slot, reset state to
+ * PROBE_1, and arm a fresh cycle with the new IP. Pins the contract
+ * that "two timer slots pointing at the same context" never happens.
+ * ======================================================================== */
+test_mdns_kick_reannounces_on_ip_change_mid_probe:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_state_setup       /* state = PROBE_1 */
+
+    /* One callback advances PROBE_1 → PROBE_2 and sends a probe. */
+    ldr     x0, =mdns_send_ctx
+    bl      mdns_timer_cb
+    bl      mdns_get_state
+    cmp     w0, #2                  /* MDNS_STATE_PROBE_2 */
+    b.ne    .Ltkmp_fail
+
+    /* Change net_our_ip mid-cycle. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    mov     w1, #99
+    strb    w1, [x0, #3]
+
+    bl      mdns_kick
+
+    /* State reset to PROBE_1, ANNOUNCED_IP updated to new value. */
+    bl      mdns_get_state
+    cmp     w0, #1                  /* MDNS_STATE_PROBE_1 */
+    b.ne    .Ltkmp_fail
+
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]           /* MDNSC_ANNOUNCED_IP */
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    cmp     w1, w2
+    b.ne    .Ltkmp_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_reannounces_on_ip_change_mid_probe
+    bl      test_pass
+    b       .Ltkmp_done
+.Ltkmp_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_kick_reannounces_on_ip_change_mid_probe
+    bl      test_fail
+.Ltkmp_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Stub panic handler for tests: increments _mdns_panic_count and
  * returns. Wired in via mdns_panic_fn; the production default
  * (mdns_panic_fn = NULL → fall through to bl panic_n in mdns.S)
@@ -1937,6 +2171,14 @@ _mdns_name_kick_arms_after_ip_set:
     .asciz "mdns_kick_arms_after_ip_set"
 _mdns_name_kick_noop_in_probe:
     .asciz "mdns_kick_noop_in_probe"
+_mdns_name_announced_ip_set_on_arm:
+    .asciz "mdns_announced_ip_set_on_arm"
+_mdns_name_kick_reannounces_on_ip_change_from_live:
+    .asciz "mdns_kick_reannounces_on_ip_change_from_live"
+_mdns_name_kick_noop_on_same_ip_in_live:
+    .asciz "mdns_kick_noop_on_same_ip_in_live"
+_mdns_name_kick_reannounces_on_ip_change_mid_probe:
+    .asciz "mdns_kick_reannounces_on_ip_change_mid_probe"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.

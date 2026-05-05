@@ -1085,25 +1085,32 @@ mdns_build_announce_frame:
  * The send_fn signature mirrors arp.S:
  *   send_fn(x0=dwc2_base, x1=ecm_state, x2=frame_ptr, w3=frame_len)
  *
- * Context layout (mdns_send_ctx in BSS, 56 bytes):
- *   +0  DWC2_BASE   u64
- *   +8  ECM_STATE   u64
- *   +16 TX_BUF      u64  scratch frame buffer (≥ 140 bytes)
- *   +24 TIMER_POOL  u64
- *   +32 TIMER_FREQ  u64  cached at start
- *   +40 SEND_FN     u64  function pointer
- *   +48 STATE       u32  one of MDNS_STATE_*
- *   +52 (pad)       u32
+ * Context layout (mdns_send_ctx in BSS, 64 bytes):
+ *   +0  DWC2_BASE     u64
+ *   +8  ECM_STATE     u64
+ *   +16 TX_BUF        u64  scratch frame buffer (≥ 140 bytes)
+ *   +24 TIMER_POOL    u64
+ *   +32 TIMER_FREQ    u64  cached at start
+ *   +40 SEND_FN       u64  function pointer
+ *   +48 STATE         u32  one of MDNS_STATE_*
+ *   +52 TIMER_SLOT    s32  timer pool slot index, -1 if unarmed
+ *   +56 ANNOUNCED_IP  u32  net_our_ip captured at most-recent arm,
+ *                          wire-order bytes — used by mdns_kick to
+ *                          detect DHCP-rebind to a different IP and
+ *                          restart the probe cycle on the new value.
+ *   +60 (pad)         u32
  * =========================================================================== */
 
-.equ MDNSC_DWC2_BASE,    0
-.equ MDNSC_ECM_STATE,    8
-.equ MDNSC_TX_BUF,       16
-.equ MDNSC_TIMER_POOL,   24
-.equ MDNSC_TIMER_FREQ,   32
-.equ MDNSC_SEND_FN,      40
-.equ MDNSC_STATE,        48
-.equ MDNSC_SIZE,         56
+.equ MDNSC_DWC2_BASE,     0
+.equ MDNSC_ECM_STATE,     8
+.equ MDNSC_TX_BUF,        16
+.equ MDNSC_TIMER_POOL,    24
+.equ MDNSC_TIMER_FREQ,    32
+.equ MDNSC_SEND_FN,       40
+.equ MDNSC_STATE,         48
+.equ MDNSC_TIMER_SLOT,    52
+.equ MDNSC_ANNOUNCED_IP,  56
+.equ MDNSC_SIZE,          64
 
 .equ MDNS_STATE_IDLE,        0
 .equ MDNS_STATE_PROBE_1,     1
@@ -1168,6 +1175,19 @@ mdns_start:
      * MDNS_STATE_LIVE from a prior run. */
     str     wzr, [x5, #MDNSC_STATE]
 
+    /* TIMER_SLOT = -1 sentinel — _mdns_try_arm cancels any prior
+     * slot before re-arming, and the cancel is a silent no-op when
+     * the index is out of bounds (timer_pool: w1 >= TPOOL_CAP). */
+    mov     w0, #-1
+    str     w0, [x5, #MDNSC_TIMER_SLOT]
+
+    /* ANNOUNCED_IP = 0 so the first compare in mdns_kick (after a
+     * later DHCP commit) treats anything as "different" if state is
+     * non-IDLE. (In practice, _mdns_try_arm sets ANNOUNCED_IP to
+     * the current net_our_ip on a successful arm, so the IDLE-path
+     * sets it before kick ever compares.) */
+    str     wzr, [x5, #MDNSC_ANNOUNCED_IP]
+
     bl      _mdns_try_arm
 
     ldp     x29, x30, [sp], #16
@@ -1180,10 +1200,25 @@ mdns_start:
  * commits and net_our_ip is updated, so the deferred arm from
  * mdns_start can complete.
  *
- * No-op if state is anything other than IDLE: an already-running
- * probe / announce cycle, or a LIVE responder, must not be reset
- * mid-flight. A second DHCP renew that gets the same IP is a no-op
- * (state is LIVE by then, kick returns).
+ * Three cases by current state:
+ *
+ *   IDLE — no cycle has run yet (mdns_start ran with net_our_ip == 0
+ *     and deferred). Call _mdns_try_arm to start the probe cycle
+ *     with the now-committed IP.
+ *
+ *   non-IDLE, ANNOUNCED_IP == net_our_ip — DHCP renewed on the same
+ *     lease; no-op. The cycle in flight (or LIVE responder) is
+ *     already announcing the right IP.
+ *
+ *   non-IDLE, ANNOUNCED_IP != net_our_ip — DHCP rebound to a
+ *     different IP. The responder is currently announcing a stale
+ *     value; peers' caches will eventually expire it (default mDNS
+ *     TTL 120 s) but we want to replace it now. _mdns_try_arm
+ *     cancels the existing timer slot, resets state to PROBE_1, and
+ *     arms a fresh cycle with the new IP. The new probe + announce
+ *     each carry the cache-flush bit (RFC 6762 §10.2), so peers
+ *     replace the stale A record on receipt without us needing to
+ *     send an explicit goodbye for the old IP.
  * --------------------------------------------------------------------------- */
 .global mdns_kick
 mdns_kick:
@@ -1193,8 +1228,17 @@ mdns_kick:
     adrp    x5, mdns_send_ctx
     add     x5, x5, :lo12:mdns_send_ctx
     ldr     w6, [x5, #MDNSC_STATE]
-    cbnz    w6, .Lkick_done
+    cbz     w6, .Lkick_arm          /* IDLE — defer-arm path */
 
+    /* Non-IDLE: compare ANNOUNCED_IP with net_our_ip. */
+    ldr     w0, [x5, #MDNSC_ANNOUNCED_IP]
+    adrp    x1, net_our_ip
+    add     x1, x1, :lo12:net_our_ip
+    ldr     w1, [x1]
+    cmp     w0, w1
+    b.eq    .Lkick_done             /* same IP — no-op */
+
+.Lkick_arm:
     bl      _mdns_try_arm
 
 .Lkick_done:
@@ -1238,11 +1282,31 @@ _mdns_try_arm:
     ldr     w6, [x6]
     cbz     w6, .Larm_done
 
+    /* Cancel any prior timer slot before arming a new one. The
+     * IP-changed branch in mdns_kick lands here while state is
+     * non-IDLE and a slot is already in-flight; without this cancel
+     * we'd leave two slots pointing at this same context, both
+     * firing mdns_timer_cb and racing on state advancement.
+     * timer_cancel ignores the -1 sentinel (silent no-op for
+     * out-of-range indices) so the first-arm path is also safe. */
+    ldr     x0, [x5, #MDNSC_TIMER_POOL]
+    ldr     w1, [x5, #MDNSC_TIMER_SLOT]
+    bl      timer_cancel
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+
     /* Cache timer frequency. */
     bl      timer_freq
     adrp    x5, mdns_send_ctx
     add     x5, x5, :lo12:mdns_send_ctx
     str     x0, [x5, #MDNSC_TIMER_FREQ]
+
+    /* Cache the IP this cycle is announcing. mdns_kick reads this
+     * to detect a DHCP rebind to a different IP. */
+    adrp    x6, net_our_ip
+    add     x6, x6, :lo12:net_our_ip
+    ldr     w6, [x6]
+    str     w6, [x5, #MDNSC_ANNOUNCED_IP]
 
     /* state = PROBE_1. */
     mov     w0, #MDNS_STATE_PROBE_1
@@ -1258,6 +1322,11 @@ _mdns_try_arm:
     adrp    x3, mdns_send_ctx
     add     x3, x3, :lo12:mdns_send_ctx
     bl      timer_set
+    /* Capture returned slot index (or -1 on full pool) so a future
+     * mdns_kick triggered by an IP change can cancel cleanly. */
+    adrp    x5, mdns_send_ctx
+    add     x5, x5, :lo12:mdns_send_ctx
+    str     w0, [x5, #MDNSC_TIMER_SLOT]
 
 .Larm_done:
     ldp     x29, x30, [sp], #16
@@ -1351,6 +1420,9 @@ mdns_timer_cb:
     ldr     x2, =mdns_timer_cb
     mov     x3, x19
     bl      timer_set
+    /* Track the new slot so an IP-change kick during this cycle
+     * can cancel cleanly. */
+    str     w0, [x19, #MDNSC_TIMER_SLOT]
 
 .Ltcb_done:
     ldr     x21, [sp, #32]
