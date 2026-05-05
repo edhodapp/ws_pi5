@@ -30,6 +30,7 @@
 .global test_dhcp_t1_drives_renew
 .global test_dhcp_t2_drives_rebind
 .global test_dhcp_rebind_to_different_ip_kicks_mdns
+.global test_dhcp_full_rebind_sequence_ends_with_mdns_kick
 
 .section .text
 
@@ -1228,6 +1229,267 @@ test_dhcp_rebind_to_different_ip_kicks_mdns:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_full_rebind_sequence_ends_with_mdns_kick — drives the
+ * full hardware-side rebind path step-by-step:
+ *
+ *   BOUND → T1 → RENEWING → NAK → SELECTING → OFFER → REQUESTING →
+ *   ACK → BOUND
+ *
+ * Each step fires a single FSA event into the engine. Verifies state
+ * after every transition and the final mdns_kick handoff. This is
+ * the unit-level repro of the hardware test_dhcpnak_rebind_updates_mdns
+ * scenario — if the kernel-level chain is correct, this test passes
+ * and the hardware-only failure is somewhere outside the FSA / mdns_kick
+ * logic (network drop, GENET TX wedge, panic_d on missed retransmits).
+ * ======================================================================== */
+test_dhcp_full_rebind_sequence_ends_with_mdns_kick:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Save net_our_ip for restore. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldr     w1, [x0]
+    adrp    x2, _dhcp_saved_net_our_ip
+    add     x2, x2, :lo12:_dhcp_saved_net_our_ip
+    str     w1, [x2]
+
+    /* Init timer pool. */
+    ldr     x0, =_dhcp_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+
+    /* Set up dhcp_send_ctx with pool, send_fn, freq. */
+    bl      timer_freq
+    adrp    x1, dhcp_send_ctx
+    add     x1, x1, :lo12:dhcp_send_ctx
+    str     x0, [x1, #DHCPC_TIMER_FREQ]
+    ldr     x2, =_dhcp_test_tpool
+    str     x2, [x1, #DHCPC_TIMER_POOL]
+    ldr     x2, =_dhcp_send_capture
+    str     x2, [x1, #DHCPC_SEND_FN]
+
+    /* Init T1/T2/LEASE slots to -1 sentinel (h_commit_lease_arm_timers
+     * cancels the pre-existing slots; -1 means "never armed"). */
+    mov     w0, #-1
+    str     w0, [x1, #DHCPC_T1_SLOT]
+    str     w0, [x1, #DHCPC_T2_SLOT]
+    str     w0, [x1, #DHCPC_LEASE_SLOT]
+
+    /* Provide hostname for mdns_kick's _mdns_try_arm guards. */
+    adrp    x0, net_hostname
+    add     x0, x0, :lo12:net_hostname
+    stp     xzr, xzr, [x0, #0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #32]
+    stp     xzr, xzr, [x0, #48]
+    mov     w1, #'q'
+    strb    w1, [x0, #0]
+    mov     w1, #'e'
+    strb    w1, [x0, #1]
+    mov     w1, #'m'
+    strb    w1, [x0, #2]
+    mov     w1, #'u'
+    strb    w1, [x0, #3]
+    adrp    x0, net_hostname_len
+    add     x0, x0, :lo12:net_hostname_len
+    mov     w1, #4
+    str     w1, [x0]
+
+    /* IP_A = 10.0.0.100 wire-order. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    mov     w1, #10
+    strb    w1, [x0, #0]
+    strb    wzr, [x0, #1]
+    strb    wzr, [x0, #2]
+    mov     w1, #100
+    strb    w1, [x0, #3]
+
+    /* Initialize mdns_send_ctx as a post-boot LIVE responder for
+     * IP_A: state = LIVE, ANNOUNCED_IP = IP_A, TIMER_SLOT = -1,
+     * timer_pool wired. PRIOR_ANNOUNCED_IP starts 0 (no prior kick). */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    stp     xzr, xzr, [x0, #0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #32]
+    stp     xzr, xzr, [x0, #48]
+    ldr     x1, =_dhcp_test_tpool
+    str     x1, [x0, #24]                   /* MDNSC_TIMER_POOL */
+    mov     w1, #6                          /* MDNS_STATE_LIVE */
+    str     w1, [x0, #48]                   /* MDNSC_STATE */
+    mov     w1, #-1
+    str     w1, [x0, #52]                   /* MDNSC_TIMER_SLOT */
+    /* Copy IP_A from net_our_ip into MDNSC_ANNOUNCED_IP. */
+    adrp    x1, net_our_ip
+    add     x1, x1, :lo12:net_our_ip
+    ldr     w2, [x1]
+    str     w2, [x0, #56]                   /* MDNSC_ANNOUNCED_IP */
+
+    /* Start at S_BOUND. */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_BOUND
+    str     w2, [x1]
+
+    /* === Step 1: T1 fires. BOUND → RENEWING (h_send_request_renew). === */
+    mov     w0, #E_TIMER_T1
+    bl      dhcp_fsa_step
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_RENEWING
+    b.ne    .Ltfrs_fail
+    /* h_send_request_renew should have called send_capture once. */
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #1
+    b.ne    .Ltfrs_fail
+
+    /* === Step 2: NAK arrives. RENEWING → SELECTING (post-fix; was
+     *      S_INIT pre-fix). h_send_discover sends DISCOVER. === */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_NAK
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    mov     w0, #E_RX_NAK_VALID
+    bl      dhcp_fsa_step
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_SELECTING
+    b.ne    .Ltfrs_fail
+    /* DISCOVER sent → send_count = 2. */
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #2
+    b.ne    .Ltfrs_fail
+
+    /* === Step 3: OFFER arrives with new yiaddr (IP_B = 10.0.0.105).
+     *      SELECTING → REQUESTING (h_record_offer_send_request).
+     *      REQUEST sent. === */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_OFFER
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    /* yiaddr = 10.0.0.105 wire-order. */
+    mov     w1, #10
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 0)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 1)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 2)]
+    mov     w1, #105
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 3)]
+    /* server_id (host-order u32 — 10.0.0.1 wire = 0x0100000A LE). */
+    movz    w1, #0x000A
+    movk    w1, #0x0100, lsl #16
+    str     w1, [x0, #DHCP_PARSED_SERVER_ID]
+    mov     w0, #E_RX_OFFER_VALID
+    bl      dhcp_fsa_step
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_REQUESTING
+    b.ne    .Ltfrs_fail
+    adrp    x0, _dhcp_send_count
+    add     x0, x0, :lo12:_dhcp_send_count
+    ldr     w0, [x0]
+    cmp     w0, #3
+    b.ne    .Ltfrs_fail
+
+    /* net_our_ip should NOT change yet — h_commit_lease_arm_timers
+     * runs only at the ACK in step 4. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldrb    w1, [x0, #3]
+    cmp     w1, #100                        /* still IP_A */
+    b.ne    .Ltfrs_fail
+
+    /* === Step 4: ACK arrives. REQUESTING → BOUND
+     *      (h_commit_lease_arm_timers). net_our_ip stamped to IP_B,
+     *      mdns_kick fires, IP-change branch: PRIOR=IP_A,
+     *      ANNOUNCED=IP_B, state=PROBE_1. === */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_ACK
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    /* lease_time = 3600 host-order. */
+    movz    w1, #0x0E10
+    str     w1, [x0, #DHCP_PARSED_LEASE_TIME]
+    /* No subnet/router options. */
+    strb    wzr, [x0, #DHCP_PARSED_FLAGS]
+    mov     w0, #E_RX_ACK_VALID
+    bl      dhcp_fsa_step
+
+    /* === Verify final state. === */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_BOUND
+    b.ne    .Ltfrs_fail
+
+    /* net_our_ip[3] == 105 (IP_B). */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldrb    w1, [x0, #3]
+    cmp     w1, #105
+    b.ne    .Ltfrs_fail
+
+    /* MDNSC_ANNOUNCED_IP == net_our_ip (=IP_B). */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    cmp     w1, w2
+    b.ne    .Ltfrs_fail
+
+    /* MDNSC_PRIOR_ANNOUNCED_IP == IP_A (10.0.0.100 wire-order =
+     * 0x64000A0A LE). Construct from bytes for endianness clarity. */
+    ldr     w1, [x0, #60]                   /* PRIOR */
+    /* Build expected IP_A word: byte[0]=10, byte[3]=100. */
+    mov     w2, #100
+    lsl     w2, w2, #24                     /* 100 << 24 */
+    movz    w3, #10
+    orr     w2, w2, w3                      /* IP_A wire as LE u32 */
+    cmp     w1, w2
+    b.ne    .Ltfrs_fail
+
+    /* MDNSC_STATE == PROBE_1. */
+    ldr     w1, [x0, #48]
+    cmp     w1, #1
+    b.ne    .Ltfrs_fail
+
+    /* All four transitions and the kick chain validated. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+    ldr     x0, =_dhcp_name_full_rebind_sequence
+    bl      test_pass
+    b       .Ltfrs_done
+.Ltfrs_fail:
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+    ldr     x0, =_dhcp_name_full_rebind_sequence
+    bl      test_fail
+.Ltfrs_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -1243,6 +1505,8 @@ _dhcp_name_ack_commits:        .asciz "dhcp_ack_commits_lease"
 _dhcp_name_t1_renew:           .asciz "dhcp_t1_drives_renew"
 _dhcp_name_t2_rebind:          .asciz "dhcp_t2_drives_rebind"
 _dhcp_name_rebind_kicks_mdns:  .asciz "dhcp_rebind_to_different_ip_kicks_mdns"
+_dhcp_name_full_rebind_sequence:
+    .asciz "dhcp_full_rebind_sequence_ends_with_mdns_kick"
 
 
 .section .bss

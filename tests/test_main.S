@@ -171,6 +171,7 @@ _start:
     bl      test_dhcp_t1_drives_renew
     bl      test_dhcp_t2_drives_rebind
     bl      test_dhcp_rebind_to_different_ip_kicks_mdns
+    bl      test_dhcp_full_rebind_sequence_ends_with_mdns_kick
     bl      test_dhcp_build_discover_header
     bl      test_dhcp_build_discover_options
     bl      test_dhcp_build_request_selecting_has_50_and_54
