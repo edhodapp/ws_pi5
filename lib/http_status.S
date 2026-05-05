@@ -89,6 +89,121 @@ http_status_generate:
     mov     x0, x23
     bl      .Lsg_write_decimal
 
+    /* --- Diagnostics block: DHCP handler counters + key mdns ctx
+     * fields. Plain key=value lines inside a <pre> so a test can
+     * grep via curl. Order matches dhcp_count_block_start..end. */
+    ldr     x0, =status_diag_prefix
+    ldr     w1, =status_diag_prefix_len
+    bl      .Lsg_copy
+
+    ldr     x0, =diag_label_dhcp_send_discover
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_send_discover
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_resend_discover
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_resend_discover
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_record_offer
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_record_offer_send_request
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_resend_req_sel
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_resend_request_selecting
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_commit_lease
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_commit_lease_arm_timers
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_send_renew
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_send_request_renew
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_resend_renew
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_resend_request_renew
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_send_rebind
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_send_request_rebind
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_resend_rebind
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_resend_request_rebind
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_dhcp_panic_d
+    bl      .Lsg_copy_asciz
+    ldr     x0, =dhcp_count_panic_d
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    /* mDNS state + announced IPs in dotted-quad form. */
+    ldr     x0, =diag_label_mdns_state
+    bl      .Lsg_copy_asciz
+    bl      mdns_get_state
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_mdns_announced
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    add     x0, x0, #56                     /* MDNSC_ANNOUNCED_IP */
+    bl      .Lsg_write_dotted_w_nl
+
+    ldr     x0, =diag_label_mdns_prior
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    add     x0, x0, #60                     /* MDNSC_PRIOR_ANNOUNCED_IP */
+    bl      .Lsg_write_dotted_w_nl
+
+    ldr     x0, =diag_label_net_our_ip
+    bl      .Lsg_copy_asciz
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    bl      .Lsg_write_dotted_w_nl
+
+    /* mDNS context's timer wiring — pool ptr non-null and current
+     * armed slot. If TIMER_POOL is 0, _mdns_try_arm and the cb's
+     * re-arm both bail silently — state can stick mid-cycle. If
+     * TIMER_SLOT is -1, no timer is currently armed. */
+    ldr     x0, =diag_label_mdns_timer_pool
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     x0, [x0, #24]                   /* MDNSC_TIMER_POOL */
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_mdns_timer_slot
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldrsw   x0, [x0, #52]                   /* MDNSC_TIMER_SLOT (s32) */
+    bl      .Lsg_write_signed_decimal_w_nl
+
+    ldr     x0, =status_diag_suffix
+    ldr     w1, =status_diag_suffix_len
+    bl      .Lsg_copy
+
     /* Suffix */
     ldr     x0, =status_suffix
     ldr     w1, =status_suffix_len
@@ -153,6 +268,68 @@ http_status_generate:
     add     sp, sp, #16
     ret
 
+/* Helper: copy a NUL-terminated string from x0 to x20, advance x20.
+ * Stops at the NUL (which is not written). */
+.Lsg_copy_asciz:
+    ldrb    w1, [x0], #1
+    cbz     w1, .Lsg_asciz_done
+    strb    w1, [x20], #1
+    b       .Lsg_copy_asciz
+.Lsg_asciz_done:
+    ret
+
+/* Helper: write decimal of x0 into x20 followed by '\n'. */
+.Lsg_write_decimal_w_nl:
+    stp     x29, x30, [sp, #-16]!
+    bl      .Lsg_write_decimal
+    mov     w1, #'\n'
+    strb    w1, [x20], #1
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* Helper: write x0 as a signed decimal followed by '\n'. Treats x0
+ * as 64-bit signed so -1 (sentinel for "no slot armed") prints as
+ * "-1\n" rather than as a huge unsigned number. */
+.Lsg_write_signed_decimal_w_nl:
+    stp     x29, x30, [sp, #-16]!
+    cmp     x0, #0
+    b.ge    .Lsg_swdwn_pos
+    mov     w1, #'-'
+    strb    w1, [x20], #1
+    neg     x0, x0
+.Lsg_swdwn_pos:
+    bl      .Lsg_write_decimal
+    mov     w1, #'\n'
+    strb    w1, [x20], #1
+    ldp     x29, x30, [sp], #16
+    ret
+
+/* Helper: write the 4-byte wire-order IP at [x0] as "a.b.c.d\n". */
+.Lsg_write_dotted_w_nl:
+    stp     x29, x30, [sp, #-32]!
+    str     x19, [sp, #16]
+    mov     x19, x0                         /* save IP base */
+    /* byte 0 */
+    ldrb    w0, [x19, #0]
+    bl      .Lsg_write_decimal
+    mov     w1, #'.'
+    strb    w1, [x20], #1
+    ldrb    w0, [x19, #1]
+    bl      .Lsg_write_decimal
+    mov     w1, #'.'
+    strb    w1, [x20], #1
+    ldrb    w0, [x19, #2]
+    bl      .Lsg_write_decimal
+    mov     w1, #'.'
+    strb    w1, [x20], #1
+    ldrb    w0, [x19, #3]
+    bl      .Lsg_write_decimal
+    mov     w1, #'\n'
+    strb    w1, [x20], #1
+    ldr     x19, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
 /* ===================================================================
  * Status page HTML fragments
  * =================================================================== */
@@ -175,8 +352,38 @@ status_mid2:
 status_mid2_end:
 .equ status_mid2_len, status_mid2_end - status_mid2
 
+status_diag_prefix:
+    .ascii  "</td></tr>\n</table>\n<h2>Diagnostics</h2>\n<pre>\n"
+status_diag_prefix_end:
+.equ status_diag_prefix_len, status_diag_prefix_end - status_diag_prefix
+
+status_diag_suffix:
+    .ascii  "</pre>\n"
+status_diag_suffix_end:
+.equ status_diag_suffix_len, status_diag_suffix_end - status_diag_suffix
+
+/* NUL-terminated label strings. The trailing "= " (no newline) is
+ * what each .Lsg_copy_asciz prints; the value-writer adds the
+ * decimal/dotted-quad and the newline. */
+diag_label_dhcp_send_discover:        .asciz "dhcp_send_discover= "
+diag_label_dhcp_resend_discover:      .asciz "dhcp_resend_discover= "
+diag_label_dhcp_record_offer:         .asciz "dhcp_record_offer_send_request= "
+diag_label_dhcp_resend_req_sel:       .asciz "dhcp_resend_request_selecting= "
+diag_label_dhcp_commit_lease:         .asciz "dhcp_commit_lease_arm_timers= "
+diag_label_dhcp_send_renew:           .asciz "dhcp_send_request_renew= "
+diag_label_dhcp_resend_renew:         .asciz "dhcp_resend_request_renew= "
+diag_label_dhcp_send_rebind:          .asciz "dhcp_send_request_rebind= "
+diag_label_dhcp_resend_rebind:        .asciz "dhcp_resend_request_rebind= "
+diag_label_dhcp_panic_d:              .asciz "dhcp_panic_d= "
+diag_label_mdns_state:                .asciz "mdns_state= "
+diag_label_mdns_announced:            .asciz "mdns_announced_ip= "
+diag_label_mdns_prior:                .asciz "mdns_prior_announced_ip= "
+diag_label_net_our_ip:                .asciz "net_our_ip= "
+diag_label_mdns_timer_pool:           .asciz "mdns_timer_pool_ptr= "
+diag_label_mdns_timer_slot:           .asciz "mdns_timer_slot= "
+
 status_suffix:
-    .ascii  "</td></tr>\n</table>\n</body></html>\n"
+    .ascii  "</body></html>\n"
 status_suffix_end:
 .equ status_suffix_len, status_suffix_end - status_suffix
 
