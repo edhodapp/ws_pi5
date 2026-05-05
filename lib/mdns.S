@@ -493,6 +493,59 @@ mdns_check_conflict:
     b       .Lcc_an_loop
 
 .Lcc_yes:
+    /* Conflict candidate: a peer claims our hostname. Before
+     * declaring it a real conflict, check whether the response's
+     * RDATA matches our PRIOR_ANNOUNCED_IP. If yes, the peer is
+     * just echoing the IP we announced before our most recent
+     * arm-with-new-IP — its cache hasn't yet processed the new
+     * announce. Treat that as not-a-conflict so we don't panic
+     * during the post-DHCP-rebind probe phase.
+     *
+     * Only suppress for TYPE=A records (the only type a peer cache
+     * could plausibly echo for our hostname). Bounds-check the RR
+     * fixed fields (TYPE+CLASS+TTL+RDLEN+RDATA) before reading. */
+    add     w0, w24, #15                    /* x24 = name term offset */
+    cmp     w0, w20
+    b.hi    .Lcc_yes_real                   /* truncated — true conflict */
+
+    /* TYPE big-endian at [x24+1, x24+2]. */
+    add     x0, x24, #1
+    ldrb    w1, [x19, x0]
+    add     x0, x24, #2
+    ldrb    w2, [x19, x0]
+    add     w1, w2, w1, lsl #8
+    cmp     w1, #DNS_TYPE_A
+    b.ne    .Lcc_yes_real                   /* non-A → true conflict */
+
+    /* PRIOR_ANNOUNCED_IP from ctx; 0 means "no prior announce", so
+     * don't suppress (the kick path that sets PRIOR hasn't run, or
+     * we already cleared it post-LIVE). */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #MDNSC_PRIOR_ANNOUNCED_IP]
+    cbz     w1, .Lcc_yes_real
+
+    /* Read RDATA (4 wire-order bytes at x24+11) into a u32 with
+     * the same byte ordering as net_our_ip, so a u32 compare
+     * against PRIOR matches whenever the IPs are equal. */
+    add     x0, x24, #11
+    ldrb    w2, [x19, x0]
+    add     x0, x24, #12
+    ldrb    w3, [x19, x0]
+    add     x0, x24, #13
+    ldrb    w4, [x19, x0]
+    add     x0, x24, #14
+    ldrb    w5, [x19, x0]
+    orr     w2, w2, w3, lsl #8
+    orr     w2, w2, w4, lsl #16
+    orr     w2, w2, w5, lsl #24
+    cmp     w2, w1
+    b.ne    .Lcc_yes_real                   /* different IP → real conflict */
+
+    /* Self-echo: RDATA matches our PRIOR. Not a conflict. */
+    mov     w0, #0
+    b       .Lcc_done
+.Lcc_yes_real:
     mov     w0, #1
     b       .Lcc_done
 .Lcc_no:
@@ -1086,31 +1139,46 @@ mdns_build_announce_frame:
  *   send_fn(x0=dwc2_base, x1=ecm_state, x2=frame_ptr, w3=frame_len)
  *
  * Context layout (mdns_send_ctx in BSS, 64 bytes):
- *   +0  DWC2_BASE     u64
- *   +8  ECM_STATE     u64
- *   +16 TX_BUF        u64  scratch frame buffer (≥ 140 bytes)
- *   +24 TIMER_POOL    u64
- *   +32 TIMER_FREQ    u64  cached at start
- *   +40 SEND_FN       u64  function pointer
- *   +48 STATE         u32  one of MDNS_STATE_*
- *   +52 TIMER_SLOT    s32  timer pool slot index, -1 if unarmed
- *   +56 ANNOUNCED_IP  u32  net_our_ip captured at most-recent arm,
- *                          wire-order bytes — used by mdns_kick to
- *                          detect DHCP-rebind to a different IP and
- *                          restart the probe cycle on the new value.
- *   +60 (pad)         u32
+ *   +0  DWC2_BASE         u64
+ *   +8  ECM_STATE         u64
+ *   +16 TX_BUF            u64  scratch frame buffer (≥ 140 bytes)
+ *   +24 TIMER_POOL        u64
+ *   +32 TIMER_FREQ        u64  cached at start
+ *   +40 SEND_FN           u64  function pointer
+ *   +48 STATE             u32  one of MDNS_STATE_*
+ *   +52 TIMER_SLOT        s32  timer pool slot index, -1 if unarmed
+ *   +56 ANNOUNCED_IP      u32  net_our_ip captured at most-recent
+ *                              arm, wire-order bytes — used by
+ *                              mdns_kick to detect DHCP-rebind to a
+ *                              different IP and restart the probe
+ *                              cycle on the new value.
+ *   +60 PRIOR_ANNOUNCED_IP u32 the IP we announced *before* the
+ *                              current ANNOUNCED_IP. Populated when
+ *                              mdns_kick detects an IP change and
+ *                              restarts the probe cycle for the new
+ *                              IP. mdns_check_conflict treats a
+ *                              response carrying RDATA equal to this
+ *                              value as a peer cache echoing our own
+ *                              old data, NOT a conflict — without
+ *                              that suppression, our laptop's avahi
+ *                              would still have wspi5.local cached
+ *                              at the prior IP and answer our probe
+ *                              with it, triggering a self-conflict
+ *                              panic. Cleared (set to 0) when the
+ *                              probe + announce cycle reaches LIVE.
  * =========================================================================== */
 
-.equ MDNSC_DWC2_BASE,     0
-.equ MDNSC_ECM_STATE,     8
-.equ MDNSC_TX_BUF,        16
-.equ MDNSC_TIMER_POOL,    24
-.equ MDNSC_TIMER_FREQ,    32
-.equ MDNSC_SEND_FN,       40
-.equ MDNSC_STATE,         48
-.equ MDNSC_TIMER_SLOT,    52
-.equ MDNSC_ANNOUNCED_IP,  56
-.equ MDNSC_SIZE,          64
+.equ MDNSC_DWC2_BASE,         0
+.equ MDNSC_ECM_STATE,         8
+.equ MDNSC_TX_BUF,            16
+.equ MDNSC_TIMER_POOL,        24
+.equ MDNSC_TIMER_FREQ,        32
+.equ MDNSC_SEND_FN,           40
+.equ MDNSC_STATE,             48
+.equ MDNSC_TIMER_SLOT,        52
+.equ MDNSC_ANNOUNCED_IP,      56
+.equ MDNSC_PRIOR_ANNOUNCED_IP, 60
+.equ MDNSC_SIZE,              64
 
 .equ MDNS_STATE_IDLE,        0
 .equ MDNS_STATE_PROBE_1,     1
@@ -1237,6 +1305,15 @@ mdns_kick:
     ldr     w1, [x1]
     cmp     w0, w1
     b.eq    .Lkick_done             /* same IP — no-op */
+
+    /* IP changed. Stash the OLD ANNOUNCED_IP in PRIOR_ANNOUNCED_IP
+     * before _mdns_try_arm overwrites ANNOUNCED_IP with net_our_ip.
+     * mdns_check_conflict reads PRIOR during the new probe cycle and
+     * suppresses conflict-panic for responses whose RDATA matches —
+     * those are peers' caches echoing our own old announce, not a
+     * true peer claim. mdns_timer_cb clears PRIOR back to 0 once
+     * the new ANNOUNCE_2 lands and state goes LIVE. */
+    str     w0, [x5, #MDNSC_PRIOR_ANNOUNCED_IP]
 
 .Lkick_arm:
     bl      _mdns_try_arm
@@ -1393,9 +1470,16 @@ mdns_timer_cb:
     add     w20, w20, #1
     str     w20, [x19, #MDNSC_STATE]
 
-    /* If now LIVE, no re-arm. */
+    /* If now LIVE, the cycle for the current ANNOUNCED_IP has
+     * completed (peer caches reflect it via the cache-flush bit on
+     * ANNOUNCE_2). Clear PRIOR_ANNOUNCED_IP so any future conflict
+     * claim is evaluated as a true conflict, not a stale self-echo.
+     * No re-arm needed in LIVE. */
     cmp     w20, #MDNS_STATE_LIVE
-    b.eq    .Ltcb_done
+    b.ne    .Ltcb_post_live
+    str     wzr, [x19, #MDNSC_PRIOR_ANNOUNCED_IP]
+    b       .Ltcb_done
+.Ltcb_post_live:
 
     /* Re-arm: PROBE_* and the transition into ANNOUNCE_1 use 250 ms;
      * ANNOUNCE_1 → ANNOUNCE_2 uses 1 s. New state w20 is what's

@@ -668,3 +668,196 @@ def dut_reset(request, eth_iface, laptop_mac, laptop_ip):
         f"Pi did not return to ARP-reachable within {BOOT_DEADLINE_MS} ms "
         f"after DTR reset"
     )
+
+
+# ============================================================
+# DHCP-dynamics fixtures — dnsmasq lifecycle for the §2 suite
+# ============================================================
+#
+# Tests in hw_test/test_dhcp_dynamics.py mutate dnsmasq state
+# mid-flight (short leases, dhcp-host overrides, scope changes) and
+# wait for the Pi to react. The fixtures below own dnsmasq lifecycle
+# so the test bodies stay focused on the kernel behavior they're
+# verifying, not the rig orchestration.
+#
+# Lifecycle:
+#   - Session start: snapshot the baseline conf at scripts/dnsmasq-wspi5.conf.
+#   - Per test: dnsmasq_apply_conf(extra_directives) writes a temp
+#     conf overriding the matching directives in the baseline,
+#     calls scripts/dnsmasq-rig.sh restart, returns the temp path.
+#   - Test teardown: restore the baseline conf and restart.
+#
+# Skip-with-reason if scripts/dnsmasq-rig.sh status fails: the rig
+# isn't set up for these tests (operator hasn't run `make rig-setup`
+# or hasn't started dnsmasq via the launcher).
+
+_RIG_SCRIPT = (
+    Path(__file__).parent.parent / "scripts" / "dnsmasq-rig.sh"
+)
+_BASELINE_CONF = (
+    Path(__file__).parent.parent / "scripts" / "dnsmasq-wspi5.conf"
+)
+# WSPI5_DNSMASQ_DYNAMICS_BASE points at the conf the dynamics
+# driver installed before flashing the Pi. Tests apply overrides
+# on top of this conf so the Pi's per-lease cadence (e.g. T1=1m
+# from a 2m lease) is in effect when each test starts. Falls back
+# to the canonical 12h baseline when the dynamics driver isn't
+# orchestrating the run (single-shot pytest from the operator).
+_DYNAMICS_BASE = Path(
+    os.environ.get("WSPI5_DNSMASQ_DYNAMICS_BASE", str(_BASELINE_CONF))
+)
+_TEMP_CONF = Path("/tmp/dnsmasq-wspi5-dynamics-override.conf")
+_LEASES = Path(
+    os.environ.get("WSPI5_DNSMASQ_LEASES", "/tmp/dnsmasq-wspi5.leases")
+)
+
+
+def _rig_run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Invoke scripts/dnsmasq-rig.sh with the given args."""
+    return subprocess.run(
+        [str(_RIG_SCRIPT), *args],
+        capture_output=True, text=True,
+        check=check, timeout=15,
+    )
+
+
+def _rig_running() -> bool:
+    """True if dnsmasq is up AND owned by the current user.
+
+    The launcher's `status` returns 0 for both "running (ours)" and
+    "running (not ours)" — we only consider the first acceptable
+    because the dynamics fixtures need to send signals (kill, SIGHUP)
+    that fail with EPERM against a process we don't own.
+    """
+    proc = _rig_run("status", check=False)
+    return (
+        proc.returncode == 0
+        and "running" in proc.stdout
+        and "not ours" not in proc.stdout
+    )
+
+
+@pytest.fixture(scope="session")
+def dnsmasq_baseline_conf():
+    """Path the override fixture treats as its starting point.
+
+    Resolves to the dynamics-suite base conf (typically a 2 m-lease
+    variant written by scripts/dhcp_dynamics_tests.sh before flash)
+    when the suite driver is in charge, or to the canonical 12 h
+    baseline otherwise. Tests override directives on top of this
+    path; the fixture never restores per-test (the next test's
+    override is the cleanup), only on session teardown.
+
+    Skips the session if the launcher isn't reporting a healthy
+    dnsmasq we own — the operator needs to run `make rig-setup`
+    once and `scripts/dnsmasq-rig.sh start`.
+    """
+    base = _DYNAMICS_BASE
+    if not base.is_file():
+        pytest.skip(f"dnsmasq base conf missing: {base}")
+    if not _rig_running():
+        pytest.skip(
+            "dnsmasq-rig launcher reports not-running or not-ours; "
+            "run `make rig-setup` and `scripts/dnsmasq-rig.sh start` "
+            "before invoking the dhcp_dynamics suite"
+        )
+    yield base
+    # Session teardown: re-apply the base. The driver script handles
+    # the final restoration to the canonical 12 h baseline; this
+    # just clears any per-test override that's still in place.
+    _rig_run("restart", str(base), check=False)
+
+
+@pytest.fixture
+def dnsmasq_apply_conf(dnsmasq_baseline_conf):
+    """Function-scoped factory: apply a conf override and restart dnsmasq.
+
+    Usage:
+        def test_thing(dnsmasq_apply_conf):
+            dnsmasq_apply_conf([
+                "dhcp-range=10.0.0.100,10.0.0.110,255.255.255.0,2m",
+            ])
+            # ... dnsmasq is now running with the override; baseline
+            # directives for any same-keyword line are replaced.
+
+    The override is keyword-scoped: any baseline line whose first
+    `=`-prefix keyword matches an override line is dropped before
+    the overrides are appended. Comments and other directives pass
+    through. Restarts dnsmasq via the launcher; restores baseline
+    at test teardown.
+    """
+    baseline_lines = dnsmasq_baseline_conf.read_text().splitlines()
+
+    def apply(extra: list[str]) -> Path:
+        override_keys: set[str] = set()
+        for line in extra:
+            if "=" in line and not line.lstrip().startswith("#"):
+                override_keys.add(line.split("=", 1)[0].strip())
+        kept: list[str] = []
+        for line in baseline_lines:
+            stripped = line.lstrip()
+            if "=" in stripped and not stripped.startswith("#"):
+                key = stripped.split("=", 1)[0].strip()
+                if key in override_keys:
+                    continue
+            kept.append(line)
+        merged_lines = kept + ["", "# --- dynamics override ---"] + extra
+        merged = "\n".join(merged_lines) + "\n"
+        _TEMP_CONF.write_text(merged, encoding="utf-8")
+        _rig_run("restart", str(_TEMP_CONF))
+        return _TEMP_CONF
+
+    yield apply
+    # No per-test teardown — the next test's apply call overwrites,
+    # and dnsmasq-rig's final session-teardown re-applies the base.
+    # Per-test restore would just churn dnsmasq for no benefit, and
+    # the Pi's lease state has its own cadence we don't want to
+    # synchronously revert against.
+
+
+def _read_leases() -> list[dict]:
+    """Parse /tmp/dnsmasq-wspi5.leases. Returns list of dicts with
+    expire_epoch, mac, ip, hostname (None if `*`)."""
+    if not _LEASES.is_file():
+        return []
+    out = []
+    for line in _LEASES.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        out.append({
+            "expire": int(parts[0]),
+            "mac": parts[1],
+            "ip": parts[2],
+            "hostname": None if parts[3] == "*" else parts[3],
+        })
+    return out
+
+
+@pytest.fixture
+def lease_reader():
+    """Fixture exposing _read_leases as a callable."""
+    return _read_leases
+
+
+def _avahi_resolve(fqdn: str = "wspi5.local") -> str | None:
+    """avahi-resolve -4 -n <fqdn>; returns IP string or None."""
+    if shutil.which("avahi-resolve") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["avahi-resolve", "-4", "-n", fqdn],
+            capture_output=True, text=True, timeout=4, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.strip().split()
+    return parts[1] if len(parts) == 2 else None
+
+
+@pytest.fixture
+def avahi_resolve():
+    """Fixture exposing _avahi_resolve as a callable."""
+    return _avahi_resolve

@@ -1570,3 +1570,31 @@ PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_
 --- 506934f 2026-05-05T03:41:00Z PERF=send ---
 .BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
 PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=308
+
+--- d524860 2026-05-05T21:07:57Z PERF=recv ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.09 median=0.10 p99=0.23 max=0.24 ms (n=100)
+BURST_STATS: n=1 replies=1 send_ms=43.1 wire_pps=21277 total_ms=43.2
+PERF_STATS: n=1 recv_count=2 recv_none=6304 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1009 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=50 replies=50 send_ms=50.9 wire_pps=208333 total_ms=51.4
+PERF_STATS: n=50 recv_count=51 recv_none=7427 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=1967 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=255 replies=255 send_ms=50.8 wire_pps=469613 total_ms=53.4
+PERF_STATS: n=255 recv_count=256 recv_none=8814 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2056 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=256 replies=256 send_ms=53.1 wire_pps=502947 total_ms=55.7
+PERF_STATS: n=256 recv_count=257 recv_none=7922 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2086 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=257 replies=257 send_ms=57.8 wire_pps=492337 total_ms=60.5
+PERF_STATS: n=257 recv_count=258 recv_none=8820 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2093 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=512 replies=512 send_ms=58.9 wire_pps=510978 total_ms=64.1
+PERF_STATS: n=512 recv_count=513 recv_none=8575 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=2074 dispatch_ns=0 send_ns=0
+.BURST_STATS: n=1024 replies=872 send_ms=48.9 wire_pps=488084 total_ms=558.9
+PERF_STATS: n=1024 recv_count=873 recv_none=54964 dispatch_count=0 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=152 recv_ns=2081 dispatch_ns=0 send_ns=0
+
+--- d524860 2026-05-05T21:09:22Z PERF=dispatch ---
+.BURST_STATS: n=255 replies=256 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=255 recv_count=0 recv_none=0 dispatch_count=256 drop_count=0 send_count=0 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=97 send_ns=0
+
+--- d524860 2026-05-05T21:10:54Z PERF=l3 ---
+[L2] RTT baseline on enx00e04c0a2bed: min=0.10 median=0.11 p99=0.19 max=0.23 ms (n=100)
+
+--- d524860 2026-05-05T21:12:21Z PERF=send ---
+.BURST_STATS: n=100 replies=100 send_ms=0 wire_pps=0 total_ms=0
+PERF_STATS: n=100 recv_count=0 recv_none=0 dispatch_count=0 drop_count=0 send_count=101 send_fail=0 max_burst=0 rx_discards=0 recv_ns=0 dispatch_ns=0 send_ns=288

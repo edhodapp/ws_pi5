@@ -156,6 +156,7 @@ _start:
     bl      test_mdns_kick_reannounces_on_ip_change_from_live
     bl      test_mdns_kick_noop_on_same_ip_in_live
     bl      test_mdns_kick_reannounces_on_ip_change_mid_probe
+    bl      test_mdns_self_echo_during_rebind_probe_not_a_conflict
     bl      test_dhcp_fsa_step_init_start
     bl      test_dhcp_fsa_step_no_handler
     bl      test_dhcp_fsa_step_oob_event
@@ -169,6 +170,7 @@ _start:
     bl      test_dhcp_ack_commits_lease
     bl      test_dhcp_t1_drives_renew
     bl      test_dhcp_t2_drives_rebind
+    bl      test_dhcp_rebind_to_different_ip_kicks_mdns
     bl      test_dhcp_build_discover_header
     bl      test_dhcp_build_discover_options
     bl      test_dhcp_build_request_selecting_has_50_and_54

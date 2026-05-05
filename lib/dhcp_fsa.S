@@ -904,7 +904,7 @@ CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_T2 */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_LEASE */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_OFFER_VALID */
 CELL S_BOUND,        h_commit_lease_arm_timers /* E_RX_ACK_VALID */
-CELL S_INIT,         h_send_discover           /* E_RX_NAK_VALID */
+CELL S_SELECTING,    h_send_discover           /* E_RX_NAK_VALID */
 
 /* --- S_BOUND --- */
 CELL DHCP_NEXT_NONE, 0                         /* E_START */
@@ -912,7 +912,7 @@ CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_RETRANS_RETRY */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_RETRANS_GIVEUP */
 CELL S_RENEWING,     h_send_request_renew      /* E_TIMER_T1 */
 CELL S_REBINDING,    h_send_request_rebind     /* E_TIMER_T2 */
-CELL S_INIT,         h_send_discover           /* E_TIMER_LEASE */
+CELL S_SELECTING,    h_send_discover           /* E_TIMER_LEASE */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_OFFER_VALID */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_ACK_VALID */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_NAK_VALID */
@@ -923,10 +923,10 @@ CELL S_RENEWING,     h_resend_request_renew    /* E_TIMER_RETRANS_RETRY */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_RETRANS_GIVEUP */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_T1 */
 CELL S_REBINDING,    h_send_request_rebind     /* E_TIMER_T2 */
-CELL S_INIT,         h_send_discover           /* E_TIMER_LEASE */
+CELL S_SELECTING,    h_send_discover           /* E_TIMER_LEASE */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_OFFER_VALID */
 CELL S_BOUND,        h_commit_lease_arm_timers /* E_RX_ACK_VALID */
-CELL S_INIT,         h_send_discover           /* E_RX_NAK_VALID */
+CELL S_SELECTING,    h_send_discover           /* E_RX_NAK_VALID */
 
 /* --- S_REBINDING --- */
 CELL DHCP_NEXT_NONE, 0                         /* E_START */
@@ -934,10 +934,10 @@ CELL S_REBINDING,    h_resend_request_rebind   /* E_TIMER_RETRANS_RETRY */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_RETRANS_GIVEUP */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_T1 */
 CELL DHCP_NEXT_NONE, 0                         /* E_TIMER_T2 */
-CELL S_INIT,         h_send_discover           /* E_TIMER_LEASE */
+CELL S_SELECTING,    h_send_discover           /* E_TIMER_LEASE */
 CELL DHCP_NEXT_NONE, 0                         /* E_RX_OFFER_VALID */
 CELL S_BOUND,        h_commit_lease_arm_timers /* E_RX_ACK_VALID */
-CELL S_INIT,         h_send_discover           /* E_RX_NAK_VALID */
+CELL S_SELECTING,    h_send_discover           /* E_RX_NAK_VALID */
 
 /* Build-time size guard: catch reorderings or missing rows that
  * would silently drift the table from the TSV. */

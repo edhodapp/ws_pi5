@@ -55,6 +55,7 @@
 .global test_mdns_kick_reannounces_on_ip_change_from_live
 .global test_mdns_kick_noop_on_same_ip_in_live
 .global test_mdns_kick_reannounces_on_ip_change_mid_probe
+.global test_mdns_self_echo_during_rebind_probe_not_a_conflict
 
 .section .text
 
@@ -1921,6 +1922,93 @@ test_mdns_kick_reannounces_on_ip_change_mid_probe:
     ret
 
 
+/* ========================================================================
+ * test_mdns_self_echo_during_rebind_probe_not_a_conflict — pins the
+ * fix for the post-DHCP-rebind probe panic.
+ *
+ * Scenario being modeled:
+ *   1. Pi was bound to IP_OLD (10.0.2.15 — the QEMU default that
+ *      _mdns_test_set_state plants). mdns is LIVE; ANNOUNCED_IP =
+ *      IP_OLD; the laptop's avahi cache holds wspi5.local → IP_OLD.
+ *   2. DHCP rebind moves the Pi to IP_NEW. h_commit_lease_arm_timers
+ *      calls mdns_kick which restarts the probe cycle for IP_NEW.
+ *      As part of that restart it stashes IP_OLD into
+ *      MDNSC_PRIOR_ANNOUNCED_IP so this test's invariant has a
+ *      meaning — the kernel knows it just announced IP_OLD a moment
+ *      ago.
+ *   3. Pi sends PROBE_1 ("anyone using wspi5.local?").
+ *   4. The laptop's avahi-daemon, with wspi5.local → IP_OLD still in
+ *      cache, answers the probe asserting IP_OLD.
+ *   5. mdns_dispatch routes the response into mdns_check_conflict.
+ *
+ *   Without the fix, step 5 detects "a peer claims our hostname at
+ *   IP_OLD" → fires mdns_panic_fn → kernel halts. That's the
+ *   hardware-side bug the dhcp_dynamics rebind test catches.
+ *
+ *   With the fix, mdns_check_conflict notices the response's RDATA
+ *   matches MDNSC_PRIOR_ANNOUNCED_IP → "this is a peer echoing my
+ *   own old data, not a real conflict" → no panic. The probe phase
+ *   completes normally and the new ANNOUNCE_1 with cache-flush
+ *   replaces IP_OLD in peer caches.
+ *
+ * The conflict-response synthetic carries RDATA = 192.168.1.42; we
+ * stage MDNSC_PRIOR_ANNOUNCED_IP to that value so the suppression
+ * rule fires. (test_mdns_dispatch_panics_on_conflict still uses the
+ * same synthetic and expects panic — that's the path with no
+ * matching prior IP, demonstrating the suppression doesn't blanket-
+ * silence real conflicts.)
+ * ======================================================================== */
+test_mdns_self_echo_during_rebind_probe_not_a_conflict:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _mdns_test_save
+    bl      _mdns_test_set_state            /* state=LIVE, IP=10.0.2.15 */
+
+    /* Stash 192.168.1.42 (the conflict_resp's RDATA) in
+     * MDNSC_PRIOR_ANNOUNCED_IP — wire-order bytes: 0xC0 0xA8 0x01 0x2A.
+     * After the fix, mdns_check_conflict will see the response's
+     * RDATA matches this prior value and suppress the panic. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    mov     w1, #0xC0
+    strb    w1, [x0, #60]                   /* MDNSC_PRIOR_ANNOUNCED_IP[0] */
+    mov     w1, #0xA8
+    strb    w1, [x0, #61]
+    mov     w1, #0x01
+    strb    w1, [x0, #62]
+    mov     w1, #0x2A
+    strb    w1, [x0, #63]
+
+    /* Drive mdns_check_conflict directly with the conflict response
+     * payload (no Eth/IP/UDP wrap). Calling via mdns_dispatch would
+     * truncate the DNS payload to 28 bytes (payload_len = frame_len
+     * - 42, and the existing _mdns_dispatch_in_frame is only 70 B
+     * total) — RDATA at byte 33 would be cut off. The unit-test
+     * scope here is the conflict-detection logic, so direct call. */
+    ldr     x0, =_mdns_conflict_resp
+    mov     w1, #_mdns_conflict_resp_len
+    bl      mdns_check_conflict
+
+    /* w0 must be 0 — RDATA matches PRIOR_ANNOUNCED_IP, so the
+     * response is our own old data echoing back, not a real
+     * conflict. Without the fix, mdns_check_conflict returns 1
+     * (a peer claims our hostname) and the dispatch would invoke
+     * mdns_panic_fn. */
+    cbnz    w0, .Ltsec_fail
+
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_self_echo_not_conflict
+    bl      test_pass
+    b       .Ltsec_done
+.Ltsec_fail:
+    bl      _mdns_test_restore
+    ldr     x0, =_mdns_name_self_echo_not_conflict
+    bl      test_fail
+.Ltsec_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 /* Stub panic handler for tests: increments _mdns_panic_count and
  * returns. Wired in via mdns_panic_fn; the production default
  * (mdns_panic_fn = NULL → fall through to bl panic_n in mdns.S)
@@ -2179,6 +2267,8 @@ _mdns_name_kick_noop_on_same_ip_in_live:
     .asciz "mdns_kick_noop_on_same_ip_in_live"
 _mdns_name_kick_reannounces_on_ip_change_mid_probe:
     .asciz "mdns_kick_reannounces_on_ip_change_mid_probe"
+_mdns_name_self_echo_not_conflict:
+    .asciz "mdns_self_echo_during_rebind_probe_not_a_conflict"
 
 /* Synthetic A query for "qemu.local". DNS header (12 bytes) +
  * question.

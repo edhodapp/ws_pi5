@@ -29,6 +29,7 @@
 .global test_dhcp_ack_commits_lease
 .global test_dhcp_t1_drives_renew
 .global test_dhcp_t2_drives_rebind
+.global test_dhcp_rebind_to_different_ip_kicks_mdns
 
 .section .text
 
@@ -1026,6 +1027,207 @@ test_dhcp_t2_drives_rebind:
     ret
 
 
+/* ========================================================================
+ * test_dhcp_rebind_to_different_ip_kicks_mdns — pins the
+ * h_commit_lease_arm_timers → mdns_kick → re-announce path on a
+ * rebind that lands on a DIFFERENT IP than the previous lease.
+ *
+ * Sequence simulated:
+ *   - mdns_send_ctx is in LIVE state with ANNOUNCED_IP = IP_A.
+ *   - net_our_ip == IP_A (the prior lease).
+ *   - dhcp_fsa_state == S_RENEWING (we just got NAKed→DISCOVER→
+ *     OFFER and are about to receive ACK from the rebind path; the
+ *     test fires E_RX_ACK_VALID directly with yiaddr = IP_B in
+ *     dhcp_parsed, simulating the late stage of the rebind flow).
+ *
+ * After firing E_RX_ACK_VALID:
+ *   - state advances to S_BOUND.                     (FSA correct)
+ *   - net_our_ip == IP_B.                            (commit handler
+ *                                                     stamped yiaddr)
+ *   - mdns_send_ctx.MDNSC_ANNOUNCED_IP == IP_B.      (mdns_kick fired
+ *                                                     and detected the
+ *                                                     IP change)
+ *   - mdns_send_ctx.MDNSC_STATE == MDNS_STATE_PROBE_1. (kick re-armed
+ *                                                       a fresh probe
+ *                                                       cycle)
+ *
+ * If any of the last three assertions fails, the kernel will
+ * announce an outdated IP to the LAN until the next reboot — which
+ * is the hardware-side defect dhcp_dynamics' rebind test surfaced.
+ * Test is RED until the chain works end-to-end.
+ *
+ * Uses IP_A = 10.0.0.100, IP_B = 10.0.0.105 to mirror the dynamics-
+ * suite scenario (dhcp-host pinning the rig MAC to a different IP).
+ * ======================================================================== */
+test_dhcp_rebind_to_different_ip_kicks_mdns:
+    stp     x29, x30, [sp, #-16]!
+
+    bl      _dhcp_test_reset
+    bl      _dhcp_send_capture_reset
+
+    /* Save net_our_ip + net_hostname[_len] so we can restore them. */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldr     w1, [x0]
+    adrp    x2, _dhcp_saved_net_our_ip
+    add     x2, x2, :lo12:_dhcp_saved_net_our_ip
+    str     w1, [x2]
+
+    /* Initialise a fresh timer pool (cap 8). */
+    ldr     x0, =_dhcp_test_tpool
+    mov     w1, #8
+    bl      timer_pool_init
+
+    /* Cache timer_freq into the dhcp ctx + supply a timer pool. */
+    bl      timer_freq
+    adrp    x1, dhcp_send_ctx
+    add     x1, x1, :lo12:dhcp_send_ctx
+    str     x0, [x1, #DHCPC_TIMER_FREQ]
+    ldr     x2, =_dhcp_test_tpool
+    str     x2, [x1, #DHCPC_TIMER_POOL]
+
+    /* Provide hostname so mdns_kick's _mdns_try_arm guards proceed.
+     * Set net_hostname = "qemu", net_hostname_len = 4. */
+    adrp    x0, net_hostname
+    add     x0, x0, :lo12:net_hostname
+    stp     xzr, xzr, [x0, #0]
+    stp     xzr, xzr, [x0, #16]
+    stp     xzr, xzr, [x0, #32]
+    stp     xzr, xzr, [x0, #48]
+    mov     w1, #'q'
+    strb    w1, [x0, #0]
+    mov     w1, #'e'
+    strb    w1, [x0, #1]
+    mov     w1, #'m'
+    strb    w1, [x0, #2]
+    mov     w1, #'u'
+    strb    w1, [x0, #3]
+    adrp    x0, net_hostname_len
+    add     x0, x0, :lo12:net_hostname_len
+    mov     w1, #4
+    str     w1, [x0]
+
+    /* Set up the mdns context as if a prior probe + announce cycle
+     * for IP_A had already completed: state = LIVE, ANNOUNCED_IP =
+     * 10.0.0.100, timer pool wired. TX_BUF / SEND_FN are only read
+     * by mdns_timer_cb, which the test doesn't drive — leaving them
+     * 0 keeps the test's scope tight to the kick path. */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    /* Zero context first. */
+    stp     xzr, xzr, [x0, #0]              /* DWC2_BASE, ECM_STATE */
+    stp     xzr, xzr, [x0, #16]             /* TX_BUF, TIMER_POOL */
+    stp     xzr, xzr, [x0, #32]             /* TIMER_FREQ, SEND_FN */
+    stp     xzr, xzr, [x0, #48]             /* STATE/TIMER_SLOT, ANNOUNCED_IP/pad */
+    /* TIMER_POOL is the only field _mdns_try_arm requires non-zero. */
+    ldr     x1, =_dhcp_test_tpool
+    str     x1, [x0, #24]                   /* MDNSC_TIMER_POOL */
+    /* state = LIVE. */
+    mov     w1, #6                          /* MDNS_STATE_LIVE */
+    str     w1, [x0, #48]                   /* MDNSC_STATE */
+    /* TIMER_SLOT = -1 (unarmed; LIVE has no active timer). */
+    mov     w1, #-1
+    str     w1, [x0, #52]                   /* MDNSC_TIMER_SLOT */
+    /* ANNOUNCED_IP = 10.0.0.100 wire-order. */
+    adrp    x1, net_our_ip
+    add     x1, x1, :lo12:net_our_ip
+    mov     w2, #10
+    strb    w2, [x1, #0]
+    strb    wzr, [x1, #1]
+    strb    wzr, [x1, #2]
+    mov     w2, #100
+    strb    w2, [x1, #3]
+    /* Copy net_our_ip → MDNSC_ANNOUNCED_IP. */
+    ldr     w2, [x1]
+    str     w2, [x0, #56]                   /* MDNSC_ANNOUNCED_IP */
+
+    /* Stage an ACK with yiaddr = 10.0.0.105 (IP_B, different). */
+    adrp    x0, dhcp_parsed
+    add     x0, x0, :lo12:dhcp_parsed
+    mov     w1, #DHCP_MSG_ACK
+    strb    w1, [x0, #DHCP_PARSED_MSG_TYPE]
+    mov     w1, #10
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 0)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 1)]
+    strb    wzr, [x0, #(DHCP_PARSED_YIADDR + 2)]
+    mov     w1, #105
+    strb    w1, [x0, #(DHCP_PARSED_YIADDR + 3)]
+    /* Lease time 3600. */
+    movz    w1, #0x0E10
+    str     w1, [x0, #DHCP_PARSED_LEASE_TIME]
+    /* No subnet/router. */
+    strb    wzr, [x0, #DHCP_PARSED_FLAGS]
+
+    /* state = RENEWING (rebind path lands here too via the FSA). */
+    adrp    x1, dhcp_fsa_state
+    add     x1, x1, :lo12:dhcp_fsa_state
+    mov     w2, #S_RENEWING
+    str     w2, [x1]
+
+    /* Fire E_RX_ACK_VALID. h_commit_lease_arm_timers runs;
+     * net_our_ip should become 10.0.0.105; mdns_kick should detect
+     * the IP change and re-arm a fresh probe cycle. */
+    mov     w0, #E_RX_ACK_VALID
+    bl      dhcp_fsa_step
+
+    /* === Verify FSA advanced to BOUND. === */
+    adrp    x0, dhcp_fsa_state
+    add     x0, x0, :lo12:dhcp_fsa_state
+    ldr     w0, [x0]
+    cmp     w0, #S_BOUND
+    b.ne    .Ldrk_fail
+
+    /* === net_our_ip == 10.0.0.105. === */
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    ldrb    w1, [x0, #0]
+    cmp     w1, #10
+    b.ne    .Ldrk_fail
+    ldrb    w1, [x0, #3]
+    cmp     w1, #105
+    b.ne    .Ldrk_fail
+
+    /* === MDNSC_ANNOUNCED_IP == net_our_ip (mdns_kick fired). === */
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldr     w1, [x0, #56]                   /* MDNSC_ANNOUNCED_IP */
+    adrp    x2, net_our_ip
+    add     x2, x2, :lo12:net_our_ip
+    ldr     w2, [x2]
+    cmp     w1, w2
+    b.ne    .Ldrk_fail
+
+    /* === MDNSC_STATE == PROBE_1 (cycle restarted). === */
+    ldr     w1, [x0, #48]                   /* MDNSC_STATE */
+    cmp     w1, #1                          /* MDNS_STATE_PROBE_1 */
+    b.ne    .Ldrk_fail
+
+    /* Restore net_our_ip. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+
+    ldr     x0, =_dhcp_name_rebind_kicks_mdns
+    bl      test_pass
+    b       .Ldrk_done
+.Ldrk_fail:
+    /* Best-effort restore on fail. */
+    adrp    x0, _dhcp_saved_net_our_ip
+    add     x0, x0, :lo12:_dhcp_saved_net_our_ip
+    ldr     w1, [x0]
+    adrp    x0, net_our_ip
+    add     x0, x0, :lo12:net_our_ip
+    str     w1, [x0]
+    ldr     x0, =_dhcp_name_rebind_kicks_mdns
+    bl      test_fail
+.Ldrk_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 _dhcp_name_step_init_start:    .asciz "dhcp_fsa_step_init_start"
 _dhcp_name_step_no_handler:    .asciz "dhcp_fsa_step_no_handler"
@@ -1040,6 +1242,7 @@ _dhcp_name_offer_drives:       .asciz "dhcp_offer_drives_request"
 _dhcp_name_ack_commits:        .asciz "dhcp_ack_commits_lease"
 _dhcp_name_t1_renew:           .asciz "dhcp_t1_drives_renew"
 _dhcp_name_t2_rebind:          .asciz "dhcp_t2_drives_rebind"
+_dhcp_name_rebind_kicks_mdns:  .asciz "dhcp_rebind_to_different_ip_kicks_mdns"
 
 
 .section .bss
