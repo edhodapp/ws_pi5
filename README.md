@@ -155,14 +155,14 @@ If you'd rather drive the steps manually:
 SITE_BYTES=$(du -sb public/ | cut -f1)
 # round up, add ~25 % slack for HTTP header overhead
 CONTENT_MAX=$(( (SITE_BYTES * 5 / 4 + 1048575) / 1048576 * 1048576 ))
-make clean && make PLATFORM=pi4 SHIP=1 CONTENT_MAX=$CONTENT_MAX
+make clean && make PLATFORM=pi4 CONTENT_MAX=$CONTENT_MAX
 scripts/mk_appliance.py --content-max $CONTENT_MAX kernel8.img public/ out.img
 ```
 
-`SHIP=1` links the kernel at 0x80000 (the firmware default kernel
-load address) so SD-direct boot lands the kernel exactly where the
-linker expects it. Without `SHIP=1` the kernel links at 0x200000,
-which only works via the UART chainloader (dev-time path).
+The kernel always links at 0x80000 (the firmware default kernel
+load address). The same binary serves both SD-direct boot and the
+UART chainloader path — see the chainloader self-relocation note
+under [Pi 4 Development Workflow](#pi-4-development-workflow).
 
 The `CONTENT_MAX` value must match on both sides. An `HDR_KSIZE` field
 is baked into the kernel's placeholder slab at compile time; the
@@ -346,13 +346,14 @@ From source:
 
 ```
 sudo apt install binutils-aarch64-linux-gnu   # Debian/Ubuntu; use brew on macOS
-make PLATFORM=pi4 SHIP=1
+make PLATFORM=pi4
 ```
 
-`SHIP=1` is required for SD-direct boot — it links the kernel at
-the firmware default address (0x80000). Omit it only if you'll be
-flashing via the UART chainloader (dev-time workflow), in which
-case the kernel needs to be at 0x200000 to match the chainloader.
+One binary, one load address. The kernel always links at the
+firmware default address (0x80000) — the same image works for
+SD-direct boot and the UART chainloader path. The chainloader
+self-relocates from 0x80000 to 0x4000000 at startup so it can
+receive a fresh kernel into 0x80000 without overwriting itself.
 
 ### 2. Package your site into the kernel
 
@@ -533,7 +534,7 @@ Assemble a Pi 4 SD-boot bundle (for shipping a packaged appliance
 without a UART host):
 
 ```
-make PLATFORM=pi4 SHIP=1                                 # kernel linked at 0x80000
+make PLATFORM=pi4                                        # kernel linked at 0x80000
 scripts/mk_appliance.py kernel8.img public/ appliance.img
 scripts/mk_sd.sh appliance.img sd_boot/
 # Then: cp -r sd_boot/* /media/<user>/boot/
@@ -569,14 +570,23 @@ The chainloader protocol:
 2. Chainloader prints `READY\r\n` when initialized
 3. Host sends Intel HEX records with `\r\n` terminators
 4. Chainloader verifies each record's checksum, sends 2-byte ACK (line length + checksum) or NAK (line length + checksum XOR 0xFF)
-5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), jump to kernel at 0x200000
+5. On EOF record: ACK, print `BOOT:NNNN\r\n` (record count), jump to kernel at 0x80000
 
-The chainloader's kernel address (0x200000) and the SD-direct ship
-path's kernel address (0x80000) are deliberately different — see the
-`SHIP=1` discussion above. `make PLATFORM=pi4` (no flag) builds for
-the chainloader; `make PLATFORM=pi4 SHIP=1` builds for SD-direct.
-Two builds, two binaries, no overlap. Inner-loop dev stays fast and
-unchanged from yesterday.
+The chainloader and SD-direct boot use the **same kernel binary**
+linked at 0x80000. The chainloader image itself is linked at
+0x4000000 but loaded by firmware at 0x80000; on entry it copies
+itself to 0x4000000 and jumps there, freeing 0x80000 to receive the
+incoming kernel. `make PLATFORM=pi4` produces the kernel; `make
+chainload` produces the chainloader image (`chainload.img`) used
+by `scripts/mk_sd.sh --chainload`.
+
+For dual-config testing (one chainloader SD, multiple network configs)
+`hw_send.py --network-conf <path>` prepends the config bytes as Intel
+HEX records targeting `0x20000000` so the kernel reads the
+UART-pushed config instead of the SD's. `scripts/dual_config_tests.sh`
+drives the full pre-push gate twice — once with `network-static.conf`,
+once with `network-dhcp.conf` — without rebuilding or reflashing the
+SD between passes.
 
 The Intel HEX parser (`hex_parse.S`) is extracted as a testable, platform-independent module with 17 QEMU unit tests. The HEX generation library (`intel_hex.py`) has 34 tests with **100% mutation score** (108/108 mutants killed via mutmut).
 
@@ -758,7 +768,7 @@ make fuzz-corpus-seq
 ### Raspberry Pi 4 (BCM2711)
 
 - **SoC:** BCM2711, Cortex-A72 quad-core, 8 GB RAM
-- **Kernel load:** dev-time chainloader path → `0x200000` (default `make PLATFORM=pi4`); SD-direct ship path → `0x80000` (`make PLATFORM=pi4 SHIP=1`). See [firmware 0x80000 conflict](#firmware-0x80000-conflict) for the original chainloader-side finding and [debug_log_0x80000.md](debug_log_0x80000.md) for the 2026-04-26 SD-direct verification.
+- **Kernel load:** `0x80000` (firmware default) for both SD-direct boot and the UART chainloader path. The chainloader image itself is linked at `0x4000000` and self-relocates from `0x80000` to that address on entry (see commit `7e3e774`); a single kernel binary serves both paths. See [debug_log_0x80000.md](debug_log_0x80000.md) for the 2026-04-26 SD-direct verification that preceded the unification.
 - **Boot:** EL2 → EL1 drop, MMU setup (4 GB identity map, Normal + Device), caches enabled
 - **Ethernet:** GENET v5 Gigabit MAC (native, under development). USB CDC-ECM fallback via DWC2.
 - **UART:** PL011 UART0 on GPIO 14/15 — serial debug and chainloader
@@ -871,22 +881,24 @@ sustained writes kill the UART entirely (the VC-managed UART clock
 stops). This was discovered empirically in 2026-04 and not
 documented anywhere in BCM2711 docs.
 
-**Solution for the chainloader path:** the chainloader (`chainload/boot.S`)
-writes directly to 0x200000 and jumps to 0x200000. The dev-time
-kernel build (`make PLATFORM=pi4`, no flag) links at 0x200000 to
-match. The firmware's 0x80000 region is never touched while UART
-work is in flight.
+**Original workaround (superseded):** an earlier commit landed the
+chainloader and dev-time kernel at 0x200000 to keep ARM writes off
+0x80000 during UART transfer. That worked but split the build into
+two binaries and two link addresses.
 
-**SD-direct ship path is different.** The conflict is between
-*chainloader writes* and the firmware's 0x80000 agent — *not* with
-the firmware loading a kernel there itself. The firmware's own load
-of `kernel8.img` at the default 0x80000 works correctly (the agent
-isn't active during firmware-side load; the CPU is held off until
-hand-off). So `make PLATFORM=pi4 SHIP=1` links at 0x80000 to match
-the firmware default, and the SD-direct boot bundle from
-`scripts/mk_sd.sh` deploys with no `kernel_address=` override
-needed. End-to-end verification at 2026-04-26 in
-[debug_log_0x80000.md](debug_log_0x80000.md) attempts 38–40.
+**Current solution (commit `7e3e774`):** both paths use 0x80000 —
+the firmware default. The firmware's own load of `kernel8.img` at
+0x80000 works correctly because the agent isn't active during
+firmware-side load (the CPU is held off until hand-off). The
+chainloader image is also loaded by firmware at 0x80000, but on
+entry it copies itself to 0x4000000 and jumps there *before* doing
+any UART work — so during HEX-record reception the chainloader is
+running at 0x4000000 and 0x80000 is quiet, which inherits the same
+firmware-quiescence guarantee that SD-direct already had. One kernel
+binary, one link address; no `SHIP=1` flag, no per-build choice.
+End-to-end verification of the SD-direct path at 2026-04-26 in
+[debug_log_0x80000.md](debug_log_0x80000.md) preceded the
+unification.
 
 **Findings from the chainloader-side hardware debugging:**
 - SCTLR_EL1 = 0x00C50838 and SCTLR_EL2 = 0x30C50830 at boot — MMU and caches are OFF at both exception levels. This is not a cache coherency issue.
