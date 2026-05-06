@@ -164,11 +164,20 @@ class TestDHCPDynamics:
         new_ip = "10.0.0.105"
         # 2-minute lease so T1 fires at ~60 s, well within budget.
         # dhcp-host pins this MAC to the new IP, forcing a NAK on
-        # the next REQUEST for the old one.
-        dnsmasq_apply_conf([
-            "dhcp-range=10.0.0.100,10.0.0.110,255.255.255.0,2m",
-            f"dhcp-host={RIG_PI_MAC},{new_ip}",
-        ])
+        # the next REQUEST for the old one — but ONLY if dnsmasq has
+        # no existing lease record for the MAC. With an existing
+        # record, dnsmasq honours it (ACKs the renewal on the same
+        # IP) instead of consulting the new dhcp-host directive.
+        # clear_mac wipes the MAC's lease line before the dnsmasq
+        # restart, ensuring the next REQUEST fails record lookup
+        # and falls through to the dhcp-host enforcement path.
+        dnsmasq_apply_conf(
+            [
+                "dhcp-range=10.0.0.100,10.0.0.110,255.255.255.0,2m",
+                f"dhcp-host={RIG_PI_MAC},{new_ip}",
+            ],
+            clear_mac=RIG_PI_MAC,
+        )
 
         # Wait for the rebind: Pi ends up at new_ip in the lease file.
         rebind = _wait_for_lease(

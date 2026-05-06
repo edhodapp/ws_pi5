@@ -185,6 +185,26 @@ for n in $(seq 1 "$REPEAT"); do
         continue
     fi
 
+    # Resolve the Pi's current IP from the lease file so the sampler
+    # can hit /status without depending on avahi (which the rebind
+    # test stresses anyway). The flash check above just confirmed
+    # baseline lease at 10.0.0.109; if the rebind test moves the Pi,
+    # the sampler will simply log "(unreachable)" until the next
+    # lease lookup catches up — useful evidence on its own.
+    sampler_log="/tmp/dhcp-dynamics-pass$n-status-samples.log"
+    pi_ip=$(awk '$3 ~ /^10\.0\.0\.(10[0-9]|110)$/ {print $1, $3}' \
+                /tmp/dnsmasq-wspi5-dynamics.leases \
+              | sort -k1 -n | tail -1 | awk '{print $2}')
+    if [ -z "$pi_ip" ]; then
+        echo "  (no lease found — sampler will start dark)" >&2
+        pi_ip=10.0.0.109
+    fi
+    echo "--- start /status sampler against ${pi_ip} → ${sampler_log} ---"
+    bash "$SCRIPT_DIR/status_sampler.sh" "$pi_ip" "$sampler_log" &
+    sampler_pid=$!
+    # Make sure the sampler dies on shell exit even if pytest crashes.
+    trap "kill $sampler_pid 2>/dev/null || true" EXIT
+
     echo "--- pytest -m dhcp_dynamics ---"
     set +e
     HW_TEST=1 NETWORK_MODE=dhcp \
@@ -194,6 +214,12 @@ for n in $(seq 1 "$REPEAT"); do
         -m dhcp_dynamics --tb=short -v $EXTRA_PYTEST_ARGS 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
     set -e
+
+    # Stop the sampler. Kill the loop and let the trap clean up.
+    kill "$sampler_pid" 2>/dev/null || true
+    wait "$sampler_pid" 2>/dev/null || true
+    trap - EXIT
+    echo "--- sampler captured $(grep -c '^=== ' "$sampler_log" 2>/dev/null || echo 0) samples ---"
     if [ "$rc" -ne 0 ]; then
         echo "Pass $n: pytest exit $rc — see $out" >&2
         FAILED_PASSES+=("$n-pytest")

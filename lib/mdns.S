@@ -1335,7 +1335,7 @@ mdns_kick:
  * at expiry = now so the next timer_check fires PROBE_1.
  *
  * On any guard failure: leaves state untouched (caller is responsible
- * for setting state = IDLE if needed). Trashes x0-x6 only.
+ * for setting state = IDLE if needed). Trashes x0-x8 only.
  * --------------------------------------------------------------------------- */
 _mdns_try_arm:
     stp     x29, x30, [sp, #-16]!
@@ -1359,16 +1359,39 @@ _mdns_try_arm:
     ldr     w6, [x6]
     cbz     w6, .Larm_done
 
-    /* Cancel any prior timer slot before arming a new one. The
-     * IP-changed branch in mdns_kick lands here while state is
-     * non-IDLE and a slot is already in-flight; without this cancel
-     * we'd leave two slots pointing at this same context, both
-     * firing mdns_timer_cb and racing on state advancement.
-     * timer_cancel ignores the -1 sentinel (silent no-op for
-     * out-of-range indices) so the first-arm path is also safe. */
+    /* Cancel any prior in-flight mdns timer slot before arming a
+     * new one. CRITICAL: only cancel if the slot's current callback
+     * is still mdns_timer_cb. Timer pool slots get reused by other
+     * subsystems (DHCP T1/T2/LEASE, NTP, ARP, ...) the moment our
+     * timer fires and the pool clears the callback. A blind
+     * timer_cancel(MDNSC_TIMER_SLOT) on a stale slot index would
+     * nuke whatever timer happens to live there now — observed in
+     * the dynamics-suite rebind scenario, where slot 5 was the
+     * boot-announce slot, then DHCP T1 reused it, then mdns_kick's
+     * blind cancel clobbered T1, and the cascading slot reuse left
+     * mdns's own arm dead in the water within the same h_commit_
+     * lease_arm_timers chain.
+     *
+     * Read slot[N].callback and compare to mdns_timer_cb; only fire
+     * timer_cancel on a hit. Skips cleanly on the -1 sentinel
+     * (out-of-range slot index → cmp w1, #16 → b.hs skip). */
+    ldrsw   x1, [x5, #MDNSC_TIMER_SLOT]     /* s32 — sign-extend */
+    cmp     w1, #0
+    b.lt    .Larm_skip_cancel       /* -1 sentinel */
+    cmp     w1, #16
+    b.hs    .Larm_skip_cancel       /* out of range */
+    ldr     x6, [x5, #MDNSC_TIMER_POOL]
+    add     x6, x6, #8              /* +TPOOL_SLOTS */
+    mov     w7, #32                 /* SLOT_SIZE */
+    madd    x6, x1, x7, x6          /* x6 = &slot[N] */
+    ldr     x7, [x6, #8]            /* SLOT_CALLBACK */
+    ldr     x8, =mdns_timer_cb
+    cmp     x7, x8
+    b.ne    .Larm_skip_cancel       /* slot owned by someone else now */
+    /* Slot still ours — cancel it. */
     ldr     x0, [x5, #MDNSC_TIMER_POOL]
-    ldr     w1, [x5, #MDNSC_TIMER_SLOT]
     bl      timer_cancel
+.Larm_skip_cancel:
     adrp    x5, mdns_send_ctx
     add     x5, x5, :lo12:mdns_send_ctx
 
@@ -1428,13 +1451,27 @@ _mdns_try_arm:
  *   w21 send-frame length (callee-saved)
  * --------------------------------------------------------------------------- */
 .global mdns_timer_cb
+.global mdns_count_timer_cb
 mdns_timer_cb:
     stp     x29, x30, [sp, #-48]!
     mov     x29, sp
     stp     x19, x20, [sp, #16]
     str     x21, [sp, #32]
 
+    /* Pin x0 (ctx pointer arg) into x19 first — the diagnostic
+     * counter bump below uses x0 as scratch. */
     mov     x19, x0
+
+    /* Diagnostic: bump cb-invocation count. Exposed on /status as
+     * mdns_timer_cb_count so the dynamics sampler can distinguish
+     * "timer never fires" (stuck count) from "cb fires but doesn't
+     * advance state" (count climbs while state stays). */
+    adrp    x0, mdns_count_timer_cb
+    add     x0, x0, :lo12:mdns_count_timer_cb
+    ldr     w1, [x0]
+    add     w1, w1, #1
+    str     w1, [x0]
+
     ldr     w20, [x19, #MDNSC_STATE]
 
     /* IDLE (0) or LIVE (6+) → no-op. */
@@ -1520,6 +1557,10 @@ mdns_timer_cb:
 .global mdns_send_ctx
 mdns_send_ctx:
     .space MDNSC_SIZE
+
+.balign 4
+mdns_count_timer_cb:
+    .space 4
 
 /* Function pointer invoked from mdns_dispatch when a conflict is
  * detected during the probe window. Initialized in .data to

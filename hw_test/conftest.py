@@ -780,6 +780,19 @@ def dnsmasq_apply_conf(dnsmasq_baseline_conf):
             # ... dnsmasq is now running with the override; baseline
             # directives for any same-keyword line are replaced.
 
+        def test_rebind(dnsmasq_apply_conf):
+            dnsmasq_apply_conf(
+                ["dhcp-host=de:ad:be:ef:ca:fe,10.0.0.105"],
+                clear_mac="de:ad:be:ef:ca:fe",
+            )
+            # The MAC's lease line is removed from the dynamics lease
+            # file before dnsmasq restarts. With no record for the MAC,
+            # the Pi's next REQUEST for its previous IP gets NAK'd
+            # (dhcp-host pins this MAC to a different IP). Pi enters
+            # DISCOVER → OFFER → REQUEST → ACK at the new IP. Without
+            # clear_mac, dnsmasq honours the existing lease record and
+            # ACKs the same IP on every renewal — no rebind happens.
+
     The override is keyword-scoped: any baseline line whose first
     `=`-prefix keyword matches an override line is dropped before
     the overrides are appended. Comments and other directives pass
@@ -788,7 +801,7 @@ def dnsmasq_apply_conf(dnsmasq_baseline_conf):
     """
     baseline_lines = dnsmasq_baseline_conf.read_text().splitlines()
 
-    def apply(extra: list[str]) -> Path:
+    def apply(extra: list[str], clear_mac: str | None = None) -> Path:
         override_keys: set[str] = set()
         for line in extra:
             if "=" in line and not line.lstrip().startswith("#"):
@@ -804,7 +817,30 @@ def dnsmasq_apply_conf(dnsmasq_baseline_conf):
         merged_lines = kept + ["", "# --- dynamics override ---"] + extra
         merged = "\n".join(merged_lines) + "\n"
         _TEMP_CONF.write_text(merged, encoding="utf-8")
-        _rig_run("restart", str(_TEMP_CONF))
+        # If the caller wants to force a rebind (rather than a renewal
+        # on the same lease), clear that MAC's record from the lease
+        # file before dnsmasq starts. Critical ordering: must stop
+        # dnsmasq FIRST, then clear the lease file, then start. A
+        # naive restart fails because dnsmasq writes its in-memory
+        # lease state to disk on SIGTERM, which overwrites any
+        # pre-restart deletion.
+        if clear_mac is not None:
+            _rig_run("stop", check=False)
+            if _LEASES.is_file():
+                kept_lines = []
+                target = clear_mac.lower()
+                for line in _LEASES.read_text(encoding="utf-8").splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].lower() == target:
+                        continue
+                    kept_lines.append(line)
+                new_text = "\n".join(kept_lines)
+                if new_text and not new_text.endswith("\n"):
+                    new_text += "\n"
+                _LEASES.write_text(new_text, encoding="utf-8")
+            _rig_run("start", str(_TEMP_CONF))
+        else:
+            _rig_run("restart", str(_TEMP_CONF))
         return _TEMP_CONF
 
     yield apply

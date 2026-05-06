@@ -200,6 +200,50 @@ http_status_generate:
     ldrsw   x0, [x0, #52]                   /* MDNSC_TIMER_SLOT (s32) */
     bl      .Lsg_write_signed_decimal_w_nl
 
+    /* mdns_timer_cb invocation count — distinguishes "timer never
+     * fires" (stuck) from "cb fires but doesn't advance" (climbing
+     * while state stays). */
+    ldr     x0, =diag_label_mdns_timer_cb_count
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_count_timer_cb
+    add     x0, x0, :lo12:mdns_count_timer_cb
+    ldr     w0, [x0]
+    bl      .Lsg_write_decimal_w_nl
+
+    /* Live state of the timer slot mdns is supposedly armed in:
+     * actual callback pointer (0 = inactive) and expiry vs now. If
+     * MDNSC_TIMER_SLOT=N but slot[N].callback==0, the slot was
+     * cancelled or fired between arm and sample — pinpoints whether
+     * the cb is being called at all. */
+    ldr     x0, =diag_label_mdns_slot_cb_ptr
+    bl      .Lsg_copy_asciz
+    adrp    x0, mdns_send_ctx
+    add     x0, x0, :lo12:mdns_send_ctx
+    ldrsw   x1, [x0, #52]                   /* MDNSC_TIMER_SLOT */
+    ldr     x0, [x0, #24]                   /* MDNSC_TIMER_POOL */
+    /* Compute slot[N] address: pool + TPOOL_SLOTS + N*SLOT_SIZE.
+     * Skip the read if pool is null (mdns_start hasn't run yet —
+     * BSS leaves both POOL=0 and SLOT=0, and slot=0 is in-range so
+     * the slot-bounds check below would not catch it) or the slot
+     * index is out of bounds (-1 sentinel or >=16). */
+    cbz     x0, .Lsg_slot_skip
+    cmp     w1, #0
+    b.lt    .Lsg_slot_skip
+    cmp     w1, #16
+    b.ge    .Lsg_slot_skip
+    add     x0, x0, #8                      /* +TPOOL_SLOTS */
+    mov     w2, #32                         /* SLOT_SIZE */
+    madd    x0, x1, x2, x0
+    ldr     x0, [x0, #8]                    /* SLOT_CALLBACK */
+    bl      .Lsg_write_decimal_w_nl
+    b       .Lsg_slot_done
+.Lsg_slot_skip:
+    mov     w1, #'-'
+    strb    w1, [x20], #1
+    mov     w1, #'\n'
+    strb    w1, [x20], #1
+.Lsg_slot_done:
+
     ldr     x0, =status_diag_suffix
     ldr     w1, =status_diag_suffix_len
     bl      .Lsg_copy
@@ -381,6 +425,8 @@ diag_label_mdns_prior:                .asciz "mdns_prior_announced_ip= "
 diag_label_net_our_ip:                .asciz "net_our_ip= "
 diag_label_mdns_timer_pool:           .asciz "mdns_timer_pool_ptr= "
 diag_label_mdns_timer_slot:           .asciz "mdns_timer_slot= "
+diag_label_mdns_timer_cb_count:       .asciz "mdns_timer_cb_count= "
+diag_label_mdns_slot_cb_ptr:          .asciz "mdns_slot_callback_ptr= "
 
 status_suffix:
     .ascii  "</body></html>\n"
