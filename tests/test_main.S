@@ -271,6 +271,15 @@ _start:
     bl      test_rx_err_ridx_wrap
     bl      test_rx_err_preserves_other
     bl      test_rx_err_fi_mask_covers
+    bl      test_wd_timeout_first_increment
+    bl      test_wd_timeout_below_threshold
+    bl      test_wd_timeout_at_threshold
+    bl      test_wd_timeout_above_threshold
+    bl      test_wd_timeout_preserves_other_state
+    bl      test_wd_reset_increments_count
+    bl      test_wd_reset_zeros_consec_timeouts
+    bl      test_wd_reset_preserves_other_state
+    bl      test_wd_reset_count_accumulates_across_calls
 
     /* === Print summary === */
     ldr     x0, =fail_count

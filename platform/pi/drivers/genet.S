@@ -614,7 +614,22 @@ genet_send:
      * ticks. A timeout means we just spent ~100k MMIO reads on a
      * CONS_INDEX poll, which is orders of magnitude longer than a
      * normal send. Mixing that into PERF_SEND_TICKS would destroy
-     * mean-per-successful-send as a useful number. Count only. */
+     * mean-per-successful-send as a useful number. Count only.
+     *
+     * Watchdog detection: bookkeeping is in genet_wd_record_timeout
+     * (pure software, unit-testable). When that helper signals the
+     * trip threshold, fire genet_watchdog_trip which performs the
+     * GENET reset itself. The current send still returns failure
+     * to the caller — they retry on their own schedule — but
+     * subsequent sends should now succeed because GENET has been
+     * reinitialised. */
+    mov     x0, x20                 /* state ptr */
+    bl      genet_wd_record_timeout
+    cbz     w0, .Ltx_no_wd_trip
+    mov     x0, x19                 /* GENET base */
+    mov     x1, x20                 /* state */
+    bl      genet_watchdog_trip
+.Ltx_no_wd_trip:
     mov     w0, #1
 .ifdef PERF_SEND
     PROBE_COUNT_INC PERF_SEND_FAIL, w2, x3
@@ -627,7 +642,14 @@ genet_send:
      * w0 is set to the return value FIRST and is preserved across
      * the probe macros. x2 and x3 are dead at this point (x2 was
      * only used in the prologue; x3/w3 held the expected PROD_INDEX
-     * which is no longer needed once the cmp matched). */
+     * which is no longer needed once the cmp matched).
+     *
+     * Watchdog: zero the consec-timeout counter on every success.
+     * Any successful send proves the TX path is alive, so the
+     * counter must restart from zero — otherwise N transient
+     * timeouts spread across a long run would eventually trip
+     * even though the hardware is healthy. */
+    str     wzr, [x20, #GENET_STATE_TX_CONSEC_TIMEOUTS]
     mov     w0, #0
 .ifdef PERF_SEND
     PROBE_EXIT x23, PERF_SEND_TICKS, x2, x3
@@ -646,6 +668,135 @@ genet_send:
     ldp     x19, x20, [sp], #48
 .endif
     ret
+
+/*
+ * genet_wd_record_timeout — bookkeeping helper for the TX-timeout path.
+ *
+ * Bumps GENET_STATE_TX_CONSEC_TIMEOUTS by one and reports whether
+ * the new value has reached GENET_WD_TX_TIMEOUT_THRESHOLD. The
+ * caller (.Ltx_timeout) is responsible for actually firing
+ * genet_watchdog_trip on a true return; keeping the trip side-
+ * effect out of this function lets unit tests verify the counter
+ * arithmetic and threshold logic without faking MMIO.
+ *
+ * x0: state pointer
+ * Returns: w0 = 1 if the trip threshold has been met (caller
+ *          should reset), else 0.
+ * Clobbers: x0, x1.
+ */
+.global genet_wd_record_timeout
+genet_wd_record_timeout:
+    ldr     w1, [x0, #GENET_STATE_TX_CONSEC_TIMEOUTS]
+    add     w1, w1, #1
+    str     w1, [x0, #GENET_STATE_TX_CONSEC_TIMEOUTS]
+    cmp     w1, #GENET_WD_TX_TIMEOUT_THRESHOLD
+    cset    w0, ge
+    ret
+
+/*
+ * genet_wd_record_reset — bookkeeping helper for the trip path.
+ *
+ * Bumps GENET_STATE_WD_RESET_COUNT and zeros
+ * GENET_STATE_TX_CONSEC_TIMEOUTS. Does NOT call genet_init —
+ * that's done by genet_watchdog_trip itself, which keeps this
+ * helper testable without an MMIO-bearing dependency.
+ *
+ * Resetting TX_CONSEC_TIMEOUTS is critical: without it, the next
+ * failed send (which happens immediately after the reset if
+ * recovery wasn't actually achieved) would carry the pre-reset
+ * count forward and trip again on the very first post-reset
+ * timeout, burning the watchdog into a tight reset loop.
+ *
+ * x0: state pointer
+ * Clobbers: x0, x1.
+ */
+.global genet_wd_record_reset
+genet_wd_record_reset:
+    ldr     w1, [x0, #GENET_STATE_WD_RESET_COUNT]
+    add     w1, w1, #1
+    str     w1, [x0, #GENET_STATE_WD_RESET_COUNT]
+    str     wzr, [x0, #GENET_STATE_TX_CONSEC_TIMEOUTS]
+    ret
+
+/*
+ * genet_watchdog_trip — full GENET reset after detected wedge.
+ *
+ * Called from .Ltx_timeout when consecutive timeouts reach the
+ * threshold. The premise: if N consecutive genet_send calls have
+ * all timed out on the CONS_INDEX poll, the TX engine is stuck —
+ * not transient congestion, which would clear inside the 100k
+ * iteration window. Recovery is a full genet_init: UMAC reset,
+ * DMA ring re-init, MAC re-enable, PHY autoneg.
+ *
+ * x0: GENET base
+ * x1: pointer to genet_state (must already have RX_POOL set, which
+ *     it does because genet_init wrote it on first boot).
+ *
+ * Returns: nothing (the caller's send still failed; this just
+ *          rebuilds the path so the next attempt can succeed).
+ * Clobbers: same set as genet_init.
+ *
+ * Preserved state across the reset:
+ *   - GENET_STATE_RX_POOL — re-supplied to genet_init from the
+ *     state struct itself.
+ *   - GENET_STATE_WD_RESET_COUNT — the trip counter is part of
+ *     the telemetry contract, so it accumulates across resets.
+ *
+ * Reset state:
+ *   - GENET_STATE_TX_CONSEC_TIMEOUTS — explicitly zeroed before
+ *     calling genet_init so the post-reset window starts fresh.
+ *   - All other GENET_STATE_* fields — genet_init re-zeroes
+ *     RX_CIDX/RIDX, TX_PIDX/RIDX, and re-caches PHY_SPEED.
+ *
+ * Cost: PHY autoneg dominates wall time (~3-5 s on real
+ * hardware). Acceptable since the alternative is indefinite
+ * silent downtime. Optimisations (selective DMA-only reset that
+ * skips PHY) deferred until empirical data shows trips are
+ * frequent enough to care.
+ */
+.global genet_watchdog_trip
+genet_watchdog_trip:
+    stp     x29, x30, [sp, #-32]!
+    stp     x19, x20, [sp, #16]
+    mov     x29, sp
+
+    mov     x19, x0                 /* x19 = GENET base */
+    mov     x20, x1                 /* x20 = state */
+
+    /* Counter bookkeeping (bump WD_RESET_COUNT, zero
+     * TX_CONSEC_TIMEOUTS) is in a pure-software helper so it can
+     * be unit-tested without faking the GENET MMIO surface. */
+    mov     x0, x20
+    bl      genet_wd_record_reset
+
+    /* One-line console signal so a real-time observer sees the
+     * trip without flooding. The /status counter is the durable
+     * record; this is for live debugging. */
+    ldr     x0, =genet_wd_log_msg
+    bl      uart_puts
+
+    /* Call genet_init with the same arguments the original boot
+     * used: GENET base, state, RX pool. The pool address lives in
+     * the state struct (genet_init wrote it on first call), so we
+     * just read it back. */
+    mov     x0, x19
+    mov     x1, x20
+    ldr     x2, [x20, #GENET_STATE_RX_POOL]
+    bl      genet_init
+    /* genet_init's return value is discarded — there is no
+     * meaningful caller action on a failed reset. If the second
+     * init also fails, the next genet_send call will hit the
+     * timeout path again, and the watchdog will trip a second
+     * time. The reset_count delta is the diagnostic signal. */
+
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+
+.section .rodata
+genet_wd_log_msg:
+    .asciz "genet wd: TX wedge detected, full reset\n"
+.section .text
 
 /*
  * genet_recv — Receive an Ethernet frame

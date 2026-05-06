@@ -8,6 +8,7 @@
 .include "net.inc"
 .include "tcp.inc"
 .include "http.inc"
+.include "genet.inc"
 
 .global http_status_generate
 .global http_request_count
@@ -244,6 +245,26 @@ http_status_generate:
     strb    w1, [x20], #1
 .Lsg_slot_done:
 
+.ifdef PLATFORM_PI4
+    /* GENET watchdog telemetry — count of full GENET re-inits fired
+     * by the TX-wedge watchdog since boot, plus the live consec-
+     * timeout counter (visible in case the trip is mid-approach).
+     * Pi4-only because `genet_state` is only allocated by the Pi4
+     * platform main.S; QEMU/raspi3b builds don't have GENET so the
+     * counters wouldn't have anything to report. */
+    ldr     x0, =diag_label_genet_wd_reset_count
+    bl      .Lsg_copy_asciz
+    ldr     x0, =genet_state
+    ldr     w0, [x0, #GENET_STATE_WD_RESET_COUNT]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_genet_wd_consec_timeouts
+    bl      .Lsg_copy_asciz
+    ldr     x0, =genet_state
+    ldr     w0, [x0, #GENET_STATE_TX_CONSEC_TIMEOUTS]
+    bl      .Lsg_write_decimal_w_nl
+.endif
+
     ldr     x0, =status_diag_suffix
     ldr     w1, =status_diag_suffix_len
     bl      .Lsg_copy
@@ -427,6 +448,8 @@ diag_label_mdns_timer_pool:           .asciz "mdns_timer_pool_ptr= "
 diag_label_mdns_timer_slot:           .asciz "mdns_timer_slot= "
 diag_label_mdns_timer_cb_count:       .asciz "mdns_timer_cb_count= "
 diag_label_mdns_slot_cb_ptr:          .asciz "mdns_slot_callback_ptr= "
+diag_label_genet_wd_reset_count:      .asciz "genet_wd_reset_count= "
+diag_label_genet_wd_consec_timeouts:  .asciz "genet_wd_consec_timeouts= "
 
 status_suffix:
     .ascii  "</body></html>\n"

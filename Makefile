@@ -166,6 +166,7 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_ntp.o $(BUILD)/test_md5.o $(BUILD)/test_http.o \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
     $(BUILD)/test_genet_rx_err.o \
+    $(BUILD)/test_genet_watchdog.o \
     $(BUILD)/test_http_output_fsa.o \
     $(BUILD)/test_config_parser.o \
     $(BUILD)/test_config_parser_vectors.o \
@@ -585,6 +586,9 @@ $(BUILD)/test_hex_parse.o: tests/test_hex_parse.S | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_genet_rx_err.o: tests/test_genet_rx_err.S $(PI_INC)/genet.inc include/perf.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_genet_watchdog.o: tests/test_genet_watchdog.S $(PI_INC)/genet.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/hex_parse.o: chainload/hex_parse.S | $(BUILD)

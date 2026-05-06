@@ -190,4 +190,20 @@
 .equ GENET_STATE_TX_RIDX,     12   /* TX ring index (0-255) */
 .equ GENET_STATE_RX_POOL,     16   /* RX buffer pool CPU address (8 bytes) */
 .equ GENET_STATE_PHY_SPEED,   24   /* cached PHY speed code from AUX_STS */
-.equ GENET_STATE_SIZE,        32   /* padded to 8-byte alignment */
+/* Watchdog state — see genet_watchdog_trip in genet.S. The
+ * consec-timeout counter is zeroed on every successful genet_send
+ * and incremented on each TX timeout; once it reaches
+ * GENET_WD_TX_TIMEOUT_THRESHOLD the watchdog reinitialises GENET
+ * and bumps WD_RESET_COUNT. Both fields are pure telemetry from
+ * the caller's perspective — no other module reads them. */
+.equ GENET_STATE_TX_CONSEC_TIMEOUTS, 32  /* u32 */
+.equ GENET_STATE_WD_RESET_COUNT,     36  /* u32, monotonic since boot */
+.equ GENET_STATE_SIZE,        40   /* 8-byte aligned */
+
+/* Number of consecutive genet_send timeouts before the watchdog
+ * fires a full genet_init. Each timeout is the ~100k-iteration
+ * CONS_INDEX poll inside genet_send (~milliseconds wall), so 6 in
+ * a row indicates the GENET is stuck rather than transiently
+ * congested. Tunable; pick the smallest value that doesn't
+ * false-trip on observed real-world traffic. */
+.equ GENET_WD_TX_TIMEOUT_THRESHOLD, 6
