@@ -132,7 +132,7 @@ PI_OBJS = \
     $(BUILD)/uart.o $(BUILD)/gpio.o $(BUILD)/mailbox.o \
     $(BUILD)/dwc2.o $(BUILD)/usb_enum.o $(BUILD)/usb_desc.o \
     $(BUILD)/cdc_ecm.o $(BUILD)/usb_bulk.o \
-    $(BUILD)/genet.o
+    $(BUILD)/genet.o $(BUILD)/sys_watchdog.o
 
 PI_TEST_OBJS = \
     $(BUILD)/test_pi_all.o \
@@ -167,6 +167,7 @@ SHARED_TEST_OBJS = \
     $(BUILD)/test_hex_parse.o $(BUILD)/hex_parse.o \
     $(BUILD)/test_genet_rx_err.o \
     $(BUILD)/test_genet_watchdog.o \
+    $(BUILD)/test_sys_watchdog.o \
     $(BUILD)/test_http_output_fsa.o \
     $(BUILD)/test_config_parser.o \
     $(BUILD)/test_config_parser_vectors.o \
@@ -501,6 +502,9 @@ $(BUILD)/usb_bulk.o: platform/pi/drivers/usb_bulk.S $(PI_INC)/dwc2.inc | $(BUILD
 $(BUILD)/genet.o: platform/pi/drivers/genet.S $(PI_INC)/genet.inc $(PI_INC)/mailbox.inc include/perf.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
+$(BUILD)/sys_watchdog.o: platform/pi/drivers/sys_watchdog.S $(PI_INC)/platform.inc $(PI_INC)/sys_watchdog.inc include/timer.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
 # ===========================================================================
 # Shared test objects (tests/)
 # ===========================================================================
@@ -589,6 +593,9 @@ $(BUILD)/test_genet_rx_err.o: tests/test_genet_rx_err.S $(PI_INC)/genet.inc incl
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/test_genet_watchdog.o: tests/test_genet_watchdog.S $(PI_INC)/genet.inc | $(BUILD)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD)/test_sys_watchdog.o: tests/test_sys_watchdog.S $(PI_INC)/sys_watchdog.inc | $(BUILD)
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD)/hex_parse.o: chainload/hex_parse.S | $(BUILD)

@@ -10,6 +10,8 @@
 .include "perf.inc"
 .ifdef PLATFORM_PI4
 .include "genet.inc"
+.include "platform.inc"
+.include "sys_watchdog.inc"
 .endif
 
 .section .text
@@ -245,6 +247,62 @@ main:
     ldr     x2, =http_tx_buf
     ldr     x3, =NET_SEND_SYM
     bl      http_set_send_ctx
+
+.ifdef PLATFORM_PI4
+    /* Arm the BCM2711 PM watchdog. Layered above the GENET TX-wedge
+     * watchdog as a last-resort recovery: anything that prevents
+     * timer_check from running (kernel hang, exception loop, timer-
+     * pool corruption) becomes a SoC hardware reset within ~10 s.
+     *
+     * Arm late — only after every other init has succeeded. A bug
+     * earlier in boot would otherwise resemble a watchdog reset
+     * loop instead of a clean failure to start. By the time control
+     * reaches here the kernel has demonstrated DHCP/static IP,
+     * timers, TCP listen, HTTP — i.e. all the things a future hang
+     * could plausibly break. */
+    /* Populate sys_watchdog_state. State pointer is reloaded into
+     * x0 at each step rather than parked in a callee-saved
+     * register, since main()'s prologue only preserves x29/x30 —
+     * threading a register through bl timer_freq would require a
+     * separate stp/ldp pair. The reload pattern is cheaper. */
+
+    /* PM_BASE = PERIPH_BASE + PM_OFFSET. Single 64-bit load avoids
+     * cross-section .equ arithmetic that GNU as sometimes refuses. */
+    ldr     x0, =sys_watchdog_state
+    ldr     x1, =(PERIPH_BASE + PM_OFFSET)
+    str     x1, [x0, #SWD_PM_BASE]
+
+    /* TIMEOUT_UNITS = 10 s × 65536 = 0xA0000. PM_WDOG runs at
+     * 1/65536 s per tick, 24-bit field. */
+    mov     w1, #0
+    movk    w1, #0xA, lsl #16           /* 0x000A0000 */
+    str     w1, [x0, #SWD_TIMEOUT_UNITS]
+
+    /* TIMER_POOL — periodic pet callback re-arms itself here. */
+    ldr     x1, =timer_pool
+    str     x1, [x0, #SWD_TIMER_POOL]
+
+    /* PET_PERIOD = 2 × timer_freq ticks. Pet cadence (2 s) gives
+     * 5× margin under the 10 s timeout — a kernel-stalling
+     * operation up to ~9 s still gets petted before reset. */
+    bl      timer_freq                  /* clobbers x0 */
+    lsl     x1, x0, #1                  /* x1 = 2 × freq */
+    ldr     x0, =sys_watchdog_state
+    str     x1, [x0, #SWD_PET_PERIOD]
+
+    /* Capture PM_RSTS at boot — telemetry signal for whether the
+     * previous reset was watchdog-induced. Must run before
+     * anything writes the PM block; nothing currently does, but
+     * this conservative ordering protects against future code. */
+    bl      sys_watchdog_capture_rsts
+
+    /* Arm the watchdog. From here on, the kernel must pet PM_WDOG
+     * within 10 s or the SoC hardware-resets. The first pet was
+     * done by sys_watchdog_arm; subsequent pets fire from the
+     * timer-pool slot it installed. */
+    ldr     x0, =sys_watchdog_state
+    bl      sys_watchdog_arm
+.endif
 
     mov     w0, #0
     b       .Ldone

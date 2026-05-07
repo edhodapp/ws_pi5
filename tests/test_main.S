@@ -280,6 +280,10 @@ _start:
     bl      test_wd_reset_zeros_consec_timeouts
     bl      test_wd_reset_preserves_other_state
     bl      test_wd_reset_count_accumulates_across_calls
+    bl      test_swd_record_pet_first_increment
+    bl      test_swd_record_pet_accumulates
+    bl      test_swd_record_pet_preserves_other_state
+    bl      test_swd_capture_rsts_reads_at_offset
 
     /* === Print summary === */
     ldr     x0, =fail_count

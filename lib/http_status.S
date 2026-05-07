@@ -9,6 +9,7 @@
 .include "tcp.inc"
 .include "http.inc"
 .include "genet.inc"
+.include "sys_watchdog.inc"
 
 .global http_status_generate
 .global http_request_count
@@ -263,6 +264,24 @@ http_status_generate:
     ldr     x0, =genet_state
     ldr     w0, [x0, #GENET_STATE_TX_CONSEC_TIMEOUTS]
     bl      .Lsg_write_decimal_w_nl
+
+    /* PM (system) watchdog telemetry. boot_rsts is the raw PM_RSTS
+     * value captured at init — bit 12 (0x1000) set indicates a
+     * watchdog-induced reset on the previous boot. pet_count climbs
+     * once every 2 s while the watchdog is armed; if it stops
+     * climbing while the kernel is still up, the periodic timer
+     * has stopped firing and a reset is imminent. */
+    ldr     x0, =diag_label_swd_boot_rsts
+    bl      .Lsg_copy_asciz
+    ldr     x0, =sys_watchdog_state
+    ldr     w0, [x0, #SWD_BOOT_RSTS]
+    bl      .Lsg_write_decimal_w_nl
+
+    ldr     x0, =diag_label_swd_pet_count
+    bl      .Lsg_copy_asciz
+    ldr     x0, =sys_watchdog_state
+    ldr     w0, [x0, #SWD_PET_COUNT]
+    bl      .Lsg_write_decimal_w_nl
 .endif
 
     ldr     x0, =status_diag_suffix
@@ -450,6 +469,8 @@ diag_label_mdns_timer_cb_count:       .asciz "mdns_timer_cb_count= "
 diag_label_mdns_slot_cb_ptr:          .asciz "mdns_slot_callback_ptr= "
 diag_label_genet_wd_reset_count:      .asciz "genet_wd_reset_count= "
 diag_label_genet_wd_consec_timeouts:  .asciz "genet_wd_consec_timeouts= "
+diag_label_swd_boot_rsts:             .asciz "swd_boot_rsts= "
+diag_label_swd_pet_count:             .asciz "swd_pet_count= "
 
 status_suffix:
     .ascii  "</body></html>\n"
