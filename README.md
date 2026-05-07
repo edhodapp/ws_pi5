@@ -7,16 +7,6 @@
 
 ## Installation
 
-> ⚠️ **Network configuration is mid-redesign.** The user-facing format
-> (`network.conf` on the SD card — see [the reference](#networkconf-reference) below) is final and
-> `scripts/mk_sd.sh` ships a default that's lint-validated at build
-> time. The kernel-side parser (D004) and boot-time wiring (D014's I5)
-> are still in flight — kernels built today still use the hardcoded
-> values in `lib/net_cfg.S`, **not** what's in `network.conf` on the
-> SD. If you're flashing right now, edit `lib/net_cfg.S` for your
-> network and rebuild. The full `network.conf` flow goes live with
-> the next batch of commits.
-
 Two paths, pick the one that matches what you want to do.
 
 ### Deploy a site (no compiler needed)
@@ -385,10 +375,16 @@ Flash `pi4_sd.img` to an SD card with **Raspberry Pi Imager** (choose
 Before booting, edit `network.conf` on the SD card's FAT boot
 partition. Mount the SD card on your laptop (Imager and Etcher
 re-eject it after flashing — re-insert), open the boot partition,
-and edit the four required keys: `ip`, `netmask`, `gateway`, and
-`hostname`. The default values fail by design (gateway `0.0.0.0`
-won't ARP) so the Pi halts with [panic pattern G](docs/PANIC_PATTERNS.md)
-until you customize.
+and pick a network mode:
+
+- **Static IP** — set `ip`, `netmask`, `gateway`, and `hostname`. The
+  shipped defaults fail by design (gateway `0.0.0.0` won't ARP) so
+  the Pi halts with [panic pattern G](docs/PANIC_PATTERNS.md) until
+  you customize.
+- **DHCP** — set `dhcp=yes` and `hostname`; the lease supplies the
+  rest. Useful on a typical home router. On DHCP failure the kernel
+  halts (see [panic patterns](docs/PANIC_PATTERNS.md)) so a
+  misconfigured rig is loud, not silent.
 
 See the [`network.conf` reference](#networkconf-reference) below for
 each field's format and the optional keys (`ntp_server`, `mac`).
@@ -428,10 +424,11 @@ on mismatch).
 
 | Key | Required? | Type | Notes |
 |---|---|---|---|
-| `ip` | yes | dotted-decimal IPv4 | This Pi's static address |
-| `netmask` | yes | dotted-decimal IPv4 | Recorded for documentation; the runtime uses always-via-gateway routing per D010 and ignores the value |
-| `gateway` | yes | dotted-decimal IPv4 | Default gateway; ARPed at boot, [panic pattern G](docs/PANIC_PATTERNS.md) on timeout |
-| `hostname` | yes | RFC 1123 LDH, 1–63 chars | Reachable as `<hostname>.local` via mDNS |
+| `dhcp` | no | `yes` / `no` (default `no`) | When `yes`, `ip`/`netmask`/`gateway` become **optional** — DHCP supplies them on boot. On DHCP failure the kernel halts (see [panic patterns](docs/PANIC_PATTERNS.md)) per D017 |
+| `ip` | yes (static), no (DHCP) | dotted-decimal IPv4 | This Pi's static address |
+| `netmask` | yes (static), no (DHCP) | dotted-decimal IPv4 | Recorded for documentation; the runtime uses always-via-gateway routing per D010 and ignores the value |
+| `gateway` | yes (static), no (DHCP) | dotted-decimal IPv4 | Default gateway; ARPed at boot, [panic pattern G](docs/PANIC_PATTERNS.md) on timeout |
+| `hostname` | yes | RFC 1123 LDH, 1–63 chars | Reachable as `<hostname>.local` via mDNS. Also sent as DHCP option 12 in DHCP mode so the lease record carries the name |
 | `ntp_server` | no | dotted-decimal IPv4 | NTP source; omit to skip NTP |
 | `mac` | no | six colon-separated hex bytes | Override the factory MAC; omit to use Pi 4 OTP fuses (mailbox tag `0x00010003`). If the mailbox call fails AND no `mac=` override is given, the kernel halts with [panic pattern M](docs/PANIC_PATTERNS.md) per D011 |
 
@@ -452,7 +449,7 @@ on mismatch).
   - MAC bytes are case-insensitive 2-digit hex (`de:ad:be:ef:ca:fe`
     and `DE:AD:BE:EF:CA:FE` both work).
 
-### Example
+### Example — static IP
 
 ```
 # WSPI5CFG
@@ -464,6 +461,22 @@ gateway=192.168.1.1
 hostname=hodapp-www
 
 # Optional: pin a specific NTP server.
+ntp_server=216.239.35.0
+```
+
+### Example — DHCP
+
+For appliances that should follow the router's lease pool — drop in,
+power on, get an IP. The kernel handles RENEW (T1), REBIND (T2),
+DHCPNAK rebinds (e.g. router scope changes), and re-announces over
+mDNS when the IP moves so `<hostname>.local` keeps resolving.
+
+```
+# WSPI5CFG
+dhcp=yes
+hostname=hodapp-www
+
+# Optional, same as static-IP mode.
 ntp_server=216.239.35.0
 ```
 
