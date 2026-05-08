@@ -35,6 +35,7 @@ you're seeing.
 |----------------|--------|--------|-------------------|-------------------------------------------------------------------------|
 | `— ·`          | `—·`   | **N**  | 1 — User-fixable  | **Network** config error in `network.conf`                              |
 | `— — ·`        | `——·`  | **G**  | 1 — User-fixable  | **Gateway** unreachable — ARP for configured gateway timed out          |
+| `— · ·`        | `—··`  | **D**  | 1 — User-fixable  | **DHCP** acquisition failed — three retries returned no OFFER/ACK       |
 | `· ·`          | `··`   | **I**  | 2 — Hardware      | **Init** failed (GENET / USB / mailbox / clock — generic hardware init) |
 | `— —`          | `——`   | **M**  | 2 — Hardware      | **MAC** unreadable: OTP mailbox failed AND no `mac=` override           |
 | `— · —`        | `—·—`  | **K**  | 3 — Kernel        | **Kernel** panic (exception vector / assert)                            |
@@ -55,6 +56,14 @@ wrong. You can fix this from your laptop without touching code.
   gateway didn't answer ARP. Most common cause: `gateway=` is set to
   an address your router doesn't actually own. Check your router's
   admin page for the gateway IP and update `network.conf`.
+
+- **D (`—··`)** — `dhcp=yes` was set, the kernel sent three DHCP
+  DISCOVER retries, and got no OFFER (or got OFFER but no ACK
+  after three REQUEST retries). Most common causes: DHCP server
+  not actually reachable on the link (cable issue, wrong VLAN),
+  DHCP server's pool exhausted, or `mac=` collides with a static
+  reservation. Switch to `dhcp=no` with explicit `ip`/`netmask`/
+  `gateway` to bypass DHCP entirely while you debug the server.
 
 ### Tier 2 — Hardware
 
@@ -94,7 +103,7 @@ output before reporting.
 
 ## Visual distinguishability
 
-The six patterns are designed to be tellable apart by cadence alone,
+The patterns are designed to be tellable apart by cadence alone,
 without needing to count or know Morse code:
 
 | Length     | Pattern   | Cadence                            |
@@ -103,12 +112,17 @@ without needing to count or know Morse code:
 | 2 elements | M (`——`)  | long-long — slow "DAH-DAH"         |
 | 2 elements | I (`··`)  | short-short — rapid "dit-dit"      |
 | 3 elements | G (`——·`) | heavy-then-light — "DAH-DAH-dit"   |
+| 3 elements | D (`—··`) | one-DAH-then-two-dits              |
 | 3 elements | K (`—·—`) | symmetric — "DAH-dit-DAH"          |
 | 3 elements | U (`··—`) | light-then-heavy — "dit-dit-DAH"   |
 
-No two patterns share both length and shape. If you can tell "fast
-staccato" from "slow heavy" from "alternating," you can tell these
-apart without knowing the alphabet.
+D and G are the closest pair: both 3 elements, both lead with a
+DAH, both end on a dit. The distinguishing element is the middle
+beat — D has a dit in the middle (one DAH total), G has another
+DAH in the middle (two DAHs total). If you can't tell them apart
+by ear, count DAHs: one means D (DHCP), two means G (gateway).
+Fixing either is roughly the same kind of work — both are network
+config / link issues at Tier 1.
 
 ---
 

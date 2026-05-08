@@ -844,11 +844,23 @@ h_resend_request_rebind:
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #32
     ret
+/* h_panic_d — DHCP-acquisition-failed handler (FSA cell at
+ * SELECTING/REQUESTING + E_TIMER_RETRANS_GIVEUP).
+ *
+ *  - PLATFORM_PI4 build: tail-call panic_d (lib/panic.S), which
+ *    halts the kernel and blinks Morse —·· on the ACT LED per
+ *    D017's D013 amendment. panic_d does not return; the
+ *    `dhcp_count_panic_d` counter is unused in this build because
+ *    no second dispatch can occur. Tail-`b` (not bl) keeps the
+ *    panic path stack-free.
+ *  - QEMU test build: counter-bump stub so FSA unit tests can
+ *    observe dispatch and the test harness keeps running. */
+.ifdef PLATFORM_PI4
+h_panic_d:
+    b       panic_d
+.else
 DHCP_STUB h_panic_d,                      dhcp_count_panic_d
-/* h_panic_d is a stub here so tests can observe dispatch. The real
- * panic_d (lib/panic.S) is invoked from action-handler glue in
- * I16-5; once that lands, this stub is replaced with a tail-call to
- * panic_n equivalent. The stub returns so tests can keep going. */
+.endif
 
 
 /* ===========================================================================

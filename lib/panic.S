@@ -29,6 +29,7 @@
 
 .global panic_n
 .global panic_g
+.global panic_d
 .global panic_i
 .global panic_m
 .global panic_k
@@ -196,6 +197,16 @@ panic_g:                            /* ——· (Gateway unreachable) */
     DIT
     CYCLE_GAP
     b       .Lpan_g
+
+panic_d:                            /* —·· (DHCP acquisition failed) */
+    PANIC_SETUP
+.Lpan_d:
+    PANIC_PET_WATCHDOG
+    DAH
+    DIT
+    DIT
+    CYCLE_GAP
+    b       .Lpan_d
 
 panic_i:                            /* ·· (Init failed) */
     PANIC_SETUP
