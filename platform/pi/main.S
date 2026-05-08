@@ -303,7 +303,17 @@ main:
      * state — DHCP/static IP up, timers running, TCP listening,
      * HTTP responding — so post-boot wedges should be detected
      * fast (~10 s) rather than tolerating the boot-grace budget
-     * for the rest of the device's life. */
+     * for the rest of the device's life.
+     *
+     * DEPENDS ON the early-arm block earlier in main() (look for
+     * the matching .ifdef PLATFORM_PI4 right after timer_pool_init
+     * around line ~153). If that block is removed or moved after
+     * this one, sys_watchdog_set_timeout's cbz-PM_BASE guard will
+     * silently no-op the MMIO write here and the watchdog will
+     * stay at 60 s for the device's entire lifetime — a partial
+     * functional regression with zero crash signal. The cbz guard
+     * exists for pre-arm panic safety, not for skipping the
+     * tighten. Keep the early-arm block before this one. */
     ldr     x0, =sys_watchdog_state
     mov     w1, #0
     movk    w1, #0xA, lsl #16           /* 10 s × 65536 = 0xA0000 */

@@ -22,6 +22,7 @@
 .global test_swd_capture_rsts_reads_at_offset
 .global test_swd_set_timeout_updates_field
 .global test_swd_set_timeout_skips_mmio_when_unarmed
+.global test_swd_disarm_skips_mmio_when_unarmed
 
 .section .text
 
@@ -304,6 +305,32 @@ test_swd_set_timeout_skips_mmio_when_unarmed:
     ldp     x29, x30, [sp], #16
     ret
 .Lswd_name_t6: .asciz "swd_set_timeout_skips_mmio_when_unarmed"
+
+/* test_swd_disarm_skips_mmio_when_unarmed
+ *   Pre:  state.PM_BASE = 0 (never armed)
+ *   Call: sys_watchdog_disarm(&state)
+ *   Post: Helper returns without faulting or hanging.
+ *
+ * Symmetric with test_swd_set_timeout_skips_mmio_when_unarmed:
+ * sys_watchdog_disarm got the same cbz guard for PM_BASE=0 so a
+ * caller hitting the disarm path before sys_watchdog_arm has run
+ * (e.g. an emergency-recovery shim invoked from early init)
+ * doesn't dereference a null PM_BASE. With MMU off we can't
+ * directly assert "no MMIO write" — a buggy helper would write
+ * to physical 0x10 (PM_RSTC offset), which is just RAM here, not
+ * MMIO — so the assertion is the indirect non-fault one.
+ */
+.balign 4
+test_swd_disarm_skips_mmio_when_unarmed:
+    stp     x29, x30, [sp, #-16]!
+    bl      .Lswd_zero                  /* PM_BASE = 0 */
+    ldr     x0, =fake_swd_state
+    bl      sys_watchdog_disarm
+    ldr     x0, =.Lswd_name_t7
+    bl      test_pass
+    ldp     x29, x30, [sp], #16
+    ret
+.Lswd_name_t7: .asciz "swd_disarm_skips_mmio_when_unarmed"
 
 .section .bss
 .balign 8
