@@ -70,6 +70,52 @@
     dsb     sy
 .endm
 
+/* PANIC_PET_WATCHDOG: refresh PM_WDOG inside the panic blink loop
+ * so the watchdog never expires while the LED is still telling
+ * the user what's wrong. Called once per blink cycle (right after
+ * the loop label). Without this, a panic that fires after
+ * sys_watchdog_arm has run in main() would only blink for ~10 s
+ * before the SoC resets, defeating the purpose of the diagnostic
+ * LED.
+ *
+ * Feed-in-loop, not one-shot disarm: if the panic-blink loop
+ * itself wedges — corrupt page table that crashes the LED writes,
+ * exception in DELAY_MS, etc. — the watchdog still gets to do its
+ * job. PM_WDOG stops being refreshed and the SoC resets within
+ * the pet timeout. A once-and-done disarm would forfeit that
+ * safety net.
+ *
+ * Pet timeout: 10 s. Each blink cycle is at most ~5 s (3 elements
+ * × 800 ms + 3 s CYCLE_GAP), so 10 s gives ~2× margin for normal
+ * progress and detects a wedged loop within one cycle.
+ *
+ * Pre-arm safe: if a panic fires before sys_watchdog_arm runs,
+ * PM_RSTC's WRCFG_FULL_RESET isn't set, so writing PM_WDOG just
+ * sets the countdown without enabling reset — harmless.
+ *
+ * Macro form, NOT a bl to sys_watchdog_pet_cb — panic.S is
+ * stack-free by design (the stack may be corrupt by the time we
+ * panic). All work uses x9..x10 only.
+ *
+ * Pi 4 only — QEMU/raspi3b doesn't model the PM block. The
+ * .ifdef guard expands to an empty macro on QEMU builds so the
+ * panic path stays platform-independent at the source level. */
+.ifdef PLATFORM_PI4
+.macro PANIC_PET_WATCHDOG
+    ldr     x9, =(PERIPH_BASE + PM_OFFSET)
+    /* 10 s timeout (0x000A0000) | PM_PASSWORD (0x5A000000) =
+     * 0x5A0A0000. Literal-OR-equ resolves at assembly time and
+     * lands in the literal pool; only the .equ-OR-.equ form is
+     * forbidden by GAS (see CLAUDE.md gotcha). */
+    ldr     w10, =(0x000A0000 | PM_PASSWORD)
+    str     w10, [x9, #PM_WDOG]
+    dsb     sy
+.endm
+.else
+.macro PANIC_PET_WATCHDOG
+.endm
+.endif
+
 /* DELAY_MS \ms — busy-wait \ms milliseconds using CNTPCT_EL0.
  * Computes target ticks = (CNTFRQ_EL0 * ms) / 1000 at runtime,
  * adds to current counter, spins until current >= deadline. */
@@ -135,6 +181,7 @@
 panic_n:                            /* —· (Network conf invalid) */
     PANIC_SETUP
 .Lpan_n:
+    PANIC_PET_WATCHDOG
     DAH
     DIT
     CYCLE_GAP
@@ -143,6 +190,7 @@ panic_n:                            /* —· (Network conf invalid) */
 panic_g:                            /* ——· (Gateway unreachable) */
     PANIC_SETUP
 .Lpan_g:
+    PANIC_PET_WATCHDOG
     DAH
     DAH
     DIT
@@ -152,6 +200,7 @@ panic_g:                            /* ——· (Gateway unreachable) */
 panic_i:                            /* ·· (Init failed) */
     PANIC_SETUP
 .Lpan_i:
+    PANIC_PET_WATCHDOG
     DIT
     DIT
     CYCLE_GAP
@@ -160,6 +209,7 @@ panic_i:                            /* ·· (Init failed) */
 panic_m:                            /* —— (MAC unreadable) */
     PANIC_SETUP
 .Lpan_m:
+    PANIC_PET_WATCHDOG
     DAH
     DAH
     CYCLE_GAP
@@ -168,6 +218,7 @@ panic_m:                            /* —— (MAC unreadable) */
 panic_k:                            /* —·— (Kernel panic) */
     PANIC_SETUP
 .Lpan_k:
+    PANIC_PET_WATCHDOG
     DAH
     DIT
     DAH
@@ -177,6 +228,7 @@ panic_k:                            /* —·— (Kernel panic) */
 panic_u:                            /* ··— (Unknown / catch-all) */
     PANIC_SETUP
 .Lpan_u:
+    PANIC_PET_WATCHDOG
     DIT
     DIT
     DAH

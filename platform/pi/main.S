@@ -83,8 +83,9 @@ main:
      * with a DTB walker that reads /chosen/linux,initrd-{start,end}
      * for the exact blob size.
      *
-     * Failure → panic_k (D013 config error, Morse "K" `─·─`). The
-     * user pulls the SD, fixes network.conf, reflashes. */
+     * Failure → panic_n (Tier-1 user-fixable "Network conf invalid",
+     * Morse "N" `─·`) per docs/PANIC_PATTERNS.md. The user pulls
+     * the SD, fixes network.conf, reflashes. */
     ldr     x0, =INITRAMFS_ADDR
     mov     w1, #4096
     bl      config_parse
@@ -148,6 +149,53 @@ main:
     ldr     x0, =timer_pool
     mov     w1, #TPOOL_DEFAULT_CAP
     bl      timer_pool_init
+
+.ifdef PLATFORM_PI4
+    /* Arm the BCM2711 PM watchdog with a generous boot-grace
+     * timeout (60 s). At the end of main() — once HTTP is up and
+     * the kernel has demonstrated steady state — sys_watchdog_set_timeout
+     * tightens this down to 10 s for fast runtime detection.
+     *
+     * Arming early (here, right after timer_pool_init) lets the
+     * watchdog catch boot-time wedges that would otherwise sit
+     * silent forever: PHY autoneg without timeout, USB enum hang,
+     * DHCP DISCOVER spin, exception-loop on a corrupted page table.
+     * 60 s is long enough that legitimate slow-boot operations
+     * (PHY ~5 s, DHCP ~5 s, even worst-case stacking) don't false-
+     * trip; a kernel/hardware wedge produces a 60 s reset cycle
+     * which is loud and observable rather than silent and opaque.
+     *
+     * panic_X functions (lib/panic.S) feed the watchdog from
+     * inside their blink loop via PANIC_PET_WATCHDOG, so user-
+     * fixable halts (network.conf invalid, gateway unreachable,
+     * etc.) keep their LED Morse pattern visible indefinitely
+     * while the watchdog stays armed as a backstop against the
+     * blink loop itself wedging. */
+    ldr     x0, =sys_watchdog_state
+    ldr     x1, =(PERIPH_BASE + PM_OFFSET)
+    str     x1, [x0, #SWD_PM_BASE]
+
+    /* SWD_BOOT_TIMEOUT_UNITS = 60 s × 65536 = 0x3C0000. */
+    mov     w1, #0
+    movk    w1, #0x3C, lsl #16          /* 0x003C0000 */
+    str     w1, [x0, #SWD_TIMEOUT_UNITS]
+
+    ldr     x1, =timer_pool
+    str     x1, [x0, #SWD_TIMER_POOL]
+
+    /* PET_PERIOD = 2 × timer_freq ticks. */
+    bl      timer_freq
+    lsl     x1, x0, #1
+    ldr     x0, =sys_watchdog_state
+    str     x1, [x0, #SWD_PET_PERIOD]
+
+    /* Capture PM_RSTS BEFORE arming so the boot rsts reflects the
+     * previous reset's reason, not anything we did this boot. */
+    bl      sys_watchdog_capture_rsts
+
+    ldr     x0, =sys_watchdog_state
+    bl      sys_watchdog_arm
+.endif
 
     /* Initialize IP fragment reassembly */
     bl      ip_reasm_init
@@ -249,59 +297,17 @@ main:
     bl      http_set_send_ctx
 
 .ifdef PLATFORM_PI4
-    /* Arm the BCM2711 PM watchdog. Layered above the GENET TX-wedge
-     * watchdog as a last-resort recovery: anything that prevents
-     * timer_check from running (kernel hang, exception loop, timer-
-     * pool corruption) becomes a SoC hardware reset within ~10 s.
-     *
-     * Arm late — only after every other init has succeeded. A bug
-     * earlier in boot would otherwise resemble a watchdog reset
-     * loop instead of a clean failure to start. By the time control
-     * reaches here the kernel has demonstrated DHCP/static IP,
-     * timers, TCP listen, HTTP — i.e. all the things a future hang
-     * could plausibly break. */
-    /* Populate sys_watchdog_state. State pointer is reloaded into
-     * x0 at each step rather than parked in a callee-saved
-     * register, since main()'s prologue only preserves x29/x30 —
-     * threading a register through bl timer_freq would require a
-     * separate stp/ldp pair. The reload pattern is cheaper. */
-
-    /* PM_BASE = PERIPH_BASE + PM_OFFSET. Single 64-bit load avoids
-     * cross-section .equ arithmetic that GNU as sometimes refuses. */
+    /* Tighten the PM watchdog timeout from the boot-grace value
+     * (60 s, set when the watchdog was armed early in main) down
+     * to the runtime value (10 s). The kernel has reached steady
+     * state — DHCP/static IP up, timers running, TCP listening,
+     * HTTP responding — so post-boot wedges should be detected
+     * fast (~10 s) rather than tolerating the boot-grace budget
+     * for the rest of the device's life. */
     ldr     x0, =sys_watchdog_state
-    ldr     x1, =(PERIPH_BASE + PM_OFFSET)
-    str     x1, [x0, #SWD_PM_BASE]
-
-    /* TIMEOUT_UNITS = 10 s × 65536 = 0xA0000. PM_WDOG runs at
-     * 1/65536 s per tick, 24-bit field. */
     mov     w1, #0
-    movk    w1, #0xA, lsl #16           /* 0x000A0000 */
-    str     w1, [x0, #SWD_TIMEOUT_UNITS]
-
-    /* TIMER_POOL — periodic pet callback re-arms itself here. */
-    ldr     x1, =timer_pool
-    str     x1, [x0, #SWD_TIMER_POOL]
-
-    /* PET_PERIOD = 2 × timer_freq ticks. Pet cadence (2 s) gives
-     * 5× margin under the 10 s timeout — a kernel-stalling
-     * operation up to ~9 s still gets petted before reset. */
-    bl      timer_freq                  /* clobbers x0 */
-    lsl     x1, x0, #1                  /* x1 = 2 × freq */
-    ldr     x0, =sys_watchdog_state
-    str     x1, [x0, #SWD_PET_PERIOD]
-
-    /* Capture PM_RSTS at boot — telemetry signal for whether the
-     * previous reset was watchdog-induced. Must run before
-     * anything writes the PM block; nothing currently does, but
-     * this conservative ordering protects against future code. */
-    bl      sys_watchdog_capture_rsts
-
-    /* Arm the watchdog. From here on, the kernel must pet PM_WDOG
-     * within 10 s or the SoC hardware-resets. The first pet was
-     * done by sys_watchdog_arm; subsequent pets fire from the
-     * timer-pool slot it installed. */
-    ldr     x0, =sys_watchdog_state
-    bl      sys_watchdog_arm
+    movk    w1, #0xA, lsl #16           /* 10 s × 65536 = 0xA0000 */
+    bl      sys_watchdog_set_timeout
 .endif
 
     mov     w0, #0
@@ -316,8 +322,13 @@ main:
 .ifdef PLATFORM_PI4
 .Lcfg_fail:
     /* w0 from config_parse holds the error code (1..8 per D012).
-     * Print "rc=NN\r\n" then halt with panic_k. Saves the user from
-     * guessing whether it was magic / line / IP / hostname. */
+     * Print "rc=NN\r\n" then halt with panic_n — Tier-1 user-fixable
+     * "Network conf invalid" per docs/PANIC_PATTERNS.md. The earlier
+     * panic_k call was a misclassification: K is "kernel panic /
+     * exception vector / assert," but a config-parse rc!=0 is
+     * legitimately a user-edit failure, which is exactly what
+     * pattern N exists for. Saves the user from guessing whether
+     * it was magic / line / IP / hostname. */
     mov     w19, w0                /* save rc */
     ldr     x0, =msg_cfg_fail
     bl      uart_puts
@@ -329,7 +340,7 @@ main:
     bl      uart_putc
     mov     w0, #'\n'
     bl      uart_putc
-    bl      panic_k                /* never returns */
+    bl      panic_n                /* never returns */
 .endif
 
 .Ldone:

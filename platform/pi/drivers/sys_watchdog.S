@@ -43,6 +43,7 @@
 .global sys_watchdog_arm
 .global sys_watchdog_disarm
 .global sys_watchdog_pet_cb
+.global sys_watchdog_set_timeout
 .global sys_watchdog_state
 
 .section .text
@@ -174,19 +175,60 @@ sys_watchdog_arm:
  * sys_watchdog_disarm — disable the PM watchdog.
  *
  * For test scaffolding and emergency recovery paths. Production
- * code should not call this — once armed, the watchdog is
- * supposed to stay armed for the life of the kernel.
+ * runtime code should not call this — the watchdog is supposed
+ * to stay armed for the life of the kernel. Panic paths feed the
+ * watchdog from inside their blink loop (see PANIC_PET_WATCHDOG
+ * in lib/panic.S) rather than disarming, which preserves the
+ * watchdog as a backstop against a wedged panic handler itself.
+ *
+ * Tolerates not-yet-initialized state (PM_BASE = 0): treats it
+ * as "nothing to disarm" and returns without touching MMIO.
  *
  * x0: state pointer
- * Clobbers: x0-x2.
+ * Clobbers: x0-x3.
  */
 sys_watchdog_disarm:
     ldr     x1, [x0, #SWD_PM_BASE]
+    cbz     x1, .Lswd_disarm_skip
     mov     w2, #PM_RSTC_WRCFG_CLR
     ldr     w3, =PM_PASSWORD
     orr     w2, w2, w3
     str     w2, [x1, #PM_RSTC]
     dsb     sy
+.Lswd_disarm_skip:
+    ret
+
+/*
+ * sys_watchdog_set_timeout — change the PM watchdog timeout.
+ *
+ * Updates state.TIMEOUT_UNITS to the new value AND writes the
+ * new value to PM_WDOG immediately, so the new timeout is in
+ * effect from the next instruction onward. Subsequent periodic
+ * pets read TIMEOUT_UNITS from state, so they pick up the new
+ * value automatically.
+ *
+ * Used by main() to transition from the boot-grace timeout
+ * (60 s — long enough that slow init operations like PHY
+ * autoneg don't false-trip) down to the runtime timeout
+ * (10 s — fast detection of post-boot wedges).
+ *
+ * Tolerates not-yet-armed state (PM_BASE = 0): updates
+ * TIMEOUT_UNITS but skips the MMIO write. The next sys_watchdog_arm
+ * will pick up the value.
+ *
+ * x0: state pointer
+ * w1: new timeout in PM_WDOG units (1/65536 s per tick, 24-bit)
+ * Clobbers: x0-x4.
+ */
+sys_watchdog_set_timeout:
+    str     w1, [x0, #SWD_TIMEOUT_UNITS]
+    ldr     x2, [x0, #SWD_PM_BASE]
+    cbz     x2, .Lswd_set_to_skip
+    ldr     w3, =PM_PASSWORD
+    orr     w4, w1, w3
+    str     w4, [x2, #PM_WDOG]
+    dsb     sy
+.Lswd_set_to_skip:
     ret
 
 /*

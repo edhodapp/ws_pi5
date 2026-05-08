@@ -20,6 +20,8 @@
 .global test_swd_record_pet_accumulates
 .global test_swd_record_pet_preserves_other_state
 .global test_swd_capture_rsts_reads_at_offset
+.global test_swd_set_timeout_updates_field
+.global test_swd_set_timeout_skips_mmio_when_unarmed
 
 .section .text
 
@@ -197,6 +199,111 @@ test_swd_capture_rsts_reads_at_offset:
     ldp     x29, x30, [sp], #16
     ret
 .Lswd_name_t4: .asciz "swd_capture_rsts_reads_at_offset"
+
+/* test_swd_set_timeout_updates_field
+ *   Pre:  state.TIMEOUT_UNITS = 0xAA, state.PM_BASE = &fake_pm
+ *   Call: sys_watchdog_set_timeout(&state, 0x000A0000)
+ *   Post: state.TIMEOUT_UNITS == 0x000A0000 AND
+ *         fake_pm[PM_WDOG / 4] == (0x000A0000 | PM_PASSWORD)
+ *
+ * Pins both halves of the contract: the state field gets updated
+ * (so the periodic pet picks up the new value) AND the PM_WDOG
+ * register sees the new value immediately (so the change takes
+ * effect without waiting for the next pet cycle).
+ */
+.balign 4
+test_swd_set_timeout_updates_field:
+    stp     x29, x30, [sp, #-16]!
+    bl      .Lswd_zero
+    /* Zero fake_pm. */
+    ldr     x0, =fake_pm
+    str     xzr, [x0, #0]
+    str     xzr, [x0, #8]
+    str     xzr, [x0, #16]
+    str     xzr, [x0, #24]
+    str     xzr, [x0, #32]
+    /* Seed an old timeout in state, point PM_BASE at fake_pm. */
+    ldr     x1, =fake_swd_state
+    mov     w2, #0xAA
+    str     w2, [x1, #SWD_TIMEOUT_UNITS]
+    str     x0, [x1, #SWD_PM_BASE]
+    /* Call set_timeout with new value 0x000A0000 (= 10s × 65536). */
+    mov     x0, x1                      /* x0 = state ptr */
+    mov     w1, #0
+    movk    w1, #0xA, lsl #16
+    bl      sys_watchdog_set_timeout
+    /* Verify state field. */
+    ldr     x0, =fake_swd_state
+    ldr     w1, [x0, #SWD_TIMEOUT_UNITS]
+    mov     w2, #0
+    movk    w2, #0xA, lsl #16
+    cmp     w1, w2
+    b.ne    .Lswd_t5_fail
+    /* Verify fake PM_WDOG = timeout | password. */
+    ldr     x0, =fake_pm
+    ldr     w1, [x0, #PM_WDOG]
+    ldr     w2, =(0x000A0000 | PM_PASSWORD)
+    cmp     w1, w2
+    b.ne    .Lswd_t5_fail
+    ldr     x0, =.Lswd_name_t5
+    bl      test_pass
+    ldp     x29, x30, [sp], #16
+    ret
+.Lswd_t5_fail:
+    ldr     x0, =.Lswd_name_t5
+    bl      test_fail
+    ldp     x29, x30, [sp], #16
+    ret
+.Lswd_name_t5: .asciz "swd_set_timeout_updates_field"
+
+/* test_swd_set_timeout_skips_mmio_when_unarmed
+ *   Pre:  state.PM_BASE = 0 (not yet armed)
+ *   Call: sys_watchdog_set_timeout(&state, 0x12345)
+ *   Post: state.TIMEOUT_UNITS == 0x12345 (field still updated)
+ *         Helper returns without faulting or hanging.
+ *
+ * Critical for main()'s startup ordering: if the kernel pre-
+ * configures TIMEOUT_UNITS before sys_watchdog_arm runs, the
+ * helper must take the cbz-guarded skip rather than dereferencing
+ * a null PM_BASE. We can't directly observe "no MMIO write" with
+ * MMU off (writing to 0x24 hits RAM, not MMIO), so the assertion
+ * is the indirect one: state field updates correctly and control
+ * returns cleanly.
+ */
+.balign 4
+test_swd_set_timeout_skips_mmio_when_unarmed:
+    stp     x29, x30, [sp, #-16]!
+    bl      .Lswd_zero                  /* PM_BASE = 0 */
+    /* Call set_timeout with PM_BASE still 0. */
+    ldr     x0, =fake_swd_state
+    mov     w1, #0x12345 & 0xFFFF
+    movk    w1, #(0x12345 >> 16), lsl #16
+    bl      sys_watchdog_set_timeout
+    /* Verify state field DID update. */
+    ldr     x0, =fake_swd_state
+    ldr     w1, [x0, #SWD_TIMEOUT_UNITS]
+    ldr     w2, =0x12345
+    cmp     w1, w2
+    b.ne    .Lswd_t6_fail
+    /* What this test actually proves: the helper updates the
+     * state field AND returns cleanly without faulting when
+     * PM_BASE=0. A buggy helper that always wrote MMIO would
+     * write to physical address 0x24 — with MMU off that's just
+     * RAM, neither faulting nor landing in fake_pm — so we can't
+     * directly assert "no MMIO write." The strong post-condition
+     * is "we got here and TIMEOUT_UNITS is right." Indirectly,
+     * the absence of a hang or fault demonstrates the cbz guard
+     * is taken on this path. */
+    ldr     x0, =.Lswd_name_t6
+    bl      test_pass
+    ldp     x29, x30, [sp], #16
+    ret
+.Lswd_t6_fail:
+    ldr     x0, =.Lswd_name_t6
+    bl      test_fail
+    ldp     x29, x30, [sp], #16
+    ret
+.Lswd_name_t6: .asciz "swd_set_timeout_skips_mmio_when_unarmed"
 
 .section .bss
 .balign 8

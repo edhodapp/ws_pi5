@@ -56,7 +56,19 @@ while [ "$(date +%s)" -lt "$DEADLINE_TS" ]; do
         # --data-only: the cron records data, not gates. Inherits
         # PERF_RUNS=3 from hw_tests.sh; PHASE_TIMEOUT_S defaults to 600 s
         # but can be overridden in the cron environment if needed.
-        if bash "$SCRIPT_DIR/hw_tests.sh" --data-only perf; then
+        #
+        # NETWORK_CONF: the chainloader-mode SD has no network.conf on
+        # its FAT partition (D018 — single chainloader image, network
+        # config supplied at flash time). hw_tests.sh's flash helper
+        # reads NETWORK_CONF and passes it to hw_send.py via
+        # --network-conf so the kernel's initramfs region (0x20000000)
+        # is populated before boot. Without this the kernel reads 0xff
+        # from the region, config_parse fails with rc=0x01, the kernel
+        # halts via panic_n. Static IP because perf needs a known
+        # target the harness can hit at sustained rates without any
+        # DHCP traffic mixed into the measurement.
+        if NETWORK_CONF="$PROJECT_DIR/hw_test/network-static.conf" \
+               bash "$SCRIPT_DIR/hw_tests.sh" --data-only perf; then
             echo "[$(date -Iseconds)] perf_nightly: data recorded; check perf_runs.log for trends"
             exit 0
         else

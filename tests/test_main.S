@@ -284,6 +284,8 @@ _start:
     bl      test_swd_record_pet_accumulates
     bl      test_swd_record_pet_preserves_other_state
     bl      test_swd_capture_rsts_reads_at_offset
+    bl      test_swd_set_timeout_updates_field
+    bl      test_swd_set_timeout_skips_mmio_when_unarmed
 
     /* === Print summary === */
     ldr     x0, =fail_count
