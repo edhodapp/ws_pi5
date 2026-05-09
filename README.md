@@ -383,7 +383,7 @@ and pick a network mode:
   you customize.
 - **DHCP** — set `dhcp=yes` and `hostname`; the lease supplies the
   rest. Useful on a typical home router. On DHCP failure the kernel
-  halts (see [panic patterns](docs/PANIC_PATTERNS.md)) so a
+  halts with [panic pattern D](docs/PANIC_PATTERNS.md) so a
   misconfigured rig is loud, not silent.
 
 See the [`network.conf` reference](#networkconf-reference) below for
@@ -424,7 +424,7 @@ on mismatch).
 
 | Key | Required? | Type | Notes |
 |---|---|---|---|
-| `dhcp` | no | `yes` / `no` (default `no`) | When `yes`, `ip`/`netmask`/`gateway` become **optional** — DHCP supplies them on boot. On DHCP failure the kernel halts (see [panic patterns](docs/PANIC_PATTERNS.md)) per D017 |
+| `dhcp` | no | `yes` / `no` (default `no`) | When `yes`, `ip`/`netmask`/`gateway` become **optional** — DHCP supplies them on boot. On DHCP failure (3 retries, no OFFER or no ACK) the kernel halts with [panic pattern D](docs/PANIC_PATTERNS.md) per D017 |
 | `ip` | yes (static), no (DHCP) | dotted-decimal IPv4 | This Pi's static address |
 | `netmask` | yes (static), no (DHCP) | dotted-decimal IPv4 | Recorded for documentation; the runtime uses always-via-gateway routing per D010 and ignores the value |
 | `gateway` | yes (static), no (DHCP) | dotted-decimal IPv4 | Default gateway; ARPed at boot, [panic pattern G](docs/PANIC_PATTERNS.md) on timeout |
