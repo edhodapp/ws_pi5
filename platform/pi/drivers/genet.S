@@ -649,15 +649,47 @@ genet_send:
     and     w6, w6, #0xFF
     str     w6, [x20, #GENET_STATE_TX_RIDX]
 
-    /* Poll CONS_INDEX for completion (x5 = TDMA base, preserved) */
-    ldr     w4, =100000
+    /* Poll CONS_INDEX for completion with a wall-clock deadline.
+     *
+     * The earlier "100000 iterations" budget was clock-speed
+     * sensitive — at the Pi 4 1.5 GHz default it gave ~5 ms of
+     * real wait, but a future CPU frequency scale (or QEMU's
+     * faster effective clock) would shift that budget arbitrarily.
+     * CNTPCT_EL0 + CNTFRQ_EL0/64 gives a stable ~16 ms wall-clock
+     * deadline regardless of CPU speed.
+     *
+     * Normal Gigabit TX of a 1500 B frame completes in ~12 μs;
+     * 16 ms is ~1300× that, so steady-state success is unaffected.
+     * Far above 16 ms and something is genuinely wedged — fall
+     * through to the genet_wd_record_timeout path which trips a
+     * full reset once the consecutive-timeout threshold is hit.
+     *
+     * The architectural issue Gemini flagged separately (this is
+     * still a synchronous PIO-style busy-wait that ties up the
+     * CPU during every transmit) is a real concern, but converting
+     * the stack to async TX completion is out of scope for a
+     * Gemini fix-up commit — it would touch every send caller
+     * across TCP, ARP, ICMP, etc. The wallclock deadline + yield
+     * here is the largest defensible local improvement without
+     * that architectural rework: yield is a hint to the core
+     * (essentially a nop on Pi 4 which has no SMT) but keeps the
+     * intent explicit and is the right primitive for any future
+     * async retrofit.
+     *
+     * x5 = TDMA ring base (preserved from the doorbell write). */
+    mrs     x4, CNTFRQ_EL0
+    lsr     x4, x4, #6              /* ~16 ms = freq / 64 ticks */
+    mrs     x6, CNTPCT_EL0
+    add     x4, x4, x6              /* x4 = wall-clock deadline */
 .Ltx_wait:
     ldr     w0, [x5, #TDMA_CONS_INDEX_OFS]
     and     w0, w0, #0xFFFF
     cmp     w0, w3
     b.eq    .Ltx_ok
-    subs    w4, w4, #1
-    b.ne    .Ltx_wait
+    yield
+    mrs     x6, CNTPCT_EL0
+    cmp     x6, x4
+    b.lo    .Ltx_wait
 
     /* Timeout path — bump PERF_SEND_FAIL only, do NOT accumulate
      * ticks. A timeout means we just spent ~100k MMIO reads on a
