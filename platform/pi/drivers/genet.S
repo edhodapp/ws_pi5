@@ -1195,12 +1195,6 @@ genet_mdio_write:
  */
 .global genet_set_mac
 genet_set_mac:
-    ldrb    w2, [x1, #0]
-    ldrb    w3, [x1, #1]
-    orr     w2, w3, w2, lsl #8
-    ldrb    w3, [x1, #2]
-    orr     w2, w2, w3, lsl #16     /* wrong — need big-endian */
-
     /* MAC0 = [0]<<24 | [1]<<16 | [2]<<8 | [3] */
     ldrb    w2, [x1, #0]
     lsl     w2, w2, #24
