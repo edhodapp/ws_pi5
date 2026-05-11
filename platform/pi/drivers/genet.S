@@ -523,6 +523,31 @@ genet_send:
     mov     x21, x2                 /* buf (original frame) */
     mov     w22, w3                 /* len (frame only) */
 
+    /* Bounds check: refuse over-size frames before they overflow
+     * genet_tsb_buf via the .Ltsb_copy loop. genet_tsb_buf is sized
+     * at TSB_SIZE + ETH_FRAME_MAX (= 64 + 1514 = 1578 bytes), so
+     * any input frame longer than ETH_FRAME_MAX (1514) would write
+     * past the buffer end into adjacent BSS / .data. A misbehaving
+     * caller (TCP segment-size bug, ICMP MTU mismatch, etc.) would
+     * silently corrupt neighboring globals — exactly the kind of
+     * failure that surfaces months later as an unrelated symptom.
+     *
+     * Treat as a send failure (w0=1, same as the timeout path) and
+     * bump PERF_SEND_FAIL so the /status counter reflects the
+     * abuse. The caller's error handling already covers w0!=0;
+     * adding a distinct return code (e.g. w0=2 = oversize) would
+     * proliferate handling without changing what callers do — they
+     * either retry or drop, and oversize is a non-retriable bug
+     * anyway. */
+    cmp     w22, #ETH_FRAME_MAX
+    b.ls    .Ltx_size_ok
+.ifdef PERF_SEND
+    PROBE_COUNT_INC PERF_SEND_FAIL, w2, x3
+.endif
+    mov     w0, #1
+    b       .Ltx_ret
+.Ltx_size_ok:
+
     /* === Build combined TSB + frame in genet_tsb_buf ===
      *
      * TBUF_64B_EN is set in genet_init, so every DMA must start
