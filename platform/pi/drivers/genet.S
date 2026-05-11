@@ -126,13 +126,14 @@ genet_dump_state:
  *           DMA ring init → MAC enable
  *
  * Returns: w0 = 0 on success, 1 on failure
- * Clobbers: x0-x5, x19-x27 saved/restored
+ * Clobbers: x0-x5; x19-x26 saved/restored
  */
 genet_init:
-    stp     x29, x30, [sp, #-64]!
+    stp     x29, x30, [sp, #-80]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
+    stp     x25, x26, [sp, #64]
     mov     x29, sp
 
     mov     x19, x0                 /* x19 = GENET base */
@@ -262,6 +263,23 @@ genet_init:
     bl      genet_mdio_read
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
+    /* MDIO timeout / no-PHY-response guard: genet_mdio_read returns
+     * 0xFFFF when its wait loop times out (e.g., MDIO bus failure,
+     * PHY not powered). 0xFFFF has BOTH the link-up bit (#2) and
+     * the AN-complete bit (#5) set, so the naive `tbz` checks
+     * below would falsely succeed and let .Lan_ok proceed against
+     * a non-responsive PHY — the driver would then enable DMA
+     * against unconfigured RGMII state and hang. Treat 0xFFFF as
+     * "not ready, keep waiting" so the periodic UART progress
+     * prints surface the diagnostic and the boot-grace watchdog
+     * eventually trips a SoC reset if it persists.
+     *
+     * cmp immediate is 12-bit; 0xFFFF doesn't fit, so materialise
+     * it via mov before comparing. w1 is caller-saved scratch and
+     * dead on this path (genet_mdio_read clobbers w1-w5). */
+    mov     w1, #0xFFFF
+    cmp     w0, w1
+    b.eq    .Lan_progress
     tbz     w0, #2, .Lan_progress
     tbz     w0, #5, .Lan_progress
     b       .Lan_ok
@@ -483,10 +501,11 @@ genet_init:
     mov     w0, #1
 
 .Linit_done:
+    ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #64
+    ldp     x29, x30, [sp], #80
     ret
 
 /*
@@ -568,14 +587,24 @@ genet_send:
     /* Default: no checksum offload (non-IP frames or unknown proto) */
     mov     w4, #0                  /* w4 = 0: no DO_CSUM flag */
 
-    /* Detect IPv4 (ethertype 0x0800 at buf[12..13], big-endian) */
+    /* Detect IPv4 (ethertype 0x0800 at buf[12..13], big-endian).
+     * Bounds check first: an Ethernet frame must be at least 14 B
+     * to even hold the ethertype, and we'll need byte 23 below if
+     * IPv4 is detected. A genuine TCP/UDP/ICMP frame is well above
+     * the 24 B floor (a min IPv4 + Ethernet header is 34 B), so a
+     * sub-24 B frame is either a runt (rare ARP edge case, max
+     * legitimate length is 42 B) or a malformed caller; in both
+     * cases falling through to .Ltsb_copy with no offload is the
+     * safe choice. */
+    cmp     w22, #24
+    b.lt    .Ltsb_copy
     ldrb    w1, [x21, #12]
     cmp     w1, #0x08
     b.ne    .Ltsb_copy
     ldrb    w1, [x21, #13]
     cbnz    w1, .Ltsb_copy
 
-    /* IPv4 — read IP.protocol at buf[23] */
+    /* IPv4 — read IP.protocol at buf[23] (bounds-checked above) */
     ldrb    w1, [x21, #23]         /* ETH_PAYLOAD(14) + IP_PROTO(9) */
     cmp     w1, #1                  /* ICMP */
     b.eq    .Ltsb_icmp
