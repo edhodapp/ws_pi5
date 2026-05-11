@@ -832,7 +832,6 @@ genet_wd_log_msg:
     .asciz "genet wd: TX wedge detected, full reset\n"
 genet_phy_waiting_msg:
     .asciz "PHY: waiting for link\r\n"
-.section .text
 
 .section .bss
 .balign 8
