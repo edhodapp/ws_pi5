@@ -517,7 +517,10 @@ genet_init:
  * w3: frame length
  *
  * Returns: w0 = 0 on success, 1 on timeout
- * Clobbers: x0-x5
+ * Clobbers: x0-x9 (caller-saved). Callee-saved x19-x22 are
+ * preserved via the prologue's stp/ldp pairs; under PERF_SEND
+ * x23-x24 are also saved. The copy loop uses x6/x7 for the ldp/
+ * stp pair, which the previous "x0-x5" doc line missed.
  *
  * Under PERF=send (or PERF=all) the frame is bumped by 16 bytes to
  * save x23 (probe start tick) + x24 (pad; unused but paired with
@@ -566,6 +569,28 @@ genet_send:
     mov     w0, #1
     b       .Ltx_ret
 .Ltx_size_ok:
+
+    /* Link check: if PHY reports no link (speed code 0), the
+     * downstream poll on TDMA_CONS_INDEX will time out after the
+     * full 16 ms wall-clock deadline because GENET can't transmit
+     * onto a dead wire. With cable unplugged that's 16 ms wasted
+     * per send, and on a busy stack with retries it stalls the
+     * main loop. Short-circuit to a w0=1 return so the caller's
+     * retry path is cheap until the link comes back.
+     *
+     * GENET_STATE_PHY_SPEED is updated by genet_phy_check on every
+     * idle pass through net_loop, so the value is at most one
+     * idle-tick stale. Treating "speed=0" as "no link" matches the
+     * BCM54213PE PHY_AUX_STS encoding documented at
+     * genet_phy_check (code 0 = no link). */
+    ldr     w0, [x20, #GENET_STATE_PHY_SPEED]
+    cbnz    w0, .Ltx_link_ok
+.ifdef PERF_SEND
+    PROBE_COUNT_INC PERF_SEND_FAIL, w2, x3
+.endif
+    mov     w0, #1
+    b       .Ltx_ret
+.Ltx_link_ok:
 
     /* === Build combined TSB + frame in genet_tsb_buf ===
      *
@@ -977,7 +1002,11 @@ genet_phy_last_print:
  * Returns:
  *   w0 = 0 on success (frame copied), 1 if no frame available
  *   w1 = actual frame length (valid when w0 = 0)
- * Clobbers: x0-x5
+ * Clobbers: x0-x9 (caller-saved). Callee-saved x19-x22 are
+ * preserved via the prologue's stp/ldp pairs; under PERF_RECV
+ * x23-x24 are also saved. The copy loop uses x7/x8 for the ldp/
+ * stp pair (x6 for the byte tail, x9 to save the return length
+ * across the destructive copy).
  *
  * Under PERF=recv (or PERF=all) the frame is bumped by 16 bytes to
  * save x23 (probe start tick) + x24 (pad; unused but paired with
@@ -1145,6 +1174,25 @@ genet_recv:
     b.ne    .Lrx_copy_byte
 .Lrx_copy_done:
     mov     w5, w9                  /* restore length for return */
+
+    /* Barrier between frame copy (Normal memory loads/stores) and
+     * the RDMA_CONS_INDEX MMIO write (Device memory store) below.
+     *
+     * Without this, the AArch64 memory model permits the CONS_INDEX
+     * store to be observed by GENET BEFORE all loads from the rx
+     * pool slot have retired. As soon as GENET sees the new
+     * CONS_INDEX it may reclaim the slot for a new DMA write — if
+     * any of our late copy loads hadn't retired yet, the CPU would
+     * read partly-overwritten data. The symptom would be subtle
+     * (occasional bytes from an unrelated frame appearing in the
+     * tail of the current one) and only show up under burst load
+     * where the hardware is racing to refill rings.
+     *
+     * `dmb ish` (data memory barrier, inner-shareable) is the
+     * minimum sufficient: it orders all prior memory operations
+     * (the copy) before all subsequent ones (the MMIO store). dsb
+     * sy would also work but is heavier than required. */
+    dmb     ish
 
     /* Update consumer index */
     ldr     w0, [x20, #GENET_STATE_RX_CIDX]
