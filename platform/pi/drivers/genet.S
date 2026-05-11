@@ -640,8 +640,11 @@ genet_send:
     ldr     x21, =genet_tsb_buf
     add     w22, w22, #TSB_SIZE     /* DMA len includes the TSB */
 
-    /* Flush combined buffer from D-cache to RAM */
-    bic     x0, x21, #63            /* align down to cache line */
+    /* Flush combined buffer from D-cache to RAM. genet_tsb_buf is
+     * declared `.balign 64` (see end of this file), so x21 is
+     * already cache-line aligned — no `bic x0, x21, #63` align-
+     * down is needed. */
+    mov     x0, x21
     add     x1, x21, x22           /* end = tsb_buf + 64 + frame_len */
 .Ltx_flush:
     dc      civac, x0
