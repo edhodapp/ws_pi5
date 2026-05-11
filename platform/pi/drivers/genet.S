@@ -241,18 +241,52 @@ genet_init:
     ldr     w1, =0x1340
     bl      genet_mdio_write
 
-    /* Wait for link + AN complete — retry forever.
-     * Real-world appliance: user may connect cable after boot.
+    /* Wait for link + AN complete — retry forever (cable plugged
+     * after boot is a supported case). Periodically print "PHY:
+     * waiting for link" so a stuck wait is visible on UART rather
+     * than silent.
+     *
      * Exit condition: BMSR bit 2 (link up) AND bit 5 (AN complete).
      * Read BMSR twice: bit 2 (link up) is latched-low.
-     * Do NOT kick AN again — restart interrupts the negotiation state. */
+     * Do NOT kick AN again — restart interrupts the negotiation state.
+     *
+     * Recovery envelope: this loop runs UNDER the boot-grace
+     * watchdog (armed in main.S before genet_init). If the wait
+     * persists past the 60 s budget, the SoC resets and boot
+     * starts over — giving the user a loud reset cycle to
+     * diagnose against rather than a silent kernel hang. Cable
+     * plugged late: link comes up, AN completes within the next
+     * 60 s window, kernel proceeds. */
 .Lan_wait:
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
     mov     w0, #PHY_BMSR
     bl      genet_mdio_read
-    tbz     w0, #2, .Lan_wait
-    tbz     w0, #5, .Lan_wait
+    tbz     w0, #2, .Lan_progress
+    tbz     w0, #5, .Lan_progress
+    b       .Lan_ok
+
+.Lan_progress:
+    /* Print "PHY: waiting for link" approximately every 4 s.
+     * CNTPCT_EL0 is the architectural cycle counter (always
+     * available after boot, no driver init needed); CNTFRQ_EL0
+     * gives ticks/sec. 4 × freq fits in a single lsl, keeping
+     * the math one shift instead of a runtime multiply. The
+     * .Lphy_last_print BSS slot is zero on first entry, so the
+     * very first iteration through the loop prints immediately,
+     * giving the user feedback the moment the wait starts. */
+    mrs     x10, CNTPCT_EL0
+    ldr     x9, =genet_phy_last_print
+    ldr     x11, [x9]
+    sub     x12, x10, x11
+    mrs     x13, CNTFRQ_EL0
+    lsl     x13, x13, #2                /* 4 × freq ticks ≈ 4 s */
+    cmp     x12, x13
+    b.lo    .Lan_wait                   /* <4 s since last print, keep waiting silently */
+    str     x10, [x9]                   /* update last_print timestamp */
+    ldr     x0, =genet_phy_waiting_msg
+    bl      uart_puts
+    b       .Lan_wait
 
 .Lan_ok:
     /* Check link */
@@ -796,6 +830,14 @@ genet_watchdog_trip:
 .section .rodata
 genet_wd_log_msg:
     .asciz "genet wd: TX wedge detected, full reset\n"
+genet_phy_waiting_msg:
+    .asciz "PHY: waiting for link\r\n"
+.section .text
+
+.section .bss
+.balign 8
+genet_phy_last_print:
+    .space 8                            /* CNTPCT_EL0 timestamp of last "PHY: waiting" UART line */
 .section .text
 
 /*

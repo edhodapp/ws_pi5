@@ -94,76 +94,33 @@ main:
     ldr     x0, =msg_cfg_ok
     bl      uart_puts
 
-    /* Initialize GENET Ethernet */
-    ldr     x0, =GENET_BASE
-    ldr     x1, =genet_state
-    ldr     x2, =genet_rx_pool
-    bl      genet_init
-    cbnz    w0, .Lnet_fail
-
-    /* Set MAC address from mailbox */
-    ldr     x0, =GENET_BASE
-    ldr     x1, =genet_mac
-    bl      genet_set_mac
-
-    /* Enable HW TX checksum offload — software writes 0 in the L4
-     * checksum field, GENET fills it from the TSB's tx_csum_info. */
-    ldr     x0, =net_hw_csum_tx
-    mov     w1, #1
-    str     w1, [x0]
-
-    ldr     x0, =msg_genet_ok
-    bl      uart_puts
-.else
-    ldr     x0, =msg_hello
-    bl      uart_puts
-
-    /* Initialize DWC2 USB host controller */
-    ldr     x0, =DWC2_BASE
-    bl      dwc2_init
-    cbnz    w0, .Lnet_fail
-
-    ldr     x0, =msg_dwc2_ok
-    bl      uart_puts
-
-    /* Enumerate and configure CDC-ECM device */
-    ldr     x0, =DWC2_BASE
-    ldr     x1, =ecm_state
-    bl      cdc_ecm_init
-    cbnz    w0, .Lnet_fail
-
-    ldr     x0, =msg_ecm_init_ok
-    bl      uart_puts
-
-    /* Activate data interface (SET_INTERFACE alt=1) */
-    ldr     x0, =DWC2_BASE
-    ldr     x1, =ecm_state
-    bl      cdc_ecm_activate
-    cbnz    w0, .Lnet_fail
-
-    ldr     x0, =msg_ecm_active
-    bl      uart_puts
-.endif
-
-    /* Initialize timer pool */
+    /* Initialize timer pool BEFORE genet_init.
+     * sys_watchdog_arm needs the pool to install its periodic pet
+     * timer; the timer pool itself has no driver dependencies (just
+     * BSS allocation + slot initialization), so it's safe to bring
+     * up here. Ordering this before the watchdog arm and before
+     * GENET init is what lets the boot-grace watchdog actually
+     * cover the PHY autoneg wait — see the watchdog arm comment
+     * below for why that's load-bearing. */
     ldr     x0, =timer_pool
     mov     w1, #TPOOL_DEFAULT_CAP
     bl      timer_pool_init
 
-.ifdef PLATFORM_PI4
     /* Arm the BCM2711 PM watchdog with a generous boot-grace
-     * timeout (60 s). At the end of main() — once HTTP is up and
-     * the kernel has demonstrated steady state — sys_watchdog_set_timeout
-     * tightens this down to 10 s for fast runtime detection.
+     * timeout (60 s) BEFORE genet_init runs. At the end of main()
+     * — once HTTP is up and the kernel has demonstrated steady
+     * state — sys_watchdog_set_timeout tightens this down to 10 s
+     * for fast runtime detection.
      *
-     * Arming early (here, right after timer_pool_init) lets the
-     * watchdog catch boot-time wedges that would otherwise sit
-     * silent forever: PHY autoneg without timeout, USB enum hang,
-     * DHCP DISCOVER spin, exception-loop on a corrupted page table.
-     * 60 s is long enough that legitimate slow-boot operations
-     * (PHY ~5 s, DHCP ~5 s, even worst-case stacking) don't false-
-     * trip; a kernel/hardware wedge produces a 60 s reset cycle
-     * which is loud and observable rather than silent and opaque.
+     * Arming before genet_init is load-bearing: genet_init's PHY
+     * autoneg wait (.Lan_wait in genet.S) is unbounded by design
+     * (cable-plugged-late support), so a stuck PHY produces a
+     * silent kernel wedge unless the watchdog is already armed to
+     * trip a 60 s SoC reset. The earlier "arm after genet_init"
+     * ordering had this exact gap — silent boot hangs that took 4
+     * days of failing nightly perf runs to surface. 60 s is still
+     * long enough that legitimate slow-boot operations (PHY ~5 s,
+     * USB enum, DHCP DISCOVER) don't false-trip.
      *
      * panic_X functions (lib/panic.S) feed the watchdog from
      * inside their blink loop via PANIC_PET_WATCHDOG, so user-
@@ -195,6 +152,63 @@ main:
 
     ldr     x0, =sys_watchdog_state
     bl      sys_watchdog_arm
+
+    /* Initialize GENET Ethernet (now under watchdog protection). */
+    ldr     x0, =GENET_BASE
+    ldr     x1, =genet_state
+    ldr     x2, =genet_rx_pool
+    bl      genet_init
+    cbnz    w0, .Lnet_fail
+
+    /* Set MAC address from mailbox */
+    ldr     x0, =GENET_BASE
+    ldr     x1, =genet_mac
+    bl      genet_set_mac
+
+    /* Enable HW TX checksum offload — software writes 0 in the L4
+     * checksum field, GENET fills it from the TSB's tx_csum_info. */
+    ldr     x0, =net_hw_csum_tx
+    mov     w1, #1
+    str     w1, [x0]
+
+    ldr     x0, =msg_genet_ok
+    bl      uart_puts
+.else
+    ldr     x0, =msg_hello
+    bl      uart_puts
+
+    /* Initialize timer pool. Pi 3 / QEMU has no PM watchdog so
+     * the arm block is skipped, but ip_reasm_init and other
+     * downstream consumers still need the pool. */
+    ldr     x0, =timer_pool
+    mov     w1, #TPOOL_DEFAULT_CAP
+    bl      timer_pool_init
+
+    /* Initialize DWC2 USB host controller */
+    ldr     x0, =DWC2_BASE
+    bl      dwc2_init
+    cbnz    w0, .Lnet_fail
+
+    ldr     x0, =msg_dwc2_ok
+    bl      uart_puts
+
+    /* Enumerate and configure CDC-ECM device */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    bl      cdc_ecm_init
+    cbnz    w0, .Lnet_fail
+
+    ldr     x0, =msg_ecm_init_ok
+    bl      uart_puts
+
+    /* Activate data interface (SET_INTERFACE alt=1) */
+    ldr     x0, =DWC2_BASE
+    ldr     x1, =ecm_state
+    bl      cdc_ecm_activate
+    cbnz    w0, .Lnet_fail
+
+    ldr     x0, =msg_ecm_active
+    bl      uart_puts
 .endif
 
     /* Initialize IP fragment reassembly */
