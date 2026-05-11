@@ -565,4 +565,3 @@ msg_mac_fail:   .asciz "MAC unreadable: mailbox returned no valid factory MAC an
 msg_initramfs_probe: .asciz "INITRAMFS[0..16]: "
 .endif
 msg_net_fail:   .asciz "Network bring-up failed\r\n"
-msg_entering_loop: .asciz "Entering net_loop\r\n"

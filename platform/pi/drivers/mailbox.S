@@ -198,7 +198,18 @@ mailbox_get_board_mac:
     ret
 
 .section .bss
-.balign 16
+.balign 64
 mbox_buf:
+    /* 32 bytes is enough for the TAG_GET_BOARD_MAC request/response
+     * (header + tag + 8-byte value buffer + end tag), but the
+     * .balign is 64 — not 16 — so the entire buffer fits in a
+     * single cache line. mbox_call uses `dc civac` which operates
+     * on one cache line at a time and was given only the buffer's
+     * start address; with 16-byte alignment the buffer could span
+     * two 64-byte lines, leaving the second half uncovered by the
+     * clean+invalidate. With 64-byte alignment that whole class of
+     * "VC writes the response, CPU reads stale cache" failures is
+     * structurally impossible. Future tags larger than 64 bytes
+     * would need mbox_call itself to loop the cache maintenance. */
     .space  32                     /* property-tag request/response buffer */
 .section .text
