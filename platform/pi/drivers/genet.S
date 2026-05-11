@@ -58,7 +58,8 @@
  * kernel (QEMU raspi3b) doesn't have GENET hardware at all.
  *
  * x0: destination buffer (at least 64 bytes, any alignment)
- * Clobbers: x1-x5
+ * Clobbers: x1-x3 (caller-saved). Doc previously said x1-x5,
+ * which over-stated by two — only x1, x2, x3 are touched.
  * Leaf function — no prologue/epilogue.
  */
 genet_dump_state:
@@ -1364,6 +1365,21 @@ genet_mdio_read:
  * x19: GENET base
  * w0: register number
  * w1: 16-bit value
+ *
+ * Returns: w0 = 0 on success, 1 on timeout (MDIO bus stuck or
+ *          PHY unresponsive). Existing callers in genet_init
+ *          ignore the return code because the subsequent
+ *          .Lphy_rst read-poll and .Lan_wait MDIO 0xFFFF guard
+ *          will catch a non-responsive PHY through the read
+ *          path; this signal is here for any future caller that
+ *          wants to fast-fail on the first write rather than wait
+ *          for the indirect detection. Pre-fix, the function
+ *          returned whatever the last-loaded MDIO_CMD value
+ *          happened to be — non-deterministic, indistinguishable
+ *          from success, and per Gemini review a silent-failure
+ *          hazard.
+ *
+ * Leaf function — no prologue/epilogue. Clobbers x0-x2.
  */
 genet_mdio_write:
     lsl     w2, w0, #MDIO_REG_SHIFT
@@ -1380,7 +1396,11 @@ genet_mdio_write:
     tbz     w0, #29, 2f
     subs    w2, w2, #1
     b.ne    1b
-2:  ret
+    /* Timeout — MDIO ready bit never cleared. */
+    mov     w0, #1
+    ret
+2:  mov     w0, #0
+    ret
 
 /*
  * genet_set_mac — Set the MAC address
