@@ -411,7 +411,23 @@ genet_init:
     ldr     w0, =DMA_CTRL_EN_CSUM
     str     w0, [x22, #TDMA_DMA_CTRL_OFS]
 
-    /* --- Set speed (U-Boot writes speed alone, clearing all other bits) --- */
+    /* --- Set speed (U-Boot writes speed alone, clearing all other bits) ---
+     *
+     * PHY_AUX_STS speed code → UMAC_CMD bits, per BCM54213PE
+     * datasheet (also documented at the top of genet_phy_check):
+     *   7 = 1000baseT/Full   → SPEED_1000
+     *   6 = 1000baseT/Half   → SPEED_1000
+     *   5 = 100baseTX/Full   → SPEED_100
+     *   3 = 100baseTX/Half   → SPEED_100
+     *   2 = 10baseT/Full     → SPEED bits cleared (10 Mbit default)
+     *   1 = 10baseT/Half     → SPEED bits cleared (10 Mbit default)
+     *   0 = no link          → fall through to "10 Mbit default"
+     *                          for safety; .Lan_wait should have
+     *                          held us until link was up so we
+     *                          shouldn't actually see code 0 here.
+     *
+     * Codes 1 and 2 are explicit (rather than fall-through) so a
+     * datasheet cross-check shows every case handled by name. */
     mov     w0, #0
     cmp     w23, #7
     b.eq    .Lsp_1000
@@ -421,12 +437,19 @@ genet_init:
     b.eq    .Lsp_100
     cmp     w23, #3
     b.eq    .Lsp_100
-    b       .Lsp_set
+    cmp     w23, #2
+    b.eq    .Lsp_10
+    cmp     w23, #1
+    b.eq    .Lsp_10
+    b       .Lsp_set                /* code 0 (no link) or unknown — clear SPEED */
 .Lsp_1000:
     mov     w0, #UMAC_CMD_SPEED_1000
     b       .Lsp_set
 .Lsp_100:
     mov     w0, #UMAC_CMD_SPEED_100
+    b       .Lsp_set
+.Lsp_10:
+    mov     w0, #0                  /* SPEED bits cleared = 10 Mbit per UMAC_CMD spec */
 .Lsp_set:
     str     w0, [x19, #GENET_UMAC_CMD]
 
