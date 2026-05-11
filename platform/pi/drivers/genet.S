@@ -951,9 +951,15 @@ genet_recv:
     /* Skip 64-byte RSB (from RBUF_64B_EN) + 2-byte alignment pad.
      * The descriptor's raw length includes both; subtracting 66
      * yields the actual Ethernet frame length. Guard against
-     * underflow (raw_len < 66) from corrupt descriptors. */
+     * underflow (raw_len < 66) from corrupt descriptors AND
+     * against a raw_len of exactly 66 producing a 0-length frame
+     * — Ethernet has no 0-byte frames (smallest legal payload is
+     * a 60-byte runt + FCS), so anything that decodes to length 0
+     * is by definition malformed and routes to .Lrx_err for the
+     * drop-bookkeeping path rather than handing 0 bytes to the
+     * caller as if it were a valid packet. */
     cmp     w5, #66
-    b.lt    .Lrx_err
+    b.le    .Lrx_err
     add     x0, x0, #66            /* skip RSB(64) + pad(2) */
     sub     w5, w5, #66            /* actual frame length */
 
