@@ -23,6 +23,7 @@
 
 /* Property tags */
 .equ TAG_GET_BOARD_REV, 0x00010002
+.equ TAG_GET_BOARD_MAC, 0x00010003     /* returns 6-byte factory MAC + 2 pad */
 .equ TAG_SET_POWER,     0x00028001
 
 /* Tag response bit — set in tag's status word on success */

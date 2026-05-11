@@ -42,14 +42,26 @@ net_broadcast_mac:
 /* --- Parser-writable storage (.data) --- */
 .section .data
 
-/* Locally administered, unicast MAC.
- * Must match the MAC programmed into the network controller.
- * I5 will zero this on Pi 4 once config_parser sets it from either
- * the mailbox factory MAC (D011) or a `mac=` override. */
+/* MAC programmed into the network controller and used by the
+ * protocol stack (single source of truth: genet_set_mac in main.S
+ * passes &net_our_mac to the GENET MAC0/MAC1 registers).
+ *
+ * PLATFORM_PI4 default is the all-zero sentinel: byte 0 = 0 means
+ * "not yet resolved." config_parse writes a real MAC into this
+ * struct directly when `mac=` is parsed (lib/config_parser.S
+ * _store_mac); main.S checks byte 0 after parse and, if still zero,
+ * calls mailbox_get_board_mac to populate from BCM2711 OTP fuses
+ * (firmware property tag 0x00010003). On both paths failing, main.S
+ * halts with panic_m. The hardcoded DE:AD:BE:EF:CA:FE that lived
+ * here previously was a placeholder that would have collided with
+ * any other ws_pi5 user on the same LAN.
+ *
+ * Pi 3 / QEMU keeps a valid LAA address since the QEMU mailbox
+ * doesn't implement tag 0x00010003. */
 .balign 4
 net_our_mac:
 .ifdef PLATFORM_PI4
-    .byte   0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE
+    .byte   0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .else
     .byte   0x02, 0x00, 0x00, 0x00, 0x00, 0x01
 .endif

@@ -153,6 +153,33 @@ main:
     ldr     x0, =sys_watchdog_state
     bl      sys_watchdog_arm
 
+    /* Resolve the MAC into net_our_mac before genet_init / genet_set_mac
+     * so the driver and the protocol stack agree on a single source of
+     * truth.
+     *
+     * Priority per D011/D012:
+     *   1. `mac=` override in network.conf (config_parse already wrote
+     *      it directly into net_our_mac, so byte 0 will be non-zero).
+     *   2. BCM2711 OTP factory MAC via mailbox tag 0x00010003.
+     *   3. Halt with panic_m (Tier-2 Hardware, Morse "M" `——`)
+     *      per docs/PANIC_PATTERNS.md when both fail — the user
+     *      can fix this by adding `mac=...` to network.conf.
+     *
+     * The PLATFORM_PI4 net_our_mac default is 00:00:00:00:00:00,
+     * so a zero byte 0 unambiguously means "config_parse didn't
+     * supply an override; ask the firmware." A successful mailbox
+     * read writes a real OUI-prefixed factory MAC into net_our_mac
+     * (validated against the all-zero / all-FF / multicast-bit
+     * malformed cases inside the helper itself). */
+    ldr     x0, =net_our_mac
+    ldrb    w1, [x0, #0]
+    cbnz    w1, .Lmac_resolved          /* config supplied override */
+
+    ldr     x0, =net_our_mac
+    bl      mailbox_get_board_mac
+    cbnz    w0, .Lmac_panic              /* mailbox failed AND no override */
+.Lmac_resolved:
+
     /* Initialize GENET Ethernet (now under watchdog protection). */
     ldr     x0, =GENET_BASE
     ldr     x1, =genet_state
@@ -160,9 +187,9 @@ main:
     bl      genet_init
     cbnz    w0, .Lnet_fail
 
-    /* Set MAC address from mailbox */
+    /* Set MAC address from net_our_mac (resolved above). */
     ldr     x0, =GENET_BASE
-    ldr     x1, =genet_mac
+    ldr     x1, =net_our_mac
     bl      genet_set_mac
 
     /* Enable HW TX checksum offload — software writes 0 in the L4
@@ -365,6 +392,18 @@ main:
     mov     w0, #'\n'
     bl      uart_putc
     bl      panic_n                /* never returns */
+
+.Lmac_panic:
+    /* MAC resolution failed: config didn't supply `mac=` AND the
+     * mailbox returned no valid factory MAC (all-zero, all-FF, or
+     * multicast bit set). Halt with panic_m (Tier-2 Hardware,
+     * Morse "M" `——`) per docs/PANIC_PATTERNS.md — the user can
+     * fix this without code changes by adding a `mac=...` line
+     * to network.conf, but unlike a parse error this isn't a
+     * keystroke typo so a distinct LED pattern matters. */
+    ldr     x0, =msg_mac_fail
+    bl      uart_puts
+    bl      panic_m                /* never returns */
 .endif
 
 .Ldone:
@@ -456,11 +495,6 @@ net_loop:
 genet_state:
     .space  GENET_STATE_SIZE
 
-/* Hardcoded MAC — replace with mailbox tag later */
-genet_mac:
-    .byte   0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE
-    .balign 4
-
 .endif
 
 .balign 16
@@ -527,6 +561,7 @@ msg_genet_ok:   .asciz "GENET Gigabit Ethernet initialized\r\n"
 msg_cfg_ok:     .asciz "network.conf parsed\r\n"
 msg_cfg_fail:   .asciz "network.conf parse failed — check SD\r\n"
 msg_cfg_rc:     .asciz "config_parse rc=0x"
+msg_mac_fail:   .asciz "MAC unreadable: mailbox returned no valid factory MAC and no mac= override in network.conf\r\n"
 msg_initramfs_probe: .asciz "INITRAMFS[0..16]: "
 .endif
 msg_net_fail:   .asciz "Network bring-up failed\r\n"
