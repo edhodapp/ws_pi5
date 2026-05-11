@@ -61,11 +61,27 @@ mbox_call:
     dc      civac, x0
     dsb     sy
 
-    /* Check buffer response code (offset 4 in buffer = request/response code) */
-    ldr     w0, [x0, #4]
-    and     w0, w0, #0x80000000
-    cmp     w0, #0
-    cset    w0, eq                 /* w0 = 1 if no response bit (failure), 0 if set (success) */
+    /* Check buffer response code (offset 4 in buffer = request/response code).
+     *
+     * Per the Pi firmware property tag protocol:
+     *   0x80000000 = request successful
+     *   0x80000001 = error parsing request buffer (partial response)
+     *   0x00000000 = unprocessed (request still pending — shouldn't
+     *                appear if mbox_call returned, but defensive)
+     *   anything else = treat as failure
+     *
+     * The original `and w0, #0x80000000; cmp w0, #0` only checked
+     * bit 31 and would have classified 0x80000001 (Response Error)
+     * as success, silently passing buffer-parse failures through to
+     * the caller. Switched to an exact-match `cmp w0, #0x80000000`
+     * so any error bit in the low half is rejected.
+     *
+     * cmp 32-bit immediate is 12-bit shifted; 0x80000000 doesn't
+     * fit, so we materialize via ldr from a literal pool. */
+    ldr     w1, [x0, #4]
+    ldr     w2, =0x80000000
+    cmp     w1, w2
+    cset    w0, ne                 /* w0 = 1 (failure) unless code == exactly 0x80000000 */
     ret
 
 /*

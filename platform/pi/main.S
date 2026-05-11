@@ -166,14 +166,22 @@ main:
      *      can fix this by adding `mac=...` to network.conf.
      *
      * The PLATFORM_PI4 net_our_mac default is 00:00:00:00:00:00,
-     * so a zero byte 0 unambiguously means "config_parse didn't
-     * supply an override; ask the firmware." A successful mailbox
-     * read writes a real OUI-prefixed factory MAC into net_our_mac
-     * (validated against the all-zero / all-FF / multicast-bit
-     * malformed cases inside the helper itself). */
+     * so an OR of all 6 bytes equal to zero unambiguously means
+     * "config_parse didn't supply an override; ask the firmware."
+     * Checking only byte 0 (as the original version did) would
+     * miss real overrides whose OUI starts with 00 — common cases
+     * include 00:50:56 (VMware), 00:0c:29 (VMware), 00:1A:79
+     * (Cisco-Linksys), and 00:00:00 itself. ldr w (4 bytes) +
+     * ldrh (2 bytes) covers all 6 in two aligned loads
+     * (net_our_mac is .balign 4). A successful mailbox read writes
+     * a real OUI-prefixed factory MAC into net_our_mac (validated
+     * against the all-zero / all-FF / multicast-bit malformed
+     * cases inside the helper itself). */
     ldr     x0, =net_our_mac
-    ldrb    w1, [x0, #0]
-    cbnz    w1, .Lmac_resolved          /* config supplied override */
+    ldr     w1, [x0]                    /* bytes 0-3 */
+    ldrh    w2, [x0, #4]                /* bytes 4-5 */
+    orr     w1, w1, w2
+    cbnz    w1, .Lmac_resolved          /* any byte non-zero = override supplied */
 
     ldr     x0, =net_our_mac
     bl      mailbox_get_board_mac
