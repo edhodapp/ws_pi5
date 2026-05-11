@@ -991,6 +991,25 @@ genet_recv:
     lsr     w5, w4, #16
     and     w5, w5, #0xFFF          /* raw length (includes 64B RSB + 2B pad) */
 
+    /* Reject raw_len > 2048 (RX pool slot size).
+     *
+     * The 12-bit raw_len field permits values up to 4095, but our
+     * pool slot is 2048 bytes (lsl #11 below). A hardware misreport
+     * or a corrupted descriptor that sets raw_len > 2048 would
+     * cause the cache invalidation loop to step past the current
+     * slot and `dc ivac` cache lines belonging to the next slot —
+     * those lines are CPU-read-only RX buffers in practice, so
+     * `ivac` (no writeback) doesn't *corrupt* memory, but it does
+     * force the next slot's CPU re-read to miss cache and re-fetch
+     * from RAM, which is wasted work. More importantly, treating
+     * an over-sized raw_len as legal proceeds into the frame copy
+     * with a length value that doesn't match the slot contract;
+     * dropping it here keeps the size invariant on the slow path.
+     * Routes to .Lrx_err which bumps the drop counter, mirroring
+     * the existing "raw_len < 67" malformed-descriptor handling. */
+    cmp     w5, #2048
+    b.gt    .Lrx_err
+
     /* Compute source buffer: pool + ridx * 2048 */
     ldr     x0, [x20, #GENET_STATE_RX_POOL]
     lsl     w3, w2, #11
