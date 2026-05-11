@@ -559,18 +559,33 @@ genet_send:
     mov     w4, #TX_DO_CSUM         /* bit 4 only — no OW_CRC */
 
 .Ltsb_copy:
-    /* Copy frame data after the TSB (byte loop — simple, correct,
-     * ~200 ns for a 1500 B frame; the L4 checksum savings of
-     * ~3500+ ns dwarf the copy cost). */
+    /* Copy frame data after the TSB. 16 bytes per iter via
+     * ldp/stp with post-increment, byte loop for the tail —
+     * mirrors .Lrx_copy16 in genet_recv. The previous byte
+     * loop's "~200 ns / 1500 B" comment was off by an order of
+     * magnitude (real cost was ~5 μs at ~5 instr/byte on Cortex-
+     * A72); ldp/stp pulls that to ~1 μs by handling 16 bytes per
+     * 2-instruction inner step, a ~5× reduction in the per-frame
+     * copy cost. The L4 checksum offload savings still dwarf the
+     * copy on supported protocols, but on every frame this path
+     * trims ~4 μs that the protocol stack can use elsewhere. */
     add     x1, x0, #TSB_SIZE      /* dst = tsb_buf + 64 */
     mov     x2, x21                 /* src = original buf */
     mov     w3, w22                 /* count */
-.Ltsb_copy_loop:
+.Ltsb_copy16:
+    cmp     w3, #16
+    b.lt    .Ltsb_copy_tail
+    ldp     x6, x7, [x2], #16
+    stp     x6, x7, [x1], #16
+    sub     w3, w3, #16
+    b       .Ltsb_copy16
+.Ltsb_copy_tail:
     cbz     w3, .Ltsb_copy_done
-    sub     w3, w3, #1
-    ldrb    w6, [x2, x3]
-    strb    w6, [x1, x3]
-    cbnz    w3, .Ltsb_copy_loop
+.Ltsb_copy_byte:
+    ldrb    w6, [x2], #1
+    strb    w6, [x1], #1
+    subs    w3, w3, #1
+    b.ne    .Ltsb_copy_byte
 .Ltsb_copy_done:
 
     /* Switch buf/len to the combined buffer */
