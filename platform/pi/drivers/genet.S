@@ -925,11 +925,23 @@ genet_recv:
     ldr     x0, [x20, #GENET_STATE_RX_POOL]
     lsl     w3, w2, #11
     add     x0, x0, x3
-    /* Invalidate D-cache for RX buffer */
+    /* Invalidate D-cache for RX buffer.
+     *
+     * `dc ivac` (invalidate only), NOT `dc civac` (clean +
+     * invalidate): the DMA has just written this buffer in RAM
+     * and we're about to read it. `civac` would clean any dirty
+     * cache lines back to RAM first, which under MMU-off + cache-
+     * dirty conditions could overwrite the freshly-DMA'd packet
+     * with stale CPU writes. RX buffers are CPU-read-only by
+     * convention so they should stay clean — `civac` was likely
+     * defensive, but the cost of being wrong (silent packet
+     * corruption) is too high to leave the latent risk. `ivac`
+     * is the safe primitive for any DMA-written buffer the CPU
+     * is about to consume. */
     mov     x3, x0
     mov     w4, #0
 .Lrx_inv:
-    dc      civac, x3
+    dc      ivac, x3
     add     x3, x3, #64
     add     w4, w4, #64
     cmp     w4, w5
