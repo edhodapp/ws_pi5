@@ -1208,6 +1208,44 @@ genet_recv:
     and     w0, w0, #0xFF
     str     w0, [x20, #GENET_STATE_RX_RIDX]
 
+.ifdef PLATFORM_PI4
+    /* Pet PM watchdog on every ring wrap (RIDX rolled back to 0
+     * after 256 packets traversed).
+     *
+     * Why this exists: net_loop's periodic watchdog pet runs from
+     * timer_check, which only executes inside .Lnet_idle. Under a
+     * sustained recv flood the ring never empties, .Lnet_idle is
+     * never reached, timer_check never fires, the periodic pet
+     * callback can't refresh PM_WDOG, and the SoC resets at the
+     * 10 s runtime timeout — even though the kernel is healthy and
+     * actively serving traffic. This inline pet keeps the watchdog
+     * fed during that flood case.
+     *
+     * Cadence: 256 packets between pets. At Pi 4 Gigabit recv
+     * (~80 K pps for small frames, ~85 Kpps observed in burst
+     * tests) that's ~3 ms between pets — three orders of magnitude
+     * under the 10 s timeout. At realistic peak load (50 K req/s ≈
+     * 100 K recv pps including ACKs) it's ~2.5 ms. The cost is one
+     * MMIO write + dsb every 256 packets, amortized to a few cycles
+     * per packet — negligible vs the per-packet cost of the recv
+     * itself.
+     *
+     * Quiet network case is unaffected: when no packets arrive,
+     * genet_recv returns "no frame," net_loop falls through to
+     * .Lnet_idle, timer_check fires the periodic pet — same as
+     * before this change. The inline pet only fires when packets
+     * are actively flowing.
+     *
+     * x6/x7 are caller-saved scratch, free at this point in the
+     * function (the copy loop's x6/x7/x8/x9 usage is finished). */
+    cbnz    w0, .Lrx_no_inline_pet
+    ldr     x6, =(PERIPH_BASE + PM_OFFSET)
+    ldr     w7, =(0x000A0000 | PM_PASSWORD)     /* 10 s timeout | password */
+    str     w7, [x6, #PM_WDOG]
+    dsb     sy
+.Lrx_no_inline_pet:
+.endif
+
     /* Return success + length */
     mov     w1, w5
     mov     w0, #0
