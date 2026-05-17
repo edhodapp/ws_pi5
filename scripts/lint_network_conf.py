@@ -23,9 +23,8 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-
-from pydantic import BaseModel
 
 # --- Format constants --------------------------------------------------------
 
@@ -45,9 +44,21 @@ _LDH = frozenset("abcdefghijklmnopqrstuvwxyz"
 _LDH_FIRST = _LDH - {"-"}
 
 
-# --- Result types (pydantic per project convention) -------------------------
+# --- Result types ------------------------------------------------------------
+#
+# stdlib @dataclass rather than pydantic.BaseModel — deliberate
+# deviation from the project's "pydantic for data structures"
+# convention. This script is in the user deploy path (mk_sd.sh
+# invokes it as a flash-time lint gate) and requirements.txt
+# explicitly contracts that the deploy path needs the Python
+# stdlib and nothing else. Importing pydantic here broke a fresh
+# v0.2.0 user install on 2026-05-16 — caller hit
+# `ModuleNotFoundError: No module named 'pydantic'`. Dataclasses
+# give us the same record-with-named-fields shape with zero
+# external dependencies.
 
-class LintError(BaseModel):
+@dataclass
+class LintError:
     """One diagnostic from the linter.
 
     line is 1-indexed; line=0 means "applies to file as a whole."
@@ -59,12 +70,13 @@ class LintError(BaseModel):
     message: str
 
 
-class LintResult(BaseModel):
+@dataclass
+class LintResult:
     """Outcome of a single lint() call."""
 
     ok: bool
-    config: dict[str, str]
-    errors: list[LintError]
+    config: dict[str, str] = field(default_factory=dict)
+    errors: list[LintError] = field(default_factory=list)
 
 
 # --- Per-value validators ---------------------------------------------------
