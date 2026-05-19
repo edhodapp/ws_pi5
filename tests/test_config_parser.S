@@ -16,6 +16,7 @@
 .global test_config_parse_bad_magic
 .global test_config_parse_eof_midstream
 .global test_config_parse_with_mac
+.global test_config_parse_mathpages_trailing_garbage
 
 .section .text
 
@@ -169,6 +170,65 @@ test_config_parse_eof_midstream:
     ret
 
 
+/* ========================================================================
+ * test_config_parse_mathpages_trailing_garbage
+ *
+ * Repro for the 2026-05-18 home-install regression. The kernel reads
+ * 4 KiB from INITRAMFS_ADDR (0x20000000) per main.S:
+ *     ldr     x0, =INITRAMFS_ADDR
+ *     mov     w1, #4096
+ *     bl      config_parse
+ *
+ * The firmware loads network.conf into that physical address but
+ * does NOT zero-pad the remainder. Real-world network.conf files
+ * are under 2 KiB (Ed's was 1731 B), so the trailing ~2.3 KiB of
+ * the 4 KiB buffer is whatever the DRAM cell happened to hold
+ * before firmware wrote the file — could be zeros on a fresh DRAM
+ * init, could be uninitialized garbage on a warm boot, could be
+ * leftover kernel state if a watchdog reset just fired.
+ *
+ * This test simulates the worst case: a complete, valid config
+ * (the exact `dhcp=yes` + `hostname=mathpages` shape Ed flashed
+ * to the 1 GB Pi 4) followed by trailing bytes that resemble
+ * another key=value line. If config_parse scans the whole buffer
+ * without bounded EOF detection, it processes the trailing
+ * pseudo-line, hits an unknown key, and returns E_KEY — which
+ * the kernel turns into a panic_n (Morse "N") at .Lcfg_fail in
+ * main.S. That's the failure mode Ed observed in the field: a
+ * valid file on disk, accepted by the Python linter (which reads
+ * a file, not a buffer), rejected by the asm parser (which reads
+ * a fixed-size buffer that includes trailing RAM contents).
+ *
+ * Expected: rc = 0 (parser stops at the file's last meaningful
+ * byte and ignores trailing garbage, matching the contract the
+ * Python linter implements).
+ *
+ * Pre-fix this test FAILS, demonstrating the regression. Post-fix
+ * (e.g., config_parser stops at the first NUL byte, or main.S
+ * passes the actual file length from the DTB initrd-end property)
+ * this test passes.
+ * ======================================================================== */
+test_config_parse_mathpages_trailing_garbage:
+    stp     x29, x30, [sp, #-16]!
+
+    /* Drive config_parse against the 4 KiB buffer (file content
+     * followed by trailing pseudo-line garbage — see rodata below). */
+    ldr     x0, =_cp_mathpages_buf
+    mov     w1, #_cp_mathpages_len
+    bl      config_parse
+    cbnz    w0, .Lcpt_fail
+
+    ldr     x0, =_cp_name_mathpages
+    bl      test_pass
+    b       .Lcpt_done
+.Lcpt_fail:
+    ldr     x0, =_cp_name_mathpages
+    bl      test_fail
+.Lcpt_done:
+    ldp     x29, x30, [sp], #16
+    ret
+
+
 .section .rodata
 
 _cp_name_valid:
@@ -179,6 +239,8 @@ _cp_name_eof:
     .asciz "config_parse_eof_midstream"
 _cp_name_with_mac:
     .asciz "config_parse_with_mac"
+_cp_name_mathpages:
+    .asciz "config_parse_mathpages_trailing_garbage"
 
 /* Minimal valid network.conf. Values match QEMU compile-time
  * defaults from lib/net_cfg.S so this test's parse-and-write
@@ -217,3 +279,41 @@ _cp_mac_buf:
     .ascii "hostname=qemu\n"
     .ascii "mac=02:00:00:00:00:01\n"
 .equ _cp_mac_len, (. - _cp_mac_buf)
+
+/* 4 KiB buffer mirroring the runtime layout main.S hands to
+ * config_parse: file content at the start (Ed's `dhcp=yes` +
+ * `hostname=mathpages` shape — the exact config that triggered
+ * panic_n on the 1 GB Pi 4 during the 2026-05-18 home-network
+ * test), then a pseudo-config-line IMMEDIATELY after (no NUL
+ * separator), then zeros to 4 KiB.
+ *
+ * Why no NUL separator: the existing H4 fix in config_parser.S
+ * stops on the first NUL byte, which handles the common
+ * "firmware zero-pads after file" case (covered by
+ * test_config_parse_eof_midstream above). But firmware doesn't
+ * always zero-pad — Raspberry Pi firmware in particular just
+ * dd's the file into the load address without touching the
+ * bytes past file_size. On a cold boot DRAM is typically zeros,
+ * but on warm boots (watchdog resets, prior kernel runs) the
+ * trailing bytes are whatever was in RAM. If they happen to
+ * form `\n<word>=<word>\n` (random chance given ASCII-range
+ * uninitialized bytes), the parser treats it as another config
+ * line and returns an error code — kernel turns that into
+ * panic_n in the field.
+ *
+ * The bait line "\nfoo=bar\n" placed RIGHT after the last \n of
+ * the file content provokes E_KEY (unknown key "foo"). If the
+ * parser stops at file_end (e.g., via a real DTB-supplied
+ * initrd-end, or by detecting NUL as a sentinel before consuming
+ * non-NUL trailing bytes), this test passes. If it scans the
+ * whole 4 KiB buffer in fixed-length mode (current behavior),
+ * it processes the bait line and returns E_KEY → test fails. */
+.balign 16
+_cp_mathpages_buf:
+    .ascii "# WSPI5CFG\n"               /* 11 bytes */
+    .ascii "dhcp=yes\n"                 /*  9 bytes */
+    .ascii "hostname=mathpages\n"       /* 19 bytes — total 39 */
+    .ascii "\nfoo=bar\n"                /*  9 bytes — pseudo-line bait,
+                                         * NO NUL separator before */
+    .space (4096 - 39 - 9), 0x00        /* fill to exactly 4 KiB */
+.equ _cp_mathpages_len, 4096

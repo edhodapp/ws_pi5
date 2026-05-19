@@ -120,6 +120,7 @@ _start:
     bl      test_config_parse_bad_magic
     bl      test_config_parse_eof_midstream
     bl      test_config_parse_with_mac
+    bl      test_config_parse_mathpages_trailing_garbage
     bl      test_config_parse_vectors
     bl      test_mdns_a_query_match
     bl      test_mdns_a_query_no_match

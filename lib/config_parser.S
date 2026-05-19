@@ -102,8 +102,62 @@ config_parse:
     cmp     x19, x20
     b.hs    .Lcp_finish
     bl      _parse_line
-    cbnz    w0, .Lcp_done
+    cbnz    w0, .Lcp_check_soft_eof
     b       .Lcp_loop
+
+.Lcp_check_soft_eof:
+    /* Soft-EOF on E_KEY-after-required.
+     *
+     * Why: firmware loads network.conf into INITRAMFS_ADDR but does
+     * NOT zero-pad the buffer past file_size. main.S hands a fixed
+     * 4 KiB buffer to config_parse — so the parser sees file content
+     * followed by whatever was in that DRAM region before the load.
+     * Most of the time that's zeros (caught by the existing NUL EOF
+     * marker in _parse_line) or 0xFF (caught by the 0xFF EOF marker),
+     * but on some boots the trailing bytes happen to form
+     * \n<word>=<word>\n — i.e., look like another config line with
+     * an unknown key. Without this soft-EOF, the parser returns
+     * E_KEY for that ghost line and main.S halts the kernel with
+     * panic_n on a perfectly valid file. The test
+     * config_parse_mathpages_trailing_garbage reproduces it; the
+     * 2026-05-18 1 GB Pi 4 + BrosTrend home-deployment attempt
+     * hit it for real.
+     *
+     * Only E_KEY qualifies for soft-EOF. E_LINE / E_IP / E_HOST /
+     * E_MAC / E_DUP errors stay hard — they almost always mean a
+     * real user typo in the file content (e.g. dhcp=maybe,
+     * mac=truncated, gateway=999.999.999.999). Required-keys-mask
+     * must also be satisfied: an unknown key before the file's
+     * required content is complete is most likely a typo of one
+     * of the required keys, not trailing garbage, so it stays
+     * hard too.
+     *
+     * scripts/lint_network_conf.py applies the identical rule
+     * (asm-parser ↔ linter lockstep — see the TSV vector at
+     * tests/func/network_conf_vectors.tsv: f_unknown_key now
+     * places the unknown key BEFORE required keys to preserve
+     * the fail-on-typo coverage). */
+    cmp     w0, #E_KEY
+    b.ne    .Lcp_done                   /* not E_KEY: propagate hard error */
+
+    /* E_KEY path: soft-EOF iff required-keys-mask is satisfied. */
+    mov     w22, w0                     /* save E_KEY in case we propagate */
+    adrp    x0, net_dhcp
+    add     x0, x0, :lo12:net_dhcp
+    ldr     w0, [x0]
+    cbz     w0, .Lcp_sf_strict
+    /* dhcp=yes: only hostname (bit 3) required. */
+    and     w0, w21, #0x08
+    cmp     w0, #0x08
+    b.eq    .Lcp_ok                     /* soft-EOF — success */
+    b       .Lcp_sf_propagate
+.Lcp_sf_strict:
+    and     w0, w21, #REQUIRED_MASK
+    cmp     w0, #REQUIRED_MASK
+    b.eq    .Lcp_ok                     /* soft-EOF — success */
+.Lcp_sf_propagate:
+    mov     w0, w22                     /* restore E_KEY for caller */
+    b       .Lcp_done
 
 .Lcp_finish:
     /* Required-field check. When net_dhcp == 1 (set by parsing

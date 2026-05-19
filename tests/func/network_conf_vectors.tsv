@@ -25,7 +25,8 @@ f_missing_ip	FAIL	E_REQ	# WSPI5CFG\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhos
 f_missing_netmask	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\ngateway=10.0.0.1\nhostname=wspi5
 f_missing_gateway	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\nhostname=wspi5
 f_missing_hostname	FAIL	E_REQ	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1
-f_unknown_key	FAIL	E_KEY	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nfoo=bar
+f_unknown_key	FAIL	E_KEY	# WSPI5CFG\nfoo=bar\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
+p_unknown_key_after_required	PASS	NONE	# WSPI5CFG\nip=10.0.0.2\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5\nfoo=bar
 f_duplicate_ip	FAIL	E_DUP	# WSPI5CFG\nip=10.0.0.2\nip=10.0.0.3\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 f_ip_three_octets	FAIL	E_IP	# WSPI5CFG\nip=10.0.0\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5
 f_ip_five_octets	FAIL	E_IP	# WSPI5CFG\nip=10.0.0.2.3\nnetmask=255.255.255.0\ngateway=10.0.0.1\nhostname=wspi5

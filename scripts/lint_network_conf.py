@@ -270,6 +270,14 @@ def _check_required(config: dict[str, str]) -> list[LintError]:
 
 # --- Public lint entry point ------------------------------------------------
 
+def _required_collected(config: dict[str, str]) -> bool:
+    """True iff every required key (per current dhcp= mode) is in config."""
+    required = (
+        DHCP_RELAXED_REQUIRED if config.get("dhcp") == "yes" else REQUIRED_KEYS
+    )
+    return all(k in config for k in required)
+
+
 def lint(text: str) -> LintResult:
     """Lint a network.conf text. See module docstring for rules."""
     config: dict[str, str] = {}
@@ -283,6 +291,16 @@ def lint(text: str) -> LintResult:
             continue
         err = _parse_line(i, raw, config)
         if err is not None:
+            # Soft-EOF on E_KEY-after-required: an unknown key
+            # encountered AFTER all required fields are collected is
+            # most likely trailing RAM garbage past the firmware-loaded
+            # file end (Pi firmware doesn't zero-pad the initramfs
+            # region — see lib/config_parser.S:.Lcp_check_soft_eof and
+            # tests/test_config_parser.S:config_parse_mathpages_trailing_garbage
+            # for the asm-side mirror of this rule). Stop processing
+            # further lines and treat the file as complete.
+            if err.code == "E_KEY" and _required_collected(config):
+                break
             errors.append(err)
     errors.extend(_check_required(config))
     return LintResult(ok=not errors, config=config, errors=errors)
