@@ -1533,12 +1533,17 @@ http_routes_count_runtime:
  * appliance. Boot-time activation (a future commit) checks for
  * "WSPIAPLI" and switches the dispatcher's route base.
  *
- * Lives in .data so the eventual boot-init can patch per-route
- * offset→pointer fixups in place without MMU perms getting in the
- * way. Alignment 16 so the magic reads atomically and route
- * entries start 8-aligned.
+ * Lives in its own `.appliance_slab` section so the linker can place
+ * it at a fixed physical address (LINK_ADDR + 1 MiB on SIZE_LOCKED
+ * builds) — that makes the kernel image a clean 256 MiB on the
+ * default build (1 MiB code reserve + 255 MiB slab) instead of the
+ * earlier "268 MB-ish, depending on whatever .data accumulated".
+ * "aw" = allocated + writable so future boot-init can patch per-route
+ * offset→pointer fixups in place without MMU perms getting in the way.
+ * Alignment 16 so the magic reads atomically and route entries start
+ * 8-aligned.
  * =================================================================== */
-.section .data
+.section .appliance_slab, "aw", @progbits
 .balign 16
 .global http_appliance_slab
 http_appliance_slab:
@@ -1559,14 +1564,17 @@ http_appliance_slab_end:
 .error "http_appliance_slab size drift — update APPLIANCE_SLAB_SIZE or the reservation"
 .endif
 
-/* Guard region after the slab. A v0.1.0 install-walkthrough crash
- * traced to a yet-unidentified write that landed past the slab end
- * and corrupted whatever .data symbol came next (specifically,
- * http_send_ctx.tx_buf — which has now been moved to .bss to keep
- * it well clear of this area too). The guard absorbs any overrun
- * up to its size before adjacent .data sees the corruption. 4 KiB
- * is an arbitrary "comfortable for unintended overflows" choice
- * that costs almost nothing in image size. */
+/* Guard region. Originally added (v0.1.0 era) right after the
+ * slab to absorb writes that overran into adjacent .data, before
+ * the slab had its own section. With the slab now in
+ * `.appliance_slab` (separately placed at LINK_ADDR + 1 MiB on
+ * SIZE_LOCKED builds), the guard belongs back in `.data` where it
+ * sits alongside other small initialized globals — no longer
+ * positioned to catch post-slab overruns, but its presence still
+ * documents the historic concern and the 4 KiB cost is trivial.
+ * The underlying overrun bug it was added against has not been
+ * formally root-caused; leaving the guard in place is conservative. */
+.section .data
 .balign 16
 http_appliance_slab_guard:
     .space  4096

@@ -102,15 +102,26 @@ make test
 Static content is baked into the kernel image at package time — the
 packager copies files into a reserved region of `.data`, and the
 running kernel serves them from RAM. The reserved region is sized at
-**compile time**, so kernel8.img is always `~60 KB of server code + the
-reserved content region`. Pick the size your site actually needs
-(see [Size the kernel to your site](#size-the-kernel-to-your-site)
+**compile time**. Pick the size your site actually needs (see
+[Size the kernel to your site](#size-the-kernel-to-your-site)
 below) — don't pay for headroom you won't use.
+
+The default build (`make PLATFORM=pi4` with no `CONTENT_MAX`
+override) produces a kernel image of exactly **256 MiB** (clean power
+of two): a 1 MiB code-and-globals reserve at the front followed by a
+255 MiB appliance slab. The linker `ASSERT`s this size invariant
+loudly — code/globals growing past the 1 MiB reserve, or the slab
+shrinking away from 255 MiB, fails the link.
 
 | Constant | Default | What it caps |
 |---|---|---|
-| `APPLIANCE_CONTENT_MAX` | `256 MiB` (compile-time default; overridable with `make CONTENT_MAX=<bytes>`) | total bytes across all packaged files (paths + headers + bodies) |
+| `APPLIANCE_CONTENT_MAX` | `255 MiB − header/routes ≈ 254.98 MiB` (compile-time default for the locked 256 MiB image; overridable with `make CONTENT_MAX=<bytes>`) | total bytes across all packaged files (paths + headers + bodies) |
 | `APPLIANCE_MAX_ROUTES` | `512` (overridable with `make MAX_ROUTES=<n>`) | number of files (one route per file, plus a `/` alias for top-level `index.html`) |
+
+When `CONTENT_MAX` is overridden, the SIZE_LOCK is dropped and the
+slab packs immediately after `.data` for a compact image — used by
+the `appliance` Makefile target (64 KiB slab → ~150 KiB kernel) so
+UART chainloader iteration stays fast.
 
 **Maximum available content region on a 1 GB Pi 4** — bigger Pis have
 proportionally more headroom:
@@ -120,7 +131,7 @@ proportionally more headroom:
 | 1 MiB | ~1 MiB | 128 MB SD and up |
 | 16 MiB | ~16 MiB | 128 MB SD and up |
 | 64 MiB | ~64 MiB | 128 MB SD and up |
-| 256 MiB | ~268 MB | 512 MB SD and up |
+| 255 MiB (default, SIZE_LOCKED) | exactly 256 MiB | 512 MB SD and up |
 | >512 MiB | uncomfortable on 1 GB Pi | use a 2 GB+ model |
 
 The runtime reserves ~33 MiB of fixed buffers (128 TCP connections ×

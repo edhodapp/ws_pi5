@@ -41,7 +41,11 @@ APPLIANCE_MAX_ROUTES = 512
 ROUTE_SIZE = 48
 APPLIANCE_ROUTES_SIZE = APPLIANCE_MAX_ROUTES * ROUTE_SIZE
 APPLIANCE_CONTENT_OFF = APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE
-APPLIANCE_CONTENT_MAX = 256 * 1024 * 1024
+# Default sizes the slab section (header + routes + content) to
+# exactly 255 MiB so the kernel image lands at 256 MiB total on
+# SIZE_LOCKED builds. Subtract APPLIANCE_CONTENT_OFF (header + route
+# table) from the gross 255 MiB to get the content payload max.
+APPLIANCE_CONTENT_MAX = (255 * 1024 * 1024) - APPLIANCE_CONTENT_OFF
 APPLIANCE_SLAB_SIZE = APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX
 
 # Header field offsets

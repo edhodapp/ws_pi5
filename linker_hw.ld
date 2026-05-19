@@ -25,6 +25,59 @@ SECTIONS
         *(.data*)
     }
 
+    /* === SIZE_LOCKED layout =============================================
+     *
+     * When the linker is invoked with --defsym SIZE_LOCKED=1 (set by
+     * the Makefile for default `make PLATFORM=pi4` builds — i.e. when
+     * CONTENT_MAX has NOT been overridden), the appliance slab is
+     * placed at LINK_ADDR + 1 MiB and sized to exactly 255 MiB, making
+     * the kernel image exactly 256 MiB total (power of 2, easy to
+     * reason about, matches what the README's capacity table promises).
+     *
+     * The 1 MiB pre-slab reserve holds .text + .rodata + non-slab
+     * .data globals — currently ~100 KiB combined, leaving ~10× growth
+     * headroom. If code or initialized data ever overflows the
+     * reserve, the first ASSERT below catches it loudly at link time
+     * rather than producing a silently-misaligned slab.
+     *
+     * On dev/test builds where CONTENT_MAX is overridden (typically
+     * the `appliance` target: 65536 B), SIZE_LOCKED is NOT defined
+     * and the reserve/ASSERTs are skipped — the slab packs immediately
+     * after .data so the image stays small for fast UART chainloader
+     * transfers (~150 KiB kernel instead of ~1 MiB).
+     * ===================================================================
+     */
+    /* Direct symbol comparison instead of DEFINED() — ld processes
+     * --defsym after parsing the script, so DEFINED() sees the symbol
+     * as undefined at script eval time. Makefile always passes
+     * SIZE_LOCKED as 0 or 1 so the symbol is always present. */
+    . = SIZE_LOCKED ? (LINK_ADDR + 0x100000) : .;
+
+    .appliance_slab : ALIGN(16) {
+        __appliance_slab_start = .;
+        *(.appliance_slab)
+        __appliance_slab_end = .;
+    }
+
+    /* SIZE_LOCKED invariant #1: slab starts at LINK_ADDR + 1 MiB.
+     * If .text + .rodata + .data exceeded the 1 MiB reserve, the
+     * location counter is past 0x100000 by the time we hit
+     * `.appliance_slab` placement and the slab ends up displaced
+     * higher, breaking the 256 MiB total. Catches code/data bloat
+     * loudly at link time. */
+    ASSERT(SIZE_LOCKED == 0 ||
+           (__appliance_slab_start - LINK_ADDR == 0x100000),
+           "SIZE_LOCKED build: .text + .rodata + non-slab .data overflowed 1 MiB code reserve — either shrink globals or expand reserve in linker_hw.ld + APPLIANCE_CONTENT_MAX in include/http.inc")
+
+    /* SIZE_LOCKED invariant #2: image total = exactly 256 MiB.
+     * Catches drift between APPLIANCE_CONTENT_MAX (slab size) and the
+     * linker's reserve geometry. If APPLIANCE_CONTENT_MAX is changed
+     * away from 255 MiB without a matching reserve adjustment here,
+     * this fires and points the diff back at itself. */
+    ASSERT(SIZE_LOCKED == 0 ||
+           (__appliance_slab_end - LINK_ADDR == 0x10000000),
+           "SIZE_LOCKED build: image total != 256 MiB — APPLIANCE_CONTENT_MAX in include/http.inc must be (255 * 1024 * 1024) to match the linker's 1 MiB reserve")
+
     .bss (NOLOAD) : ALIGN(8) {
         __bss_start = .;
         *(.bss*)

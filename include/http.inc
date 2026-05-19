@@ -219,12 +219,23 @@
 .equ APPLIANCE_CONTENT_OFF,     (APPLIANCE_ROUTES_OFF + APPLIANCE_ROUTES_SIZE)
 /* APPLIANCE_CONTENT_MAX — overridable via `make CONTENT_MAX=<bytes>` so
  * kernel8.img can be sized to fit a user's actual site rather than
- * burning 256 MiB of reserved slab space regardless. Default stays
- * at 256 MiB for users who want a one-size-fits-everything image. */
+ * burning the full default slab regardless.
+ *
+ * Default sizes the SLAB SECTION (header + routes + content) to
+ * exactly 255 MiB. On SIZE_LOCKED builds the linker places the slab
+ * at LINK_ADDR + 1 MiB so total image = 256 MiB exactly (power of 2).
+ * Since the slab also carries APPLIANCE_CONTENT_OFF bytes of header
+ * + route table in front of the actual content, content max =
+ * 255 MiB - APPLIANCE_CONTENT_OFF (= 24 B header + 512 * 48 routes
+ * = 24,600 B by default). User-visible "max site size" is therefore
+ * 255 MiB - 24,600 B ≈ 254.98 MiB. The 1 MiB pre-slab reserve carries
+ * .text + .rodata + non-slab .data globals (currently ~100 KiB
+ * combined, so ~10× growth headroom). Changing 255 MiB here without
+ * also adjusting the linker reserve trips the SIZE_LOCKED ASSERTs. */
 .ifdef CONTENT_MAX_OVERRIDE
 .equ APPLIANCE_CONTENT_MAX,     CONTENT_MAX_OVERRIDE
 .else
-.equ APPLIANCE_CONTENT_MAX,     (256 * 1024 * 1024)
+.equ APPLIANCE_CONTENT_MAX,     ((255 * 1024 * 1024) - APPLIANCE_CONTENT_OFF)
 .endif
 .equ APPLIANCE_SLAB_SIZE,       (APPLIANCE_CONTENT_OFF + APPLIANCE_CONTENT_MAX)
 

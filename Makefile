@@ -90,6 +90,17 @@ ifneq ($(MAX_ROUTES),)
   APPLIANCE_OVERRIDE_ASFLAGS += --defsym MAX_ROUTES_OVERRIDE=$(MAX_ROUTES)
 endif
 
+# SIZE_LOCKED: 1 for default-build 256 MiB image (slab placed at
+# LINK_ADDR + 1 MiB), 0 when CONTENT_MAX is overridden (slab packs
+# directly). Always defined so linker_hw.ld compares the value
+# directly — DEFINED() returns 0 because ld processes --defsym after
+# script parse.
+ifeq ($(CONTENT_MAX),)
+  LDFLAGS_EXTRA += --defsym SIZE_LOCKED=1
+else
+  LDFLAGS_EXTRA += --defsym SIZE_LOCKED=0
+endif
+
 # ---------------------------------------------------------------------------
 # Network-config initramfs address (D004)
 #   Single source of truth: defined here, propagated to asm via
