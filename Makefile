@@ -111,6 +111,11 @@ endif
 #   0x20000000 is well above the kernel load address (0x80000) and BSS,
 #   no overlap risk on any current build target.
 # ---------------------------------------------------------------------------
+# NOTE: also parsed by scripts/mk_sd.sh via awk on the literal text
+# `INITRAMFS_ADDR := <hex>` of the next line. Keep `:=`, keep the value
+# on the same line, keep the variable name first. The shell-side
+# parser fails loudly (exits non-zero) if extraction returns empty,
+# so an accidental rename is caught at SD-image build time.
 INITRAMFS_ADDR := 0x20000000
 
 ASFLAGS = -g -I include/ -I $(PLATFORM_DIR)/include/ \

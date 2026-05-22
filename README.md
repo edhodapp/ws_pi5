@@ -539,7 +539,7 @@ over UART — see the chainloader workflow below.
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
 | **Pi 4** (QEMU test harness) | `make` | `make test` | Default. Runs the shared protocol-stack tests on QEMU raspi3b (BCM2837 peripheral base at 0x3F000000). Tests the platform-independent `lib/` code without needing real hardware. |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. Development flashing via UART chainloader; production via SD-card boot. |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. Development flashing via UART chainloader; production via SD-card boot (`scripts/mk_sd.sh`). |
 | Functional tests | — | `make test-functional` | PICT-driven combinatorial tests. |
 | UART chainloader | `make chainload` | — | Dev-only — see [Pi 4 Development Workflow](#pi-4-development-workflow). |
 | Clean | `make clean` | — | |

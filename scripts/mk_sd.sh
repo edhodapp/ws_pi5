@@ -271,7 +271,7 @@ cp "$FW_DIR/overlays/disable-bt.dtbo" "$BUNDLE_DIR/overlays/disable-bt.dtbo"
 # deploy path (Quick Start in README) doesn't drag in a make
 # dependency for what is purely a constant lookup.
 INITRAMFS_ADDR="$(awk -F':=' '/^INITRAMFS_ADDR[[:space:]]*:=/ {
-    gsub(/[[:space:]]/, "", $2); print $2; exit
+    sub(/#.*/, "", $2); gsub(/[[:space:]]/, "", $2); print $2; exit
 }' "$PROJECT_DIR/Makefile")"
 if [ -z "$INITRAMFS_ADDR" ]; then
     echo "mk_sd: failed to read INITRAMFS_ADDR from $PROJECT_DIR/Makefile" >&2
