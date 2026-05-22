@@ -266,10 +266,15 @@ cp "$FW_DIR/overlays/disable-bt.dtbo" "$BUNDLE_DIR/overlays/disable-bt.dtbo"
 # Read INITRAMFS_ADDR from the Makefile so config.txt's `initramfs`
 # directive stays in sync with the address asm sees via --defsym.
 # Single source of truth per D004; if the value ever moves, the
-# asm parser and the firmware load both follow.
-INITRAMFS_ADDR="$(make -s -C "$PROJECT_DIR" print-INITRAMFS_ADDR)"
+# asm parser and the firmware load both follow. Parsed in shell
+# instead of via `make print-INITRAMFS_ADDR` so the no-compiler
+# deploy path (Quick Start in README) doesn't drag in a make
+# dependency for what is purely a constant lookup.
+INITRAMFS_ADDR="$(awk -F':=' '/^INITRAMFS_ADDR[[:space:]]*:=/ {
+    gsub(/[[:space:]]/, "", $2); print $2; exit
+}' "$PROJECT_DIR/Makefile")"
 if [ -z "$INITRAMFS_ADDR" ]; then
-    echo "mk_sd: failed to read INITRAMFS_ADDR from Makefile" >&2
+    echo "mk_sd: failed to read INITRAMFS_ADDR from $PROJECT_DIR/Makefile" >&2
     exit 1
 fi
 

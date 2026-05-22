@@ -26,35 +26,16 @@ macOS (Homebrew):
 brew install python@3.12 mtools
 ```
 
-Then clone the repo and grab a prebuilt kernel from the
-[Releases page](https://github.com/edhodapp/ws_pi5/releases):
-
-```
-git clone https://github.com/edhodapp/ws_pi5.git
-cd ws_pi5
-git pull   # sanity check — if you cloned weeks ago, the build scripts
-           # may have moved underneath you. A fresh clone is a no-op;
-           # an old clone catches up. Either way takes seconds.
-wget -O kernel8.img https://github.com/edhodapp/ws_pi5/releases/latest/download/kernel8.img
-```
-
-The prebuilt is one-size-fits-all with the full 256 MiB content slab
-reserved (~268 MB total), so the resulting SD image will be ~265 MiB.
-For a smaller SD, jump to [Build from source](#build-from-source-developer-setup)
-below and use `scripts/mk_sd.sh --build` — that auto-sizes the slab
-to your site (typically a few MiB).
-
-Skip to [Deploy Your Site](#deploy-your-site) below.
+Then follow [Deploy Your Site](#deploy-your-site) below — that's the
+complete workflow end-to-end, starting from `wget` of a prebuilt
+kernel.
 
 ### Build from source (developer setup)
 
-If your clone is older than a couple of days, `git pull` first — the
-build scripts (Makefile knobs, mk_sd.sh, linker_hw.ld) and the
-ship-vs-dev address split moved several times this week. A stale
-clone produces SD images that quietly don't boot.
-
 Adds the AArch64 cross-assembler + QEMU for running the QEMU test
-suite, plus `pict` for the functional-test oracle.
+suite, plus `pict` for the functional-test oracle. After these
+prereqs are in place, see [Building](#building) below for the full
+developer workflow (build, package, ship, UART iteration).
 
 Debian / Ubuntu:
 
@@ -99,12 +80,16 @@ make test
 
 ### Capacity: how big can your site be?
 
+> Reference shared by both install paths. The no-compiler path gets
+> the one-size-fits-all 256 MiB prebuilt by default — read this if
+> you want to know what's actually in there, or skip ahead. The
+> build-from-source path uses [Size the kernel to your
+> site](#size-the-kernel-to-your-site) to pick a smaller slab.
+
 Static content is baked into the kernel image at package time — the
 packager copies files into a reserved region of `.data`, and the
 running kernel serves them from RAM. The reserved region is sized at
-**compile time**. Pick the size your site actually needs (see
-[Size the kernel to your site](#size-the-kernel-to-your-site)
-below) — don't pay for headroom you won't use.
+**compile time**.
 
 The default build (`make PLATFORM=pi4` with no `CONTENT_MAX`
 override) produces a kernel image of exactly **256 MiB** (clean power
@@ -327,34 +312,26 @@ hw_test/            Hardware test scripts for Pi 4 test fixture
 
 ## Deploy Your Site
 
-Three-step flow for putting your own static site on a Pi 4. No
-AArch64 cross-toolchain required if you use a prebuilt kernel from
-the Releases page; if you'd rather build from source, jump to
-[Building](#building) below.
+Four-step flow for putting your own static site on a Pi 4 with no
+AArch64 cross-toolchain. (If you'd rather build from source, see
+[Building](#building) below — that section is the full developer
+workflow end-to-end.)
 
-### 1. Get a kernel
+### 1. Download the prebuilt kernel
 
-Either download a prebuilt one (easiest) or build locally.
-
-Prebuilt — from the GitHub Releases page, grab `kernel8.img` for the
-release you want:
+Clone the repo for the helper scripts, then grab `kernel8.img` from
+the [Releases page](https://github.com/edhodapp/ws_pi5/releases):
 
 ```
-wget https://github.com/<owner>/ws_pi5/releases/download/<tag>/kernel8.img
+git clone https://github.com/edhodapp/ws_pi5.git
+cd ws_pi5
+wget -O kernel8.img https://github.com/edhodapp/ws_pi5/releases/latest/download/kernel8.img
 ```
 
-From source:
-
-```
-sudo apt install binutils-aarch64-linux-gnu   # Debian/Ubuntu; use brew on macOS
-make PLATFORM=pi4
-```
-
-One binary, one load address. The kernel always links at the
-firmware default address (0x80000) — the same image works for
-SD-direct boot and the UART chainloader path. The chainloader
-self-relocates from 0x80000 to 0x4000000 at startup so it can
-receive a fresh kernel into 0x80000 without overwriting itself.
+The prebuilt is one-size-fits-all with the full 256 MiB content
+slab reserved (~268 MB total), so the resulting SD image is ~265 MiB.
+That fits on any modern SD card. (For a kernel sized to your site
+instead, see [Building](#building).)
 
 ### 2. Package your site into the kernel
 
@@ -506,79 +483,70 @@ Exit codes: `0` valid, `1` invalid (per-error diagnostics on stderr),
 
 ## Building
 
-Requires the AArch64 cross-toolchain and QEMU:
+Full developer workflow end-to-end: build the kernel, package a
+site, ship it. Prereqs (cross-toolchain, QEMU, PICT, Python venv)
+are covered above in [Build from
+source](#build-from-source-developer-setup).
+
+### 1. Build the kernel
+
+For real hardware:
 
 ```
-sudo apt install gcc-aarch64-linux-gnu qemu-system-arm qemu-user-static
+make PLATFORM=pi4
 ```
 
-For functional tests, build [PICT](https://github.com/microsoft/pict) (Microsoft's pairwise/combinatorial testing tool) from source:
+Produces `kernel8.img` — by default the 256 MiB SIZE_LOCKED layout
+(1 MiB code reserve + 255 MiB appliance slab). To size the slab to
+your actual site instead, see [Size the kernel to your
+site](#size-the-kernel-to-your-site).
+
+For QEMU smoke tests:
 
 ```
-sudo apt install cmake
-git clone --depth 1 https://github.com/microsoft/pict.git /tmp/pict-build
-cd /tmp/pict-build && cmake -DCMAKE_INSTALL_PREFIX=$HOME/.local -B build && cmake --build build -j$(nproc)
-cp /tmp/pict-build/build/cli/pict $HOME/.local/bin/
+make           # raspi3b, BCM2837 peripheral base; tests platform-independent lib/
+make test      # unit tests on QEMU
 ```
 
-### Build Targets
+The kernel always links at the firmware default address (0x80000).
+The same image works for SD-direct boot and the UART chainloader
+path; the chainloader self-relocates from 0x80000 to 0x4000000 at
+startup so it can receive a fresh kernel into 0x80000 without
+overwriting itself.
+
+### 2. Package your site
+
+Same packager as the no-compiler path:
+
+```
+scripts/mk_appliance.py kernel8.img path/to/your/site/ appliance.img
+```
+
+### 3. Write an SD image, edit `network.conf`, boot
+
+Identical to the no-compiler path — the SD imaging, `network.conf`
+edit, and flash steps don't change just because the kernel came
+out of `make` instead of `wget`. See [Write an SD image and
+boot](#3-write-an-sd-image-and-boot) and [Edit
+`network.conf`](#4-edit-networkconf-for-your-network) in [Deploy
+Your Site](#deploy-your-site) above.
+
+For dev iteration you can skip the SD entirely and push a kernel
+over UART — see the chainloader workflow below.
+
+### Build targets
 
 | Target | Build Command | Test Command | Notes |
 |--------|---------------|--------------|-------|
 | **Pi 4** (QEMU test harness) | `make` | `make test` | Default. Runs the shared protocol-stack tests on QEMU raspi3b (BCM2837 peripheral base at 0x3F000000). Tests the platform-independent `lib/` code without needing real hardware. |
-| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. Development flashing via UART chainloader; production via SD-card boot (see `scripts/mk_sd.sh`). |
+| **Pi 4** (hardware) | `make PLATFORM=pi4` | `make PLATFORM=pi4 && HW_TEST=1 .venv/bin/pytest hw_test/` | Real hardware. Pi 4 peripheral base at 0xFE000000, UART0 on GPIO 14/15, GENET native Gigabit Ethernet. Development flashing via UART chainloader; production via SD-card boot. |
+| Functional tests | — | `make test-functional` | PICT-driven combinatorial tests. |
+| UART chainloader | `make chainload` | — | Dev-only — see [Pi 4 Development Workflow](#pi-4-development-workflow). |
+| Clean | `make clean` | — | |
 
-Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All tests pass on QEMU 7.2, 8.2, and 11.0-rc0.
-
-Build the kernel image:
-
-```
-make
-```
-
-Run the unit test suite:
-
-```
-make test
-```
-
-Run exhaustive functional tests:
-
-```
-make test-functional
-```
-
-Build the UART chainloader for Pi 4 development:
-
-```
-make chainload
-```
-
-Assemble a Pi 4 SD-boot bundle (for shipping a packaged appliance
-without a UART host):
-
-```
-make PLATFORM=pi4                                        # kernel linked at 0x80000
-scripts/mk_appliance.py kernel8.img public/ appliance.img
-scripts/mk_sd.sh appliance.img sd_boot/
-# Then: cp -r sd_boot/* /media/<user>/boot/
-```
-
-`mk_sd.sh` writes a config.txt that boots cleanly on a stock Pi 4:
-`linker_hw.ld` targets 0x80000 (the firmware default kernel address),
-so no `kernel_address=` override is needed. It also bundles
-`overlays/disable-bt.dtbo` — without that overlay file present on the
-SD, the firmware silently keeps PL011 wired to the BT chip and the
-kernel's UART debug output disappears (an earlier session lost a full
-day to this; see `debug_log_0x80000.md`). It auto-fetches the Pi 4 GPU
-firmware blobs via `hw_test/uart_test/sdcard/download_firmware.sh` on
-first use.
-
-Clean build artifacts:
-
-```
-make clean
-```
+Test kernels run on QEMU `raspi3b` with MMU enabled (identity-mapped
+page tables, Normal cacheable RAM, Device-nGnRnE peripherals). All
+tests pass on QEMU 7.2, 8.2, and 11.0-rc0.
 
 ### Pi 4 Development Workflow
 
